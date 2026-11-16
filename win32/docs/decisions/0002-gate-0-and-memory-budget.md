@@ -11,8 +11,7 @@ docs/measurements/2026-11-16-8h.csv, stopped early by decision):
 Decision: pass. Memory and CPU targets are met with margin, so the plan does
 not fall back to Tauri.
 
-Not measured and moved to F1: UI Automation cost on Chrome/Edge. The plan's
-fallback still applies (URL off, tab title only if it is heavy).
+UI Automation cost on Chrome/Edge was measured afterwards (F0): see 0003.
 
 ## Memory budget
 The 5 MB private-memory target was set before any measurement. The monitor
