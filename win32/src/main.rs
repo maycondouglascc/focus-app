@@ -7,6 +7,7 @@
 #![windows_subsystem = "console"]
 
 mod appinfo;
+mod claude;
 mod db;
 mod presence;
 mod recorder;
@@ -440,6 +441,7 @@ fn main() {
         }
     };
     let threshold = idle_threshold_ms(&db);
+    claude::spawn(path.clone());
     STATE.with(|s| {
         *s.borrow_mut() = Some(State {
             db,

@@ -84,6 +84,17 @@ pub struct Activity {
     pub end: i64,
 }
 
+/// Progress of one Claude Code session log, as in the `claude_sessions` table.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ClaudeSession {
+    /// Started by a program through the Agent SDK, not typed by the user.
+    pub automated: bool,
+    pub project: String,
+    pub title: String,
+    pub last_ts: i64,
+    pub activity_id: Option<i64>,
+}
+
 pub struct Db {
     conn: Connection,
 }
@@ -211,6 +222,84 @@ impl Db {
             self.set_setting(MAX_DURATION_KEY, &duration.to_string())?;
         }
         Ok(())
+    }
+
+    pub fn set_activity_detail(&self, id: i64, detail: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE activity SET detail = ? WHERE id = ?",
+            params![detail, id],
+        )?;
+        Ok(())
+    }
+
+    // ── Claude Code logs ───────────────────────────────────────────
+
+    pub fn claude_session(&self, id: &str) -> rusqlite::Result<Option<ClaudeSession>> {
+        self.conn
+            .query_row(
+                "SELECT automated, project, title, last_ts, activity_id FROM claude_sessions WHERE session_id = ?",
+                [id],
+                |r| {
+                    Ok(ClaudeSession {
+                        automated: r.get::<_, i64>(0)? != 0,
+                        project: r.get(1)?,
+                        title: r.get(2)?,
+                        last_ts: r.get(3)?,
+                        activity_id: r.get(4)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    pub fn save_claude_session(&self, id: &str, s: &ClaudeSession) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO claude_sessions (session_id, automated, project, title, last_ts, activity_id)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(session_id) DO UPDATE SET automated = excluded.automated,
+               project = excluded.project, title = excluded.title,
+               last_ts = excluded.last_ts, activity_id = excluded.activity_id",
+            params![id, s.automated as i64, s.project, s.title, s.last_ts, s.activity_id],
+        )?;
+        Ok(())
+    }
+
+    /// (byte offset, mtime in ms) already consumed for a log file.
+    pub fn claude_file(&self, path: &str) -> rusqlite::Result<Option<(i64, i64)>> {
+        self.conn
+            .query_row(
+                "SELECT offset, mtime FROM claude_files WHERE path = ?",
+                [path],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+    }
+
+    pub fn save_claude_file(&self, path: &str, offset: i64, mtime: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO claude_files (path, offset, mtime) VALUES (?, ?, ?)
+             ON CONFLICT(path) DO UPDATE SET offset = excluded.offset, mtime = excluded.mtime",
+            params![path, offset, mtime],
+        )?;
+        Ok(())
+    }
+
+    /// Runs `f` in one transaction: many log lines become one disk sync.
+    pub fn in_transaction<T, E: From<rusqlite::Error>>(
+        &self,
+        f: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
+        self.conn.execute_batch("BEGIN")?;
+        match f() {
+            Ok(v) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(v)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
     }
 
     // ── Settings (values are JSON text, as in the Electron app) ──────────
