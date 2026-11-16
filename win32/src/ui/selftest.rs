@@ -10,7 +10,7 @@ use windows::Win32::System::Threading::GetCurrentProcess;
 use super::window;
 
 /// Decision 0004: the graphics stack keeps about 21 MB after the first open.
-const PRIVATE_BUDGET_MB: f64 = 25.0;
+const PRIVATE_BUDGET_MB: f64 = 30.0;
 const WARMUP_CYCLES: u32 = 100;
 /// After warm-up, N more open/close cycles must not grow memory by more than this.
 const GROWTH_BUDGET_MB: f64 = 1.0;

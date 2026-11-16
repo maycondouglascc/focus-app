@@ -1,12 +1,14 @@
 //! Native UI. Everything here exists only while the window is open: the window
 //! is created on open and destroyed on close, with all of its resources.
 
+pub mod chrome;
 pub mod frame;
 pub mod render;
 pub mod selftest;
 pub mod strings;
 pub mod text;
 pub mod theme;
+pub mod tree;
 pub mod window;
 
 use windows::Win32::UI::HiDpi::{

@@ -35,6 +35,7 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows_numerics::Vector2;
 
+use super::chrome::{Chrome, TITLE_SIZE};
 use super::frame::{BUTTON_DIP, TITLE_BAR_DIP};
 use super::strings;
 use super::text::{TextSystem, Weight};
@@ -133,6 +134,7 @@ pub struct Renderer {
     // Keeps the device objects alive while this renderer exists.
     _gfx: Rc<Gfx>,
     text: Rc<TextSystem>,
+    chrome: Chrome,
     swap: IDXGISwapChain1,
     ctx: ID2D1DeviceContext,
     brush: ID2D1SolidColorBrush,
@@ -203,6 +205,7 @@ impl Renderer {
             Ok(Self {
                 _gfx: gfx,
                 text,
+                chrome: Chrome::new(),
                 swap,
                 ctx,
                 brush,
@@ -251,14 +254,19 @@ impl Renderer {
             self.ctx.Clear(Some(&color(theme::SURFACE)));
             self.fill(0.0, 0.0, w, TITLE_BAR_DIP, theme::TITLE_BAR);
             self.caption_buttons(w, hover);
+            self.chrome.layout(w, &self.text);
+            let t = self.chrome.title_rect();
             self.draw_text(
                 strings::APP_NAME,
-                12.0,
-                TITLE_BAR_DIP,
-                12.0,
-                w,
+                TITLE_SIZE,
                 Weight::SemiBold,
                 theme::TEXT,
+                D2D_RECT_F {
+                    left: t.x,
+                    top: t.y,
+                    right: t.x + t.w,
+                    bottom: t.y + t.h,
+                },
             );
             let end = self.ctx.EndDraw(None, None);
             self.ctx.SetTarget(None);
@@ -281,19 +289,8 @@ impl Renderer {
         );
     }
 
-    /// Draws one line of text at (`x`, 0) inside a box `h` DIPs tall, clipped
-    /// to `max_w`, vertically centered.
-    #[allow(clippy::too_many_arguments)]
-    unsafe fn draw_text(
-        &self,
-        text: &str,
-        size: f32,
-        h: f32,
-        x: f32,
-        max_w: f32,
-        weight: Weight,
-        c: Color,
-    ) {
+    /// Draws one line of text inside `rect`, clipped to it.
+    unsafe fn draw_text(&self, text: &str, size: f32, weight: Weight, c: Color, rect: D2D_RECT_F) {
         let Ok(format) = self.text.format(size, weight) else {
             return;
         };
@@ -302,12 +299,7 @@ impl Renderer {
         self.ctx.DrawText(
             &wide,
             &format,
-            &D2D_RECT_F {
-                left: x,
-                top: 0.0,
-                right: max_w,
-                bottom: h,
-            },
+            &rect,
             &self.brush,
             D2D1_DRAW_TEXT_OPTIONS_CLIP,
             DWRITE_MEASURING_MODE_NATURAL,

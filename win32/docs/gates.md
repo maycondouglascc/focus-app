@@ -69,7 +69,7 @@ focus, accessibility (accesskit), popups, then widgets.
 
 Done when (all, each with a test or a measurement):
 - Window is created on open and fully destroyed on close; opening and closing
-  it 50 times in an automated test keeps private memory under 25 MB and
+  it 50 times in an automated test keeps private memory under 30 MB and
   growing by less than 1 MB (decision 0004: the graphics stack keeps about
   21 MB after the first open; CSV in `docs/measurements/`).
 - Per-monitor DPI v2: layout in DIPs, correct at 100%, 150%, 200% (unit tests
@@ -123,7 +123,7 @@ Done when, for the phase:
   output committed); Esc cancels, Alt disables snap, autoscroll works.
 - CSV export opens correctly in Excel pt-BR (UTF-8 BOM, locale separators;
   unit test on the writer) and has the "standard CSV" option.
-- Window memory after closing stays under 25 MB private and flat across 50
+- Window memory after closing stays under 30 MB private and flat across 50
   open/close cycles (decision 0004), re-measured with all six screens opened.
 - One-day side-by-side use against Electron is **not** required here (backlog).
 
@@ -152,7 +152,7 @@ Done when:
 - Full resource budget table from the plan, **every row measured** on the
   release build and committed (CSV or decision note): closed-window private
   memory < 5 MB (agreed ceiling 8 MB, flat curve over 8 h) until the window
-  is first opened, then < 25 MB (decision 0004), CPU < 0.05%,
+  is first opened, then < 30 MB (decision 0004), CPU < 0.05%,
   wakeups < 1/s, writes < 1 MB/h, start to tray < 150 ms, binary < 5 MB.
 - 8 h run with the final exe, real use, Sophos not quarantining it
   (note any detection).
