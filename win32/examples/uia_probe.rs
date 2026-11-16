@@ -11,7 +11,7 @@
 use std::time::{Duration, Instant};
 
 use windows::core::{Interface, BOOL};
-use windows::Win32::Foundation::{CloseHandle, FILETIME, HWND, LPARAM};
+use windows::Win32::Foundation::{CloseHandle, FILETIME, HWND, LPARAM, RECT};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
@@ -24,11 +24,12 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTreeWalker,
-    IUIAutomationValuePattern, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
-    UIA_ValuePatternId,
+    IUIAutomationValuePattern, UIA_ComboBoxControlTypeId, UIA_DocumentControlTypeId,
+    UIA_EditControlTypeId, UIA_TextControlTypeId, UIA_ValuePatternId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowThreadProcessId, InternalGetWindowText, IsWindowVisible,
+    EnumChildWindows, EnumWindows, GetClassNameW, GetWindowRect, GetWindowThreadProcessId,
+    InternalGetWindowText, IsWindowVisible,
 };
 
 fn filetime_100ns(ft: FILETIME) -> u64 {
@@ -133,17 +134,24 @@ fn sample(image: &str, root: Option<u32>) -> Sample {
 struct Find {
     pids: Vec<u32>,
     hwnd: Option<HWND>,
+    area: i64,
 }
 
+/// Picks the largest visible titled window of the browser: popups such as
+/// Chrome's translate bubble are separate top-level windows and must not win.
 unsafe extern "system" fn pick_window(h: HWND, lparam: LPARAM) -> BOOL {
     let f = &mut *(lparam.0 as *mut Find);
     let mut pid = 0u32;
     GetWindowThreadProcessId(h, Some(&mut pid));
     if f.pids.contains(&pid) && IsWindowVisible(h).as_bool() {
         let mut buf = [0u16; 64];
-        if InternalGetWindowText(h, &mut buf) > 0 {
-            f.hwnd = Some(h);
-            return BOOL(0);
+        let mut r = RECT::default();
+        if InternalGetWindowText(h, &mut buf) > 0 && GetWindowRect(h, &mut r).is_ok() {
+            let area = (r.right - r.left) as i64 * (r.bottom - r.top) as i64;
+            if area > f.area {
+                f.area = area;
+                f.hwnd = Some(h);
+            }
         }
     }
     BOOL(1)
@@ -165,8 +173,23 @@ fn find_edit(
     while let Some(c) = child {
         *budget = budget.saturating_sub(1);
         let kind = unsafe { c.CurrentControlType().ok() };
-        if kind == Some(UIA_EditControlTypeId) {
+        // Chrome and Edge use an Edit with a value. Firefox uses a ComboBox whose
+        // value is not exposed: the address is the Name of its Text child.
+        let has_value = || unsafe { c.GetCurrentPattern(UIA_ValuePatternId) }.is_ok();
+        if kind == Some(UIA_EditControlTypeId) && has_value() {
             return Some(c);
+        }
+        if kind == Some(UIA_ComboBoxControlTypeId) {
+            if has_value() {
+                return Some(c);
+            }
+            let mut t = unsafe { walker.GetFirstChildElement(&c).ok() };
+            while let Some(x) = t {
+                if unsafe { x.CurrentControlType().ok() } == Some(UIA_TextControlTypeId) {
+                    return Some(x);
+                }
+                t = unsafe { walker.GetNextSiblingElement(&x).ok() };
+            }
         }
         if kind != Some(UIA_DocumentControlTypeId) {
             if let Some(found) = find_edit(walker, &c, depth + 1, budget) {
@@ -181,6 +204,39 @@ fn find_edit(
     None
 }
 
+unsafe extern "system" fn collect(h: HWND, lparam: LPARAM) -> BOOL {
+    (*(lparam.0 as *mut Vec<HWND>)).push(h);
+    BOOL(1)
+}
+
+/// Prints control type and name of the browser UI (never the page Document):
+/// to learn how a browser lays out its toolbar. Names of UI elements only.
+fn dump(walker: &IUIAutomationTreeWalker, el: &IUIAutomationElement, depth: u32, budget: &mut u32) {
+    if depth > 12 || *budget == 0 {
+        return;
+    }
+    let mut child = unsafe { walker.GetFirstChildElement(el).ok() };
+    while let Some(c) = child {
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
+        let kind = unsafe { c.CurrentControlType().ok() };
+        let name = unsafe { c.CurrentName().map(|n| n.to_string()).unwrap_or_default() };
+        let name: String = name.chars().take(40).collect();
+        println!(
+            "{}{} {:?}",
+            "  ".repeat(depth as usize),
+            kind.map(|k| k.0).unwrap_or(0),
+            name
+        );
+        if kind != Some(UIA_DocumentControlTypeId) {
+            dump(walker, &c, depth + 1, budget);
+        }
+        child = unsafe { walker.GetNextSiblingElement(&c).ok() };
+    }
+}
+
 /// Reads the address bar: (latency, url chars, scheme) or None if not found.
 fn read_url(auto: &IUIAutomation, hwnd: HWND) -> (Duration, Option<(usize, String)>) {
     let t = Instant::now();
@@ -189,12 +245,14 @@ fn read_url(auto: &IUIAutomation, hwnd: HWND) -> (Duration, Option<(usize, Strin
         let walker = auto.ControlViewWalker().ok()?;
         let mut budget = 600u32;
         let edit = find_edit(&walker, &root, 0, &mut budget)?;
-        let pat: IUIAutomationValuePattern = edit
+        let v = match edit
             .GetCurrentPattern(UIA_ValuePatternId)
-            .ok()?
-            .cast()
-            .ok()?;
-        let v = pat.CurrentValue().ok()?.to_string();
+            .ok()
+            .and_then(|p| p.cast::<IUIAutomationValuePattern>().ok())
+        {
+            Some(pat) => pat.CurrentValue().ok()?.to_string(),
+            None => edit.CurrentName().ok()?.to_string(),
+        };
         let scheme = v
             .split_once("://")
             .map(|(s, _)| s.to_string())
@@ -273,7 +331,11 @@ fn main() {
     let root: Option<u32> = args.get(5).and_then(|s| s.parse().ok());
 
     let pids = pids_named(&image, root);
-    let mut find = Find { pids, hwnd: None };
+    let mut find = Find {
+        pids,
+        hwnd: None,
+        area: 0,
+    };
     unsafe {
         let _ = EnumWindows(Some(pick_window), LPARAM(&mut find as *mut _ as isize));
     }
@@ -287,6 +349,34 @@ fn main() {
     let auto: IUIAutomation =
         unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }.expect("UIA");
 
+    if args.get(6).map(String::as_str) == Some("dump") {
+        let root_el = unsafe { auto.ElementFromHandle(hwnd) }.expect("element");
+        let walker = unsafe { auto.ControlViewWalker() }.expect("walker");
+        let mut budget = 1500;
+        dump(&walker, &root_el, 0, &mut budget);
+        // Also each child window (browsers often host their UI in one).
+        let mut kids: Vec<HWND> = Vec::new();
+        unsafe {
+            let _ = EnumChildWindows(
+                Some(hwnd),
+                Some(collect),
+                LPARAM(&mut kids as *mut _ as isize),
+            );
+        }
+        for k in kids {
+            let mut class = [0u16; 64];
+            let n = unsafe { GetClassNameW(k, &mut class) };
+            println!(
+                "-- child window class {}",
+                String::from_utf16_lossy(&class[..n.max(0) as usize])
+            );
+            if let Ok(el) = unsafe { auto.ElementFromHandle(k) } {
+                let mut b = 400;
+                dump(&walker, &el, 1, &mut b);
+            }
+        }
+        return;
+    }
     println!(
         "browser: {image}, {baseline}s baseline, {probe}s probing (1 query/s), {after}s after"
     );
