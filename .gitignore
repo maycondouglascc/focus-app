@@ -94,3 +94,12 @@ out/
 
 # Local Claude Code config
 .claude/
+
+# Focus win32 (never commit real window titles/URLs)
+win32/target/
+Focus.exe
+*.db
+*.db-wal
+*.db-shm
+*.dmp
+crashes/
