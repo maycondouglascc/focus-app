@@ -9,8 +9,8 @@ use windows::Win32::System::Threading::GetCurrentProcess;
 
 use super::window;
 
-/// Gate 2: after closing, private memory is back under 5 MB.
-const PRIVATE_BUDGET_MB: f64 = 5.0;
+/// Decision 0004: the graphics stack keeps about 21 MB after the first open.
+const PRIVATE_BUDGET_MB: f64 = 25.0;
 /// Opening and closing 50 times must not grow memory by more than this.
 const GROWTH_BUDGET_MB: f64 = 1.0;
 

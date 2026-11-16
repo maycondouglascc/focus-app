@@ -1,7 +1,9 @@
 # 0004: Direct3D and Direct2D memory stays resident after the window closes
 
-Status: **open, needs the user's decision** (gate 2 criterion "private memory
-back under 5 MB after closing the window" fails as designed).
+Status: **decided 2026-11-16: option 2** (keep one process, accept about 21 MB
+private after the first time the window is opened, until the app restarts).
+Gate 2's criterion became "under 25 MB and flat over 50 open/close cycles".
+Before the window is first opened the background budget (8 MB) still holds.
 
 ## Measurement
 `focus.exe --ui-cycle N` (release build), private memory of the process. The

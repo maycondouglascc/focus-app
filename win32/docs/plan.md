@@ -242,7 +242,7 @@ Cada meta abaixo vira um passo de um roteiro de verificação local; uma versão
 | Escrita em disco | < 1 MB por hora | Contadores de E/S do processo no teste de 8 h |
 | Janela aberta, parada | < 60 MB working set; 0% CPU sem animação | Abrir as 6 telas, esperar 1 min, medir |
 | Arrastar no calendário | 60 quadros por segundo a 4K e 200% | Contador de quadros em build de diagnóstico |
-| Memória após fechar a janela | Volta a < 5 MB privados em 10 s | Abrir e fechar a janela 50 vezes no teste automatizado |
+| Memória após fechar a janela | Fica < 25 MB privados e plana (decisão 0004: a pilha gráfica retém ~21 MB após a primeira abertura) | Abrir e fechar a janela 50 vezes no teste automatizado |
 | Partida até a bandeja | < 150 ms | Timestamp no log |
 | Abrir a janela (fria) | < 200 ms até o primeiro quadro | Timestamp no log |
 | Tamanho do binário | < 5 MB | O script de build avisa acima disso |
