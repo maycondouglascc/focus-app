@@ -34,6 +34,7 @@ fn pump_for(d: Duration) {
 
 pub fn cycle(n: u32) -> i32 {
     super::init();
+    let baseline = private_mb();
     // One warm-up cycle so one-time allocations (window class, DLLs) do not
     // count as growth.
     window::open();
@@ -41,6 +42,7 @@ pub fn cycle(n: u32) -> i32 {
     window::close();
     pump_for(Duration::from_millis(100));
     let start = private_mb();
+    println!("baseline before any window {baseline:.2} MB, after warm-up cycle {start:.2} MB");
     let t = Instant::now();
     let mut first_open_ms = 0.0;
     for i in 0..n {
@@ -70,5 +72,21 @@ pub fn cycle(n: u32) -> i32 {
         return 1;
     }
     println!("OK");
+    0
+}
+
+/// `focus.exe --ui-show SECONDS`: shows the window and keeps it alive, to look
+/// at it or drive it by hand.
+pub fn show(seconds: u64) -> i32 {
+    super::init();
+    if !window::open() {
+        return 1;
+    }
+    let end = Instant::now() + Duration::from_secs(seconds);
+    while Instant::now() < end && window::is_open() {
+        window::pump();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    window::close();
     0
 }

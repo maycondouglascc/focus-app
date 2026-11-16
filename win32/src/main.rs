@@ -437,6 +437,10 @@ fn main() {
             let n = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(50);
             std::process::exit(ui::selftest::cycle(n));
         }
+        if let Some(i) = args.iter().position(|a| a == "--ui-show") {
+            let n = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(10);
+            std::process::exit(ui::selftest::show(n));
+        }
     }
     let path = db_path_from_args();
     if let Some(dir) = path.parent() {

@@ -2,7 +2,9 @@
 //! is created on open and destroyed on close, with all of its resources.
 
 pub mod frame;
+pub mod render;
 pub mod selftest;
+pub mod theme;
 pub mod window;
 
 use windows::Win32::UI::HiDpi::{
