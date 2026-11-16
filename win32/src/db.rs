@@ -128,6 +128,11 @@ impl Db {
         Ok(v as usize)
     }
 
+    /// Folds the WAL back into the main file (shutdown, end of session).
+    pub fn checkpoint(&self) -> rusqlite::Result<()> {
+        self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+    }
+
     /// Called before closing the connection.
     pub fn optimize(&self) -> rusqlite::Result<()> {
         self.conn.execute_batch("PRAGMA optimize")

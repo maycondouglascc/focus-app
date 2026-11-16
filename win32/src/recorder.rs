@@ -19,6 +19,7 @@ pub struct Info {
 
 struct Run {
     id: i64,
+    start: i64,
     key: String,
     detail: String,
     end: i64,
@@ -52,6 +53,7 @@ impl Recorder {
         })?;
         self.current = Some(Run {
             id,
+            start: at,
             key: info.key,
             detail: info.detail,
             end: at,
@@ -70,10 +72,16 @@ impl Recorder {
         Ok(())
     }
 
-    /// Ends the current run at `at` (switch, lock, suspend, shutdown).
+    /// Ends the current run at `at` (switch, lock, suspend, shutdown). `at`
+    /// may be earlier than the last flush: idle starts at the last input, so
+    /// the end is moved back, never before the run's own start.
     pub fn close(&mut self, db: &Db, at: i64) -> rusqlite::Result<()> {
-        self.tick(db, at)?;
-        self.current = None;
+        if let Some(run) = self.current.take() {
+            let end = at.max(run.start);
+            if end != run.end {
+                db.set_activity_end(run.id, end)?;
+            }
+        }
         Ok(())
     }
 }
@@ -138,6 +146,25 @@ mod tests {
         r.tick(&db, 50_000).unwrap();
         r.tick(&db, 40_000).unwrap();
         assert_eq!(db.list_activity(0, 100_000).unwrap()[0].end, 50_000);
+    }
+
+    #[test]
+    fn close_moves_the_end_back_for_retroactive_idle() {
+        let db = Db::open_in_memory().unwrap();
+        let mut r = Recorder::default();
+        r.on_focus(&db, info("code", "a.rs"), 10_000).unwrap();
+        r.tick(&db, 70_000).unwrap(); // flushed while the user was already away
+        r.close(&db, 40_000).unwrap(); // last input was at 40 s
+        assert_eq!(db.list_activity(0, 100_000).unwrap()[0].end, 40_000);
+    }
+
+    #[test]
+    fn close_never_ends_before_the_start() {
+        let db = Db::open_in_memory().unwrap();
+        let mut r = Recorder::default();
+        r.on_focus(&db, info("code", "a.rs"), 10_000).unwrap();
+        r.close(&db, 5_000).unwrap();
+        assert_eq!(db.list_activity(0, 100_000).unwrap()[0].end, 10_000);
     }
 
     #[test]
