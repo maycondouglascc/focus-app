@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import type { ForgeConfig } from '@electron-forge/shared-types';
 import { MakerZIP } from '@electron-forge/maker-zip';
 import { VitePlugin } from '@electron-forge/plugin-vite';
@@ -15,6 +17,17 @@ const config: ForgeConfig = {
     extraResource: ['./assets'],
   },
   rebuildConfig: {},
+  hooks: {
+    // The Vite plugin bundles JS only and leaves native modules out of the package (better-sqlite3 is `external`).
+    // Copy it and its runtime dependencies into the app, using the binary already built for Electron by `npm start`.
+    packageAfterCopy: async (_config, buildPath) => {
+      const copy = (from: string) =>
+        fs.cpSync(path.join(__dirname, 'node_modules', from), path.join(buildPath, 'node_modules', from), { recursive: true });
+      for (const f of ['package.json', 'LICENSE', 'lib', 'build/Release/better_sqlite3.node']) copy(`better-sqlite3/${f}`);
+      copy('bindings');
+      copy('file-uri-to-path');
+    },
+  },
   // macOS only (SF Symbols, Terminal sign-in, hiddenInset title bar).
   makers: [new MakerZIP({}, ['darwin'])],
   plugins: [
