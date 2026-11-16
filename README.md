@@ -50,9 +50,13 @@ Focus puts two streams side by side: the time you *log* (projects, entries, bill
 
 ## Install
 
-Download `Focus-darwin-arm64-*.zip` from [Releases](../../releases), unzip it and move **Focus.app** to Applications.
+Requires a Mac with Apple Silicon (M1 or later).
 
-The app isn't notarized yet, so macOS blocks the first launch. Right-click **Focus.app**, choose **Open**, then **Open** again. Or run:
+1. Download `Focus-darwin-arm64-*.zip` from the [latest release](../../releases/latest), unzip it and move **Focus.app** to Applications.
+2. Open it. Focus isn't signed with an Apple developer certificate yet, so macOS says it can't verify the app. Click **Done**.
+3. Open **System Settings → Privacy & Security**, scroll down and click **Open Anyway** next to Focus, then confirm.
+
+You only do this once. Prefer the terminal? This does the same:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Focus.app

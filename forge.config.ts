@@ -1,5 +1,7 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { rebuild } from '@electron/rebuild';
 import type { ForgeConfig } from '@electron-forge/shared-types';
 import { MakerZIP } from '@electron-forge/maker-zip';
 import { VitePlugin } from '@electron-forge/plugin-vite';
@@ -19,13 +21,26 @@ const config: ForgeConfig = {
   rebuildConfig: {},
   hooks: {
     // The Vite plugin bundles JS only and leaves native modules out of the package (better-sqlite3 is `external`).
-    // Copy it and its runtime dependencies into the app, using the binary already built for Electron by `npm start`.
-    packageAfterCopy: async (_config, buildPath) => {
+    // Compile better-sqlite3 for this Electron (a fresh `npm install` builds it for Node), then copy it and its
+    // runtime dependencies into the app.
+    packageAfterCopy: async (_config, buildPath, electronVersion, _platform, arch) => {
+      await rebuild({ buildPath: __dirname, electronVersion, arch, onlyModules: ['better-sqlite3'], force: true });
       const copy = (from: string) =>
         fs.cpSync(path.join(__dirname, 'node_modules', from), path.join(buildPath, 'node_modules', from), { recursive: true });
       for (const f of ['package.json', 'LICENSE', 'lib', 'build/Release/better_sqlite3.node']) copy(`better-sqlite3/${f}`);
       copy('bindings');
       copy('file-uri-to-path');
+    },
+    // Packaging edits Info.plist and flips fuses after Electron's own ad-hoc signature, which leaves it invalid: a
+    // downloaded copy then reads as "damaged". Re-sign the finished bundle ad hoc so macOS sees a consistent app.
+    // (No Developer ID yet, so it is still unnotarized: first launch needs Privacy & Security → Open Anyway.)
+    postPackage: async (_config, { outputPaths, platform }) => {
+      if (platform !== 'darwin') return;
+      for (const dir of outputPaths) {
+        const app = path.join(dir, 'Focus.app');
+        execFileSync('codesign', ['--force', '--deep', '--sign', '-', app]);
+        execFileSync('codesign', ['--verify', '--deep', '--strict', app]);
+      }
     },
   },
   // macOS only (SF Symbols, Terminal sign-in, hiddenInset title bar).
