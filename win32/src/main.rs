@@ -11,6 +11,7 @@ mod claude;
 mod db;
 mod presence;
 mod recorder;
+mod ui;
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -429,6 +430,14 @@ fn idle_threshold_ms(db: &db::Db) -> u64 {
 }
 
 fn main() {
+    // `--ui-cycle N`: window open/close leak test (F2 gate); no recording.
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if let Some(i) = args.iter().position(|a| a == "--ui-cycle") {
+            let n = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(50);
+            std::process::exit(ui::selftest::cycle(n));
+        }
+    }
     let path = db_path_from_args();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
