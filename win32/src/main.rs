@@ -345,6 +345,8 @@ fn check_idle() {
     } else if idle < threshold {
         set_reason(IDLE, false, began);
         arm_idle_timer(false);
+        // Record the window that is already in the foreground at startup.
+        with_state(|st| resync(st, now_ms()));
     }
 }
 
