@@ -4,6 +4,8 @@
 
 use std::cell::Cell;
 
+mod db;
+
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, HWND, MAX_PATH};
 use windows::Win32::System::Threading::{
