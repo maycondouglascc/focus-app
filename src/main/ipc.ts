@@ -74,7 +74,7 @@ export function registerHandlers(onTimerChange: () => void) {
       if (next.monitorEnabled) startMonitor(() => broadcast('activity'));
       else stopMonitor();
     }
-    if (!before.claudeSessions && next.claudeSessions) void scanClaude().then((c) => c && broadcast('activity'));
+    if ((!before.claudeSessions || !before.onboarded) && next.claudeSessions && next.onboarded) void scanClaude().then((c) => c && broadcast('activity'));
     return next;
   });
 }

@@ -71,6 +71,10 @@ const MIGRATIONS: string[] = [
    DELETE FROM activity WHERE kind = 'claude';
    DELETE FROM claude_files;
    DELETE FROM claude_sessions;`,
+  // The first-run welcome: an install that already has data has seen the app, so it skips it.
+  `INSERT OR IGNORE INTO settings (key, value)
+     SELECT 'onboarded', 'true'
+     WHERE EXISTS (SELECT 1 FROM projects) OR EXISTS (SELECT 1 FROM entries) OR EXISTS (SELECT 1 FROM activity);`,
 ];
 
 export function initDb() {
@@ -309,6 +313,7 @@ const DEFAULTS = (): Settings => ({
   browserTabs: true,
   claudeSessions: true,
   dayStartHour: 8,
+  onboarded: false,
 });
 
 export const settings = {

@@ -58,6 +58,8 @@ export interface Settings {
   claudeSessions: boolean;
   /** Hour the week view scrolls to when it opens. */
   dayStartHour: number;
+  /** Set when the first-run welcome is finished. Nothing is recorded before that. */
+  onboarded: boolean;
 }
 
 export interface MonitorStatus {

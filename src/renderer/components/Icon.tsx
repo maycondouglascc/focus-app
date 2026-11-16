@@ -24,7 +24,13 @@ export type IconName =
   | 'square.and.arrow.down'
   | 'trash'
   | 'calendar'
-  | 'chart.bar';
+  | 'chart.bar'
+  | 'macwindow'
+  | 'globe'
+  | 'terminal'
+  | 'lock'
+  | 'exclamationmark.triangle'
+  | 'arrow.clockwise';
 
 type Props = Omit<SVGProps<SVGSVGElement>, 'name'> & { name: IconName; size?: number };
 

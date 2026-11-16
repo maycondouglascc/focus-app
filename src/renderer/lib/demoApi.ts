@@ -23,7 +23,7 @@ export function createDemoApi(): FocusApi {
   ];
   const entries: TimeEntry[] = [];
   const activity: Activity[] = [];
-  let settings: Settings = { currency: 'USD', monitorEnabled: true, idleMinutes: 3, browserTabs: true, claudeSessions: true, dayStartHour: 8 };
+  let settings: Settings = { currency: 'USD', monitorEnabled: true, idleMinutes: 3, browserTabs: true, claudeSessions: true, dayStartHour: 8, onboarded: true };
 
   // What each project's work looks like: tasks, the apps (and windows) they happen in, and Claude Code sessions.
   type Win = [app: string, detail: string, context: string, url: string];
@@ -162,6 +162,16 @@ export function createDemoApi(): FocusApi {
     }
   }
 
+  // `?fresh` in the browser preview: a brand-new install (no data, welcome not done, no Accessibility yet).
+  const fresh = typeof location !== 'undefined' && new URLSearchParams(location.search).has('fresh');
+  let accessibility = !fresh;
+  if (fresh) {
+    projects.length = 0;
+    entries.length = 0;
+    activity.length = 0;
+    settings = { ...settings, onboarded: false };
+  }
+
   const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x));
   const ok = <T,>(x: T) => Promise.resolve(clone(x));
 
@@ -238,8 +248,19 @@ export function createDemoApi(): FocusApi {
       icons: (names) => ok(Object.fromEntries(names.map((n) => [n, null]))),
     },
     monitor: {
-      status: () => ok({ enabled: settings.monitorEnabled, accessibility: true, idle: false, current: { app: 'Figma', detail: 'Halcyon — Onboarding', since: now - 12 * 60_000 }, claudeLastScan: now, native: false }),
-      requestAccess: () => ok(true),
+      status: () =>
+        ok({
+          enabled: settings.monitorEnabled,
+          accessibility,
+          idle: false,
+          current: fresh ? null : { app: 'Figma', detail: 'Halcyon — Onboarding', since: now - 12 * 60_000 },
+          claudeLastScan: fresh ? null : now,
+          native: false,
+        }),
+      requestAccess: () => {
+        accessibility = true;
+        return ok(true);
+      },
     },
     settings: {
       get: () => ok(settings),

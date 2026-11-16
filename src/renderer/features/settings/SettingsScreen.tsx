@@ -6,7 +6,7 @@ import { useQueryClient } from '@tanstack/react-query';
 
 const CURRENCIES = ['PLN', 'EUR', 'USD', 'GBP', 'CHF', 'SEK', 'NOK', 'DKK', 'CZK'];
 
-function Toggle({ label, hint, checked, onChange }: { label: string; hint: string; checked: boolean; onChange: (v: boolean) => void }) {
+export function Toggle({ label, hint, checked, onChange }: { label: string; hint: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
     <label className="fo-setting">
       <span className="fo-setting-text">

@@ -134,7 +134,7 @@ function close(at: number) {
 async function tick() {
   if (busy) return;
   const cfg = settings.get();
-  if (!cfg.monitorEnabled) return close(Date.now());
+  if (!cfg.monitorEnabled || !cfg.onboarded) return close(Date.now());
   const now = Date.now();
   const idleSec = powerMonitor.getSystemIdleTime();
   if (idleSec >= cfg.idleMinutes * 60) {

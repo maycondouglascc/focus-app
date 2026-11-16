@@ -40,12 +40,16 @@ function csv(entries: TimeEntry[], byId: Map<string, Project>) {
   return rows.map((r) => r.map(q).join(',')).join('\n');
 }
 
-export function ReportsScreen() {
+const EVER = { from: 0, to: 8.64e15 };
+
+export function ReportsScreen({ onTimer }: { onTimer: () => void }) {
   const ctl = usePeriod('month');
   const range = { from: ctl.period.from, to: ctl.period.to };
   const projects = useProjects().data ?? [];
   const settings = useSettings().data;
   const all = useEntries(range).data ?? [];
+  // Has anything ever been logged? Decides between "nothing in this period" and the first-use explanation.
+  const everQ = useEntries(EVER);
   const activity = useActivity(range).data ?? [];
   const period = useMemo(() => fitPeriod(ctl.period, firstStart(all)), [ctl.period, all]);
   const [projectFilter, setProjectFilter] = useState('');
@@ -130,6 +134,18 @@ export function ReportsScreen() {
             <LoButton icon="square.and.arrow.down" onClick={download} disabled={!entries.length} aria-label="Export CSV" title="Export CSV" />
           </PeriodNav>
         </div>
+
+        {everQ.isSuccess && everQ.data.length === 0 && (
+          <div className="lo-card fo-empty fo-empty--row">
+            <div>
+              <h2 className="lo-h2">Reports fill in as you log time</h2>
+              <p className="lo-sub">Hours, billable time and earnings show up here by day, week, month or year, and per project.</p>
+            </div>
+            <LoButton variant="primary" icon="play.fill" onClick={onTimer}>
+              Start tracking
+            </LoButton>
+          </div>
+        )}
 
         <div className="lo-stats fo-stats">
           <div className="lo-stat" data-first="true">

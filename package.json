@@ -1,7 +1,7 @@
 {
   "name": "focus",
   "productName": "Focus",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Local time tracker with an activity stream",
   "main": ".vite/build/main.js",
   "private": true,
@@ -12,7 +12,7 @@
     "package": "electron-forge package",
     "make": "electron-forge make",
     "typecheck": "tsc --noEmit",
-    "icons": "swift scripts/sf-symbols.swift src/renderer/assets/sf chevron.left chevron.right plus stop.fill play.fill checkmark gearshape waveform.path.ecg pencil dollarsign.circle folder square.and.arrow.down trash calendar chart.bar chevron.up.chevron.down:8A93A3 checkmark:FFFFFF"
+    "icons": "swift scripts/sf-symbols.swift src/renderer/assets/sf chevron.left chevron.right plus stop.fill play.fill checkmark gearshape waveform.path.ecg pencil dollarsign.circle folder square.and.arrow.down trash calendar chart.bar macwindow globe terminal lock exclamationmark.triangle arrow.clockwise chevron.up.chevron.down:8A93A3 checkmark:FFFFFF"
   },
   "license": "MIT",
   "devDependencies": {

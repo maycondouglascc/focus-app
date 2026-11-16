@@ -2136,3 +2136,245 @@ li[data-open='true'] > .fo-actpop-apphead .fo-actpop-chev {
     opacity: 0;
   }
 }
+
+/* ── First launch ─────────────────────────────────────────────────────── */
+.fo-welcome {
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  height: 100vh;
+  padding: 48px 24px;
+  overflow-y: auto;
+  background: var(--n-50);
+}
+html[data-vibrancy] .fo-welcome {
+  background: rgba(255, 255, 255, 0.45) !important;
+}
+.fo-welcome-card {
+  box-sizing: border-box;
+  width: min(560px, 100%);
+  padding: 40px;
+  border: 1px solid var(--lo-card-border);
+  border-radius: var(--window-radius);
+  background: #fff;
+  box-shadow: 0 24px 64px rgba(27, 34, 48, 0.1), 0 1px 2px rgba(27, 34, 48, 0.04);
+}
+.fo-welcome-brand {
+  font-family: 'Newsreader Variable', 'Iowan Old Style', Georgia, serif;
+  font-size: 26px;
+  line-height: 30px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: var(--lo-ink);
+}
+.fo-welcome-title {
+  margin: 24px 0 8px;
+  font-size: var(--t-title);
+  line-height: var(--lh-title);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: var(--lo-ink);
+}
+.fo-welcome-lead {
+  margin: 0 0 24px;
+  font-size: var(--t-body);
+  line-height: var(--lh-body);
+  color: var(--lo-muted);
+}
+.fo-welcome-sources {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--lo-hairline);
+  border-radius: 12px;
+}
+.fo-welcome-sources li + li {
+  border-top: 1px solid var(--lo-hairline);
+}
+.fo-welcome-source {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px;
+  cursor: default;
+}
+.fo-welcome-source[data-disabled='true'] {
+  opacity: 0.45;
+}
+.fo-welcome-icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--n-50);
+  color: var(--lo-ink);
+}
+@supports (corner-shape: squircle) {
+  .fo-welcome-icon {
+    border-radius: 50%;
+    corner-shape: squircle;
+  }
+}
+.fo-welcome-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.fo-welcome-access {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 16px;
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--lo-attn-bg);
+}
+.fo-welcome-access[data-allowed='true'] {
+  background: color-mix(in srgb, var(--lo-done) 8%, white);
+}
+.fo-welcome-access .fo-ok {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.fo-welcome-privacy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 24px 0 0;
+  font-size: var(--t-note);
+  color: var(--lo-muted);
+}
+.fo-welcome-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 24px;
+}
+
+/* ── Timer screen: Accessibility nudge and the empty week ─────────────── */
+.fo-nudge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 24px 16px;
+  padding: 8px 8px 8px 16px;
+  border-radius: 10px;
+  background: var(--lo-attn-bg);
+  font-size: var(--t-note);
+  color: var(--lo-attn);
+}
+.fo-nudge > span {
+  flex: 1;
+  min-width: 0;
+}
+.fo-calwrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.fo-calempty {
+  position: absolute;
+  z-index: 4;
+  top: 160px;
+  left: calc(52px + (100% - 52px) / 2);
+  transform: translateX(-50%);
+  pointer-events: none; /* the grid underneath stays draggable around the card */
+}
+.fo-calempty-card {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 360px;
+  padding: 24px;
+  border: 1px solid var(--lo-card-border);
+  border-radius: var(--r-card);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 12px 40px rgba(27, 34, 48, 0.08);
+  backdrop-filter: blur(8px);
+  pointer-events: auto;
+  text-align: center;
+}
+.fo-calempty-card p {
+  margin: 0;
+}
+.fo-calempty-card > div {
+  margin-top: 8px;
+}
+
+/* Reports before anything is logged */
+.fo-empty--row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+.fo-empty--row h2 {
+  margin-bottom: 4px;
+}
+
+/* Sidebar: no projects yet */
+button.fo-side-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 10px 0 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  font: inherit;
+  font-size: var(--t-body);
+  color: var(--shell-muted);
+  cursor: default;
+}
+button.fo-side-empty:hover {
+  background: rgba(27, 34, 48, 0.05);
+  color: var(--shell-ink);
+}
+
+/* ── Errors ───────────────────────────────────────────────────────────── */
+.fo-crash {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 420px;
+  margin: 120px auto 0;
+  text-align: center;
+  color: var(--lo-attn);
+}
+.fo-crash .lo-h2 {
+  margin-top: 8px;
+  color: var(--lo-ink);
+}
+.fo-crash p {
+  margin: 0;
+}
+.fo-crash-detail {
+  margin-bottom: 8px !important;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--t-label);
+  color: var(--lo-faint);
+}
+.fo-dataerror {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 24px 0;
+  padding: 8px 8px 8px 16px;
+  border-radius: 10px;
+  background: var(--lo-critical-bg);
+  font-size: var(--t-note);
+  color: var(--lo-critical);
+}
+.fo-dataerror > span {
+  flex: 1;
+}

@@ -1,7 +1,9 @@
 import { useCallback, useMemo, useState } from 'react';
 import type { TimeEntry } from '@/shared/types';
 import { LoButton } from '@/renderer/components/LoButton';
-import { useActivity, useEntries, useProjects, useSettings } from '@/renderer/lib/api';
+import { api, useActivity, useEntries, useMonitorStatus, useProjects, useSettings } from '@/renderer/lib/api';
+import { useQueryClient } from '@tanstack/react-query';
+import { Icon } from '@/renderer/components/Icon';
 import { addDays, isoWeek, startOfWeek } from '@/renderer/lib/time';
 import { hm, money, rangeLabel } from '@/renderer/lib/format';
 import { earningsByCurrency, entryMs, unionMs } from '@/renderer/lib/stats';
@@ -17,7 +19,9 @@ import type { ActivitySession } from './layout';
 const LS_KEY = 'focus.calendarMode';
 const MODES: CalendarMode[] = ['mix', 'time', 'activity'];
 
-export function CalendarScreen() {
+const AX_DISMISS = 'focus.axNudgeDismissed';
+
+export function CalendarScreen({ onNewProject }: { onNewProject: () => void }) {
   const now = useNow(30_000);
   const [weekStart, setWeekStart] = useState(() => startOfWeek(Date.now()));
   const range = useMemo(() => ({ from: weekStart, to: addDays(weekStart, 7) }), [weekStart]);
@@ -32,8 +36,19 @@ export function CalendarScreen() {
   const showActivity = mode !== 'time';
   const projects = useProjects().data ?? [];
   const settings = useSettings().data;
-  const entries = useEntries(range).data ?? [];
+  const entriesQ = useEntries(range);
+  const entries = entriesQ.data ?? [];
   const activity = useActivity(range, showActivity).data ?? [];
+  const status = useMonitorStatus().data;
+  const qc = useQueryClient();
+  const [axDismissed, setAxDismissed] = useState(() => {
+    try {
+      return localStorage.getItem(AX_DISMISS) === '1';
+    } catch {
+      return false;
+    }
+  });
+  const axNudge = !!status && status.enabled && !status.accessibility && !axDismissed;
 
   const [editing, setEditing] = useState<{ draft: Draft; anchor: DOMRect | null } | null>(null);
   const [actBlock, setActBlock] = useState<{ session: ActivitySession; anchor: DOMRect } | null>(null);
@@ -115,6 +130,58 @@ export function CalendarScreen() {
         </div>
       </div>
 
+      {axNudge && (
+        <div className="fo-nudge" role="status">
+          <Icon name="macwindow" size={16} />
+          <span>
+            Focus sees app names only. Allow Accessibility access so activity shows which file or page you were on.
+          </span>
+          <LoButton small onClick={() => void api.monitor.requestAccess().then(() => qc.invalidateQueries({ queryKey: ['monitor'] }))}>
+            Allow access
+          </LoButton>
+          <LoButton
+            small
+            variant="ghost"
+            onClick={() => {
+              setAxDismissed(true);
+              try {
+                localStorage.setItem(AX_DISMISS, '1');
+              } catch {
+                /* per-viewer convenience only */
+              }
+            }}
+          >
+            Not now
+          </LoButton>
+        </div>
+      )}
+
+      <div className="fo-calwrap">
+      {entriesQ.isSuccess && entries.length === 0 && mode !== 'activity' && !editing && (
+        <div className="fo-calempty">
+          <div className="fo-calempty-card">
+            {projects.length === 0 ? (
+              <>
+                <h2 className="lo-h2">Log your first hours</h2>
+                <p className="lo-sub">
+                  Type what you're working on above and press Start, or drag on the calendar to add time you already spent.
+                  Projects add rates and colours.
+                </p>
+                <div>
+                  <LoButton small icon="plus" onClick={onNewProject}>
+                    Create a project
+                  </LoButton>
+                </div>
+              </>
+            ) : (
+              <>
+                <h2 className="lo-h2">{thisWeek ? 'Nothing logged this week yet' : 'Nothing logged this week'}</h2>
+                <p className="lo-sub">Press Start in the timer above, or drag on the calendar to add time.</p>
+              </>
+            )}
+          </div>
+        </div>
+      )}
       <WeekGrid
         weekStart={weekStart}
         entries={withDraft}
@@ -134,6 +201,7 @@ export function CalendarScreen() {
           setActBlock(actBlock?.session.key === session.key ? null : { session, anchor });
         }}
       />
+      </div>
 
       {editorShown && (
         <EntryEditor

@@ -64,7 +64,12 @@ export function Sidebar({
         <span className="fo-side-label">This week</span>
       </div>
       <div className="shell-team" role="list">
-        {active.length === 0 && <div className="fo-side-empty">No projects yet.</div>}
+        {projects.isSuccess && active.length === 0 && (
+          <button type="button" className="fo-side-empty" onClick={() => onSelect('projects')}>
+            <Icon name="plus" size={14} />
+            Create a project
+          </button>
+        )}
         {active.map((p) => (
           <div role="listitem" key={p.id}>
             <button

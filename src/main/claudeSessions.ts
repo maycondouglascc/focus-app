@@ -160,7 +160,7 @@ async function readFrom(file: string, offset: number, size: number, sessions: Ma
 }
 
 export async function scanClaude(): Promise<boolean> {
-  if (scanning || !settings.get().claudeSessions || !fs.existsSync(ROOT)) return false;
+  if (scanning || !settings.get().claudeSessions || !settings.get().onboarded || !fs.existsSync(ROOT)) return false;
   scanning = true;
   let changed = false;
   try {
