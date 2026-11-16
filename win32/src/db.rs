@@ -1,6 +1,6 @@
 //! SQLite storage. Same schema and migrations as the Electron app, so a
 //! focus.db from either opens in both. Append migrations; never edit one.
-// Not wired into main yet (F1 in progress).
+// Some accessors (settings, projects, entries) are used by later phases only.
 #![allow(dead_code)]
 
 use std::path::Path;
