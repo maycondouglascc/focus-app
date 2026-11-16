@@ -70,13 +70,10 @@ Requires macOS, Node 20+ and Xcode Command Line Tools.
 
 ```bash
 npm install
-npm start          # run the app in development
-npm run demo       # run with three years of sample data (for screenshots); your real data is untouched
-npm run dev:web    # renderer only, in a browser, with sample data (http://localhost:5174)
-npm run make       # build Focus.app and a zip into out/
-npm run icons      # re-export the SF Symbols the UI uses
-npm run typecheck
+npm run make       # builds Focus.app into out/Focus-darwin-arm64/
 ```
+
+Move `out/Focus-darwin-arm64/Focus.app` to Applications and open it. To run it from source while you work on it, use `npm start`.
 
 ### What's where
 - `src/main/db.ts`: SQLite (better-sqlite3) holding projects, entries, activity and settings. Migrations are an append-only array.
