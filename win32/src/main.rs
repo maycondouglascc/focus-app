@@ -6,6 +6,7 @@
 //! Usage: focus.exe [--db <path>]   (default %LOCALAPPDATA%\Focus\focus.db)
 #![windows_subsystem = "console"]
 
+mod appinfo;
 mod db;
 mod presence;
 mod recorder;
@@ -16,10 +17,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use presence::{Change, Presence, DISPLAY_OFF, IDLE, LOCKED, SLEEP};
-use windows::core::{w, BOOL, GUID, PWSTR};
-use windows::Win32::Foundation::{
-    CloseHandle, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, MAX_PATH, WPARAM,
-};
+use windows::core::{w, BOOL, GUID};
+use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Power::{RegisterPowerSettingNotification, POWERBROADCAST_SETTING};
@@ -27,10 +26,7 @@ use windows::Win32::System::RemoteDesktop::{
     WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
 };
 use windows::Win32::System::SystemInformation::GetTickCount;
-use windows::Win32::System::Threading::{
-    GetCurrentProcessId, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
-    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-};
+use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows::Win32::System::WindowsProgramming::QueryUnbiasedInterruptTime;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
@@ -38,11 +34,11 @@ use windows::Win32::UI::Shell::{
     SHQueryUserNotificationState, QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetForegroundWindow, GetMessageW,
-    GetWindowThreadProcessId, InternalGetWindowText, KillTimer, PostThreadMessageW, RegisterClassW,
-    SetCoalescableTimer, SetTimer, TranslateMessage, DEVICE_NOTIFY_WINDOW_HANDLE,
-    EVENT_OBJECT_NAMECHANGE, EVENT_SYSTEM_FOREGROUND, MSG, OBJID_WINDOW, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_QUIT, WM_TIMER, WNDCLASSW,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetForegroundWindow, GetMessageW, KillTimer,
+    PostThreadMessageW, RegisterClassW, SetCoalescableTimer, SetTimer, TranslateMessage,
+    DEVICE_NOTIFY_WINDOW_HANDLE, EVENT_OBJECT_NAMECHANGE, EVENT_SYSTEM_FOREGROUND, MSG,
+    OBJID_WINDOW, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+    WM_QUIT, WM_TIMER, WNDCLASSW,
 };
 
 const DEBOUNCE_MS: u32 = 1500;
@@ -141,49 +137,8 @@ fn user_is_busy() -> bool {
     }
 }
 
-/// Returns the exe path of the process owning `hwnd`, if it can be opened.
-/// None also for our own process, which must never count as work.
-fn exe_path(hwnd: HWND) -> Option<String> {
-    unsafe {
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid == 0 || pid == GetCurrentProcessId() {
-            return None;
-        }
-        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-        let mut buf = [0u16; MAX_PATH as usize];
-        let mut len = buf.len() as u32;
-        let ok =
-            QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len);
-        let _ = CloseHandle(h);
-        ok.ok()?;
-        Some(String::from_utf16_lossy(&buf[..len as usize]))
-    }
-}
-
-/// InternalGetWindowText never sends WM_GETTEXT, so a hung app cannot block us.
-fn title(hwnd: HWND) -> String {
-    let mut buf = [0u16; 256];
-    let n = unsafe { InternalGetWindowText(hwnd, &mut buf) };
-    String::from_utf16_lossy(&buf[..n.max(0) as usize])
-}
-
-/// "C:\Program Files\X\code.exe" -> "code".
-fn app_name(path: &str) -> String {
-    let file = path.rsplit(['\\', '/']).next().unwrap_or(path);
-    file.strip_suffix(".exe")
-        .or_else(|| file.strip_suffix(".EXE"))
-        .unwrap_or(file)
-        .to_string()
-}
-
 fn info_for(hwnd: HWND) -> Option<recorder::Info> {
-    let exe = exe_path(hwnd)?;
-    Some(recorder::Info {
-        key: exe.to_lowercase(),
-        app: app_name(&exe),
-        detail: title(hwnd),
-    })
+    appinfo::info_for(hwnd, unsafe { GetCurrentProcessId() })
 }
 
 fn default_db_path() -> PathBuf {
@@ -577,19 +532,4 @@ fn main() {
             let _ = st.db.checkpoint();
         }
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::app_name;
-
-    #[test]
-    fn app_name_strips_directory_and_extension() {
-        assert_eq!(
-            app_name(r"C:\Program Files\Mozilla Firefox\firefox.exe"),
-            "firefox"
-        );
-        assert_eq!(app_name("code.EXE"), "code");
-        assert_eq!(app_name("noext"), "noext");
-    }
 }
