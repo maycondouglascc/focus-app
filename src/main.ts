@@ -46,6 +46,10 @@ const createWindow = () => {
   else void win.loadFile(path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`));
 };
 
+// Never touch the Keychain: Chromium otherwise creates "Focus Safe Storage" there, and every new build (a new
+// ad-hoc signature) makes macOS ask for the user's password to read it. Focus stores nothing secret.
+app.commandLine.appendSwitch('use-mock-keychain');
+
 app.on('ready', () => {
   // A packaged build takes its icon from the bundle; when run from source the Dock would show Electron's.
   if (process.platform === 'darwin' && !app.isPackaged) app.dock?.setIcon(path.join(app.getAppPath(), 'assets', 'icon.png'));
