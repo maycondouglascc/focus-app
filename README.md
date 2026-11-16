@@ -4,6 +4,10 @@
 
 Focus puts two streams side by side: the time you *log* (projects, entries, billable hours) and the time you *spent*: which apps, windows, browser tabs and Claude Code sessions were in front of you. Drag a block of real activity onto the calendar and it becomes an entry. No account, no cloud, no sync. Everything lives in one SQLite file on your Mac.
 
+![Focus: the week calendar with time entries and the activity strip next to each day](docs/screenshots/timer.jpg)
+
+**[Download for Mac (Apple Silicon)](../../releases/latest)**
+
 ## Features
 
 ### Timer and calendar
@@ -19,18 +23,26 @@ Focus puts two streams side by side: the time you *log* (projects, entries, bill
 - Reads your Claude Code sessions and shows them by project and session title.
 - Focus never tracks itself.
 
+![The calendar in Activity view: blocks of real computer use with the apps in each](docs/screenshots/activity-calendar.jpg)
+
 ### Activity insights
 - Active time by hour (heatmap) and by day (stacked by app).
 - Top apps with trend sparklines, and "where the time went" down to the window or session.
+
+![Activity: active time by hour and by day, top apps and where the time went](docs/screenshots/activity.jpg)
 
 ### Reports
 - Hours and earnings by day, week, month, year or **all time**. Long ranges group by month, then by year.
 - Per-project breakdown (donut plus table), entry list and CSV export.
 - Hourly rates per project. Earnings in different currencies are never added together.
 
+![Reports: tracked, billable, earned and active time, hours by day stacked by project](docs/screenshots/reports.jpg)
+
 ### Projects
 - Colours, clients, rates and billable-by-default per project.
 - A report page for every project, from its first entry to today. Archive finished ones.
+
+![A project report: hours by day, the apps used while tracking, and the files, tabs and windows](docs/screenshots/project.jpg)
 
 ### Made for the Mac
 - Native-feeling UI: translucent sidebar, SF Symbols, SF Pro, squircle shapes.
