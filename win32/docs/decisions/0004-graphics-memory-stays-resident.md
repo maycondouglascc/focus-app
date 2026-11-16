@@ -35,3 +35,18 @@ working set would hide it, which the plan forbids (no `EmptyWorkingSet`).
    memory, but worse text and anti-aliasing and a different toolkit.
 
 Recommendation: option 1.
+
+## Addendum: DirectWrite, warm-up and what was tried
+- DirectWrite adds about 3 MB (21 to 24 MB after the first open).
+- Memory is not a per-open leak: 100 and 300 cycles both grew about 6.4 MB, a
+  warm-up plateau over the first ~100 opens. `--ui-cycle N` therefore runs 100
+  warm-up cycles first and measures growth after them (50 cycles: +0.25 MB,
+  24.24 to 24.49 MB, budget 25 MB).
+- Tried and rejected: keeping the Direct3D/Direct2D/DirectComposition devices
+  alive across windows. Flat, but 52 MB resident instead of 24 MB. `Flush`,
+  `ClearState`, a DirectComposition `Commit` and `IDXGIDevice3::Trim` did not
+  change it. The devices are dropped on close; only the DirectWrite text
+  system and its format cache live for the whole process (recreating it on
+  every open grew memory).
+- Margin to the 25 MB budget is about 0.5 MB. If a later widget needs more,
+  raise the budget with a new note rather than trimming silently.

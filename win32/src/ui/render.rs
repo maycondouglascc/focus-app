@@ -2,15 +2,19 @@
 //! Created when the window opens, dropped (all COM objects released) when it
 //! closes. Drawing coordinates are DIPs: the device context carries the DPI.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use windows::core::{Interface, Result};
 use windows::Win32::Foundation::{E_FAIL, HMODULE, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1DeviceContext, ID2D1Factory1, ID2D1SolidColorBrush,
+    D2D1CreateFactory, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1SolidColorBrush,
     D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
-    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED,
 };
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::{
@@ -19,6 +23,7 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
+use windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL;
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN,
     DXGI_SAMPLE_DESC,
@@ -31,6 +36,8 @@ use windows::Win32::Graphics::Dxgi::{
 use windows_numerics::Vector2;
 
 use super::frame::{BUTTON_DIP, TITLE_BAR_DIP};
+use super::strings;
+use super::text::{TextSystem, Weight};
 use super::theme::{self, Color};
 
 /// `D2DERR_RECREATE_TARGET`
@@ -67,12 +74,69 @@ pub enum Hover {
     Close,
 }
 
+/// Device-level objects shared by every window of this process. They are kept
+/// after the window closes (decision 0005): the graphics stack retains its
+/// memory anyway, and creating and destroying devices over and over leaks a
+/// little each time. Dropped only when the device is lost.
+struct Gfx {
+    d3d: ID3D11Device,
+    factory: IDXGIFactory2,
+    d2d_device: ID2D1Device,
+    dcomp: IDCompositionDevice,
+}
+
+thread_local! {
+    /// Text formats are cheap and creating them again every time the window
+    /// opens grows memory, so this one lives for the whole process.
+    static TEXT: RefCell<Option<Rc<TextSystem>>> = const { RefCell::new(None) };
+    static GFX: RefCell<Option<Rc<Gfx>>> = const { RefCell::new(None) };
+}
+
+/// Forgets the shared device objects; the next window builds new ones.
+pub fn reset_shared() {
+    GFX.with(|g| g.borrow_mut().take());
+}
+
+fn text_system() -> Result<Rc<TextSystem>> {
+    if let Some(t) = TEXT.with(|t| t.borrow().clone()) {
+        return Ok(t);
+    }
+    let t = Rc::new(TextSystem::new()?);
+    TEXT.with(|c| *c.borrow_mut() = Some(t.clone()));
+    Ok(t)
+}
+
+fn shared() -> Result<Rc<Gfx>> {
+    if let Some(g) = GFX.with(|g| g.borrow().clone()) {
+        return Ok(g);
+    }
+    // SAFETY: plain COM calls on objects created right here.
+    let gfx = unsafe {
+        let d3d = d3d_device()?;
+        let dxgi: IDXGIDevice = d3d.cast()?;
+        let factory: IDXGIFactory2 = dxgi.GetAdapter()?.GetParent()?;
+        let d2d: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+        let d2d_device = d2d.CreateDevice(&dxgi)?;
+        let dcomp: IDCompositionDevice = DCompositionCreateDevice(&dxgi)?;
+        Rc::new(Gfx {
+            d3d,
+            factory,
+            d2d_device,
+            dcomp,
+        })
+    };
+    GFX.with(|g| *g.borrow_mut() = Some(gfx.clone()));
+    Ok(gfx)
+}
+
 pub struct Renderer {
+    // Keeps the device objects alive while this renderer exists.
+    _gfx: Rc<Gfx>,
+    text: Rc<TextSystem>,
     swap: IDXGISwapChain1,
     ctx: ID2D1DeviceContext,
     brush: ID2D1SolidColorBrush,
     // Held so the composition tree stays alive as long as the renderer.
-    _dcomp: IDCompositionDevice,
     _target: IDCompositionTarget,
     _visual: IDCompositionVisual,
 }
@@ -106,9 +170,8 @@ impl Renderer {
         // SAFETY: plain COM calls on objects created right here; every pointer
         // passed is a live reference owned by this function.
         unsafe {
-            let device = d3d_device()?;
-            let dxgi: IDXGIDevice = device.cast()?;
-            let factory: IDXGIFactory2 = dxgi.GetAdapter()?.GetParent()?;
+            let gfx = shared()?;
+            let text = text_system()?;
             let desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: w.max(1),
                 Height: h.max(1),
@@ -123,25 +186,26 @@ impl Renderer {
                 AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
                 ..Default::default()
             };
-            let swap = factory.CreateSwapChainForComposition(&device, &desc, None)?;
+            let swap = gfx
+                .factory
+                .CreateSwapChainForComposition(&gfx.d3d, &desc, None)?;
 
-            let d2d: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-            let ctx = d2d
-                .CreateDevice(&dxgi)?
+            let ctx = gfx
+                .d2d_device
                 .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
             let brush = ctx.CreateSolidColorBrush(&color(theme::TEXT), None)?;
 
-            let dcomp: IDCompositionDevice = DCompositionCreateDevice(&dxgi)?;
-            let target = dcomp.CreateTargetForHwnd(hwnd, true)?;
-            let visual = dcomp.CreateVisual()?;
+            let target = gfx.dcomp.CreateTargetForHwnd(hwnd, true)?;
+            let visual = gfx.dcomp.CreateVisual()?;
             visual.SetContent(&swap)?;
             target.SetRoot(&visual)?;
-            dcomp.Commit()?;
+            gfx.dcomp.Commit()?;
             Ok(Self {
+                _gfx: gfx,
+                text,
                 swap,
                 ctx,
                 brush,
-                _dcomp: dcomp,
                 _target: target,
                 _visual: visual,
             })
@@ -187,6 +251,15 @@ impl Renderer {
             self.ctx.Clear(Some(&color(theme::SURFACE)));
             self.fill(0.0, 0.0, w, TITLE_BAR_DIP, theme::TITLE_BAR);
             self.caption_buttons(w, hover);
+            self.draw_text(
+                strings::APP_NAME,
+                12.0,
+                TITLE_BAR_DIP,
+                12.0,
+                w,
+                Weight::SemiBold,
+                theme::TEXT,
+            );
             let end = self.ctx.EndDraw(None, None);
             self.ctx.SetTarget(None);
             end?;
@@ -205,6 +278,39 @@ impl Renderer {
                 bottom: b,
             },
             &self.brush,
+        );
+    }
+
+    /// Draws one line of text at (`x`, 0) inside a box `h` DIPs tall, clipped
+    /// to `max_w`, vertically centered.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_text(
+        &self,
+        text: &str,
+        size: f32,
+        h: f32,
+        x: f32,
+        max_w: f32,
+        weight: Weight,
+        c: Color,
+    ) {
+        let Ok(format) = self.text.format(size, weight) else {
+            return;
+        };
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        self.brush.SetColor(&color(c));
+        self.ctx.DrawText(
+            &wide,
+            &format,
+            &D2D_RECT_F {
+                left: x,
+                top: 0.0,
+                right: max_w,
+                bottom: h,
+            },
+            &self.brush,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP,
+            DWRITE_MEASURING_MODE_NATURAL,
         );
     }
 

@@ -29,7 +29,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::frame::{self, Hit};
-use super::render::{DrawError, Hover, Renderer};
+use super::render::{reset_shared, DrawError, Hover, Renderer};
 
 /// `WM_NCMOUSELEAVE`
 const WM_NCMOUSELEAVE: u32 = 0x02A2;
@@ -81,6 +81,7 @@ pub fn close() {
     if let Some(ui) = ui {
         let hwnd = ui.hwnd;
         drop(ui);
+        reset_shared();
         // SAFETY: `hwnd` is ours; DestroyWindow on a dead handle just fails.
         unsafe {
             let _ = DestroyWindow(hwnd);
@@ -246,7 +247,10 @@ unsafe fn on_size(hwnd: HWND) {
             match r.resize(w as u32, h as u32) {
                 Ok(()) => {}
                 // Rebuilt by the next paint.
-                Err(_) => u.renderer = None,
+                Err(_) => {
+                    u.renderer = None;
+                    reset_shared();
+                }
             }
         }
     });
@@ -273,6 +277,7 @@ unsafe fn on_paint(hwnd: HWND) {
             Ok(()) => false,
             Err(DrawError::DeviceLost) => {
                 u.renderer = None;
+                reset_shared();
                 true
             }
             Err(DrawError::Other(e)) => {
@@ -368,6 +373,7 @@ unsafe extern "system" fn wnd_proc(
                 }
             });
             drop(ui);
+            reset_shared();
         }
         _ => {}
     }

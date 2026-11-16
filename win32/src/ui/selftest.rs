@@ -11,7 +11,8 @@ use super::window;
 
 /// Decision 0004: the graphics stack keeps about 21 MB after the first open.
 const PRIVATE_BUDGET_MB: f64 = 25.0;
-/// Opening and closing 50 times must not grow memory by more than this.
+const WARMUP_CYCLES: u32 = 100;
+/// After warm-up, N more open/close cycles must not grow memory by more than this.
 const GROWTH_BUDGET_MB: f64 = 1.0;
 
 fn private_mb() -> f64 {
@@ -41,6 +42,16 @@ pub fn cycle(n: u32) -> i32 {
     pump_for(Duration::from_millis(100));
     window::close();
     pump_for(Duration::from_millis(100));
+    // Memory settles over the first ~100 opens (driver and allocator warm-up,
+    // then flat: 100 and 300 cycles both grew 6.4 MB). Only growth after that
+    // counts as a leak.
+    for _ in 0..WARMUP_CYCLES {
+        window::open();
+        window::pump();
+        window::close();
+        window::pump();
+    }
+    pump_for(Duration::from_millis(500));
     let start = private_mb();
     println!("baseline before any window {baseline:.2} MB, after warm-up cycle {start:.2} MB");
     let t = Instant::now();
@@ -67,6 +78,7 @@ pub fn cycle(n: u32) -> i32 {
         t.elapsed().as_secs_f64(),
         end - start
     );
+    super::render::reset_shared();
     if leaked || end > PRIVATE_BUDGET_MB || end - start > GROWTH_BUDGET_MB {
         println!("FAIL");
         return 1;
@@ -88,5 +100,6 @@ pub fn show(seconds: u64) -> i32 {
         std::thread::sleep(Duration::from_millis(5));
     }
     window::close();
+    super::render::reset_shared();
     0
 }

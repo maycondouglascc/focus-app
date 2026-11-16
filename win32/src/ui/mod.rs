@@ -4,6 +4,8 @@
 pub mod frame;
 pub mod render;
 pub mod selftest;
+pub mod strings;
+pub mod text;
 pub mod theme;
 pub mod window;
 
