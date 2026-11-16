@@ -1,5 +1,6 @@
 #!/bin/sh
 # Runs only when win32/ has staged changes. Enable with: git config core.hooksPath .githooks
+export PATH="$HOME/.cargo/bin:$PATH"
 if git diff --cached --name-only | grep -q '^win32/.*\.\(rs\|toml\)$'; then
   cd win32 || exit 1
   cargo fmt --check && cargo clippy -- -D warnings && cargo test
