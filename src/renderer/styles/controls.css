@@ -1,0 +1,1607 @@
+/*
+ * "Merged" control kit — the exact button / segmented / tab / list-row values from the
+ * approved Merged-Person artboard. Reshaped's own sizes (44px buttons, 6px radii, heavy
+ * outlines) read too big next to the design, so these few controls are drawn here and
+ * everything else stays Reshaped. Values: 36px controls, 10px radius, #E4E8EE stroke,
+ * 0 1px 2px shadow; ink #1B2230, muted #667085, faint #8A93A3, hairline #EEF1F5.
+ */
+:root {
+  --lo-ink: var(--n-900);
+  --lo-muted: var(--n-500);
+  --lo-faint: var(--n-400);
+  --lo-hairline: var(--n-100);
+  --lo-card-border: #e8ecf1;
+  --lo-ctl-border: var(--n-150);
+  --lo-ctl-shadow: 0 1px 2px rgba(27, 34, 48, 0.04);
+  --lo-ease: cubic-bezier(0.23, 1, 0.32, 1);
+
+  /* ── Colour roles: one job per colour. Reach for these before any hue. ── */
+  /* Attention: needs you, late, at risk. Nothing else is orange, so every orange mark can be trusted. */
+  --lo-attn: #b4410f;
+  --lo-attn-bg: #fff4ed;
+  --lo-attn-border: #fbddc9;
+  /* Accent: focus ring, links, the selected or matched item, "new" and anything Claude suggested. */
+  --lo-accent: #3b5bdb;
+  --lo-accent-bg: #eef2ff;
+  --lo-accent-ink: #1e3a8a;
+  --lo-focus: var(--lo-accent);
+  /* Done: ticked promises, connected, achieved goals. */
+  --lo-done: #1b8a4a;
+  --lo-done-bg: #ecf8f1;
+  /* Critical: errors and destructive actions (red, never orange). */
+  --lo-critical: #b42318;
+  --lo-critical-bg: #fef3f2;
+  --lo-danger: #c8372d;
+  --lo-danger-hover: #ae2e25;
+
+  /* ── Chart palette: the ONLY place chart colours are defined. Everything else derives tints with color-mix.
+     No orange here: orange is --lo-attn. ── */
+  --c-blue: #4c84e8;
+  --c-violet: #7c5ce0;
+  --c-pink: #d9488a;
+  --c-green: #2fa36b;
+  --c-teal: #24a39c;
+  --c-brick: #c2503f;
+  /* Person colours, one slot each (shared/personColors). Ordered so the first people added get the most distinct
+     hues. No orange: orange means "needs you". */
+  --p-0: #3b7ddd; /* blue */
+  --p-1: #d9488a; /* pink */
+  --p-2: #2f9e8f; /* teal */
+  --p-3: #b98a1e; /* gold */
+  --p-4: #6c56d9; /* violet */
+  --p-5: #3f8f4f; /* green */
+  --p-6: #c23a4b; /* crimson */
+  --p-7: #5b6b8c; /* slate */
+  --p-8: #2a9bc4; /* cyan */
+  --p-9: #9a4fa0; /* plum */
+  --p-10: #78872c; /* olive */
+  --p-11: #2f4b8a; /* navy */
+  --n-900: #1b2230;
+  --n-700: #3b4558;
+  --n-600: #4d5667;
+  --n-500: #667085;
+  --n-400: #8a93a3;
+  --n-300: #c5ccd8;
+  --n-200: #d6dce5;
+  --n-150: #e4e8ee;
+  --n-100: #eef1f5;
+  --n-50: #f4f6f9;
+  --n-25: #f8fafc;
+}
+
+/* ── Button ───────────────────────────────────────────────────────────── */
+.lo-btn {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--lo-ctl-border);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--lo-ink);
+  box-shadow: var(--lo-ctl-shadow);
+  font: inherit;
+  font-size: var(--t-body);
+  line-height: 20px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: default;
+  -webkit-app-region: no-drag;
+}
+.lo-btn:hover {
+  background: #f8fafc;
+}
+.lo-btn:active {
+  transform: scale(0.98);
+}
+.lo-btn:focus-visible {
+  outline: 2px solid var(--lo-focus);
+  outline-offset: 2px;
+}
+.lo-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.lo-btn svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--lo-muted);
+}
+.lo-btn--primary {
+  border-color: transparent;
+  background: var(--lo-ink);
+  color: #fff;
+  box-shadow: 0 1px 2px rgba(27, 34, 48, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+.lo-btn--primary:hover {
+  background: #2a3345;
+}
+.lo-btn--primary svg {
+  color: #fff;
+}
+.lo-btn--ghost {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  color: var(--lo-muted);
+}
+.lo-btn--ghost:hover {
+  background: rgba(27, 34, 48, 0.055);
+}
+.lo-btn--icon {
+  width: 36px;
+  padding: 0;
+}
+.lo-btn--sm {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 10px;
+  font-size: var(--t-note);
+}
+.lo-keys {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 2px;
+}
+.lo-keys kbd {
+  box-sizing: border-box;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--lo-ctl-border);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  background: #f8fafc;
+  font-family: system-ui, sans-serif;
+  font-size: var(--t-axis);
+  font-weight: 500;
+  color: var(--lo-muted);
+}
+.lo-btn--primary .lo-keys kbd {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+/* ── Segmented (year switcher, kind filter) ───────────────────────────── */
+.lo-seg {
+  box-sizing: border-box;
+  display: inline-flex;
+  height: 32px;
+  padding: 3px;
+  gap: 0;
+  background: #f1f4f8;
+  border-radius: 10px;
+}
+.lo-seg--fill {
+  display: flex;
+}
+.lo-seg--fill button {
+  flex: 1;
+}
+.lo-seg button {
+  height: 26px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  font: inherit;
+  font-size: var(--t-note);
+  font-weight: 500;
+  color: var(--lo-muted);
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+  white-space: nowrap;
+}
+.lo-seg button:hover {
+  color: var(--lo-ink);
+}
+.lo-seg button[aria-pressed='true'] {
+  background: #fff;
+  color: var(--lo-ink);
+  box-shadow: 0 1px 2px rgba(27, 34, 48, 0.1);
+}
+.lo-seg button:focus-visible {
+  outline: 2px solid var(--lo-focus);
+  outline-offset: 1px;
+}
+
+/* ── Underline tabs ───────────────────────────────────────────────────── */
+.lo-tabs {
+  display: flex;
+  gap: 24px;
+  border-bottom: 1px solid var(--lo-hairline);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.lo-tabs-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.lo-tab-actions {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  /* The last button's text, not its padding, lines up with the right edge of the tab line. */
+  margin-right: -10px;
+}
+.lo-tab-actions .lo-btn {
+  height: 32px;
+  padding: 0 10px;
+}
+.lo-tabs-end {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  height: 40px;
+  padding-left: 16px;
+  border-bottom: 1px solid var(--lo-hairline);
+}
+.lo-tabs button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0;
+  margin-bottom: -1px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  font: inherit;
+  font-size: var(--t-body);
+  font-weight: 500;
+  color: var(--lo-muted);
+  cursor: default;
+  white-space: nowrap;
+}
+.lo-tabs button:hover {
+  color: var(--lo-ink);
+}
+.lo-tabs button[aria-selected='true'] {
+  color: var(--lo-ink);
+  border-bottom-color: var(--lo-ink);
+}
+.lo-tabs button:focus-visible {
+  outline: 2px solid var(--lo-focus);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+.lo-tabs button span {
+  font-size: var(--t-label);
+  font-weight: 400;
+  color: var(--lo-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The custom dropdown (LoSelect): the trigger is a button wearing .lo-select; the list is the same card as .lo-menu. */
+.lo-select.lo-selectbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+}
+.lo-selectbtn > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lo-selectbtn-ph {
+  color: var(--lo-faint);
+}
+/* Every dropdown trigger answers the pointer, like the period stepper next to it. */
+@media (hover: hover) and (pointer: fine) {
+  .lo-select.lo-selectbtn:not(:disabled):hover {
+    background-color: var(--n-25);
+  }
+}
+.lo-select.lo-selectbtn[aria-expanded='true'] {
+  background-color: var(--n-25);
+}
+.lo-select.lo-selectbtn {
+  transition: background-color 120ms var(--lo-ease);
+}
+.lo-select.lo-selectbtn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.lo-selectmenu {
+  min-width: 160px;
+  max-height: min(320px, calc(100vh - 16px));
+  overflow-y: auto;
+}
+.lo-menu .lo-menu-item--opt {
+  flex-direction: row;
+  white-space: nowrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.lo-menu .lo-menu-item--opt[aria-selected='true'] {
+  font-weight: 500;
+}
+.lo-menu-group {
+  padding: 8px 10px 4px;
+  font-size: var(--t-label);
+  font-weight: 500;
+  color: var(--lo-faint);
+}
+
+/* ── Select (native, styled to match) ─────────────────────────────────── */
+.lo-select {
+  box-sizing: border-box;
+  height: 36px;
+  padding: 0 32px 0 12px;
+  border: 1px solid var(--lo-ctl-border);
+  border-radius: 10px;
+  /* SF Symbol chevron.up.chevron.down, pre-tinted by `npm run icons`. */
+  background: #fff url('../assets/sf/chevron.up.chevron.down-8A93A3.png') no-repeat right 10px center / 16px;
+  box-shadow: var(--lo-ctl-shadow);
+  font: inherit;
+  font-size: var(--t-body);
+  font-weight: 500;
+  color: var(--lo-ink);
+  appearance: none;
+  cursor: default;
+}
+.lo-select:focus-visible {
+  outline: 2px solid var(--lo-focus);
+  outline-offset: 2px;
+}
+
+/* ── Chip + list rows ─────────────────────────────────────────────────── */
+.lo-chip {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--lo-card-border);
+  border-radius: 6px;
+  background: #fff;
+  font-size: var(--t-label);
+  font-weight: 500;
+  color: #5b6576;
+  white-space: nowrap;
+}
+.lo-chip--late {
+  background: var(--lo-attn-bg);
+  border-color: var(--lo-attn-border);
+  color: var(--lo-attn);
+}
+.lo-chip--tint {
+  background: #f8fafc;
+}
+/* Dates and ages on promise rows: plain text, no box. Late ones are orange text only. */
+.lo-chip--plain {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-weight: 400;
+  color: var(--lo-muted); /* --lo-faint is ~3:1 on white, too light for 12px text */
+  font-variant-numeric: tabular-nums;
+}
+.lo-chip--plain.lo-chip--late {
+  background: transparent;
+  color: var(--lo-attn);
+  font-weight: 500;
+}
+
+.lo-card {
+  background: #fff;
+  border: 1px solid var(--lo-card-border);
+  border-radius: 16px;
+  box-shadow: 0 1px 2px rgba(27, 34, 48, 0.03);
+  overflow: hidden;
+}
+.lo-h2 {
+  margin: 0;
+  font-size: var(--t-section);
+  line-height: 24px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--lo-ink);
+}
+.lo-h2--drawer {
+  font-size: var(--t-figure);
+  line-height: 28px;
+}
+.lo-h2 small {
+  margin-left: 6px;
+  font-size: var(--t-body);
+  font-weight: 400;
+  color: var(--lo-faint);
+}
+.lo-sub {
+  font-size: var(--t-note);
+  line-height: 20px;
+  color: var(--lo-muted);
+}
+.lo-title {
+  font-size: var(--t-body);
+  line-height: 22px;
+  color: var(--lo-ink);
+}
+.lo-meta {
+  font-size: var(--t-note);
+  line-height: 18px;
+  color: var(--lo-muted);
+}
+.lo-clamp2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.lo-group-label {
+  padding: 14px 16px 6px;
+  font-size: var(--t-label);
+  line-height: 16px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--lo-faint);
+}
+.lo-link {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  font-size: var(--t-note);
+  font-weight: 500;
+  color: var(--lo-muted);
+  cursor: default;
+}
+.lo-link:hover {
+  color: var(--lo-ink);
+}
+.lo-link:focus-visible {
+  outline: 2px solid var(--lo-focus);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .lo-btn {
+    transition: background-color 120ms var(--lo-ease), transform 120ms var(--lo-ease);
+  }
+}
+
+/* ── Timeline row end: date flush right, actions swap in on hover ─────── */
+.lo-trow-end {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 28px;
+  flex-shrink: 0;
+}
+.lo-trow-menu {
+  position: absolute;
+  right: -6px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  pointer-events: none;
+}
+.lo-trow:hover .lo-trow-menu,
+.lo-trow:focus-within .lo-trow-menu,
+.lo-trow-menu:has([aria-expanded='true']) {
+  opacity: 1;
+  pointer-events: auto;
+}
+.lo-trow:hover .lo-trow-end:has(.lo-trow-menu) .lo-trow-date,
+.lo-trow:focus-within .lo-trow-end:has(.lo-trow-menu) .lo-trow-date {
+  opacity: 0;
+}
+
+/* ── "What was said": meeting header row ──────────────────────────────── */
+.lo-facts-head {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  height: 52px;
+  padding: 0 16px;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: var(--lo-ink);
+  cursor: default;
+  text-align: left;
+}
+.lo-facts-head:hover {
+  background: #fafbfc;
+}
+.lo-facts-head:focus-visible {
+  outline: 2px solid var(--lo-focus);
+  outline-offset: -2px;
+}
+
+/* ── Right drawer (Reshaped Modal, position=end) ──────────────────────── */
+.lo-drawer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+}
+.lo-drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 20px 20px 16px 24px;
+  border-bottom: 1px solid var(--lo-hairline);
+}
+.lo-drawer-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 20px 32px 24px;
+}
+.lo-highlight {
+  font-size: var(--t-body);
+  line-height: 24px;
+  color: var(--lo-ink);
+}
+
+/* ── Open stat columns (Merged-Person) ────────────────────────────────── */
+.lo-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.lo-stat {
+  min-width: 0;
+  padding: 0 24px 0 24px;
+  border-left: 1px solid var(--lo-hairline);
+}
+.lo-stat[data-first='true'] {
+  padding-left: 0;
+  border-left: 0;
+}
+.lo-stat-value {
+  margin-top: 10px;
+  font-size: var(--t-headline);
+  line-height: 48px;
+  font-weight: 500;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+  color: var(--lo-ink);
+}
+.lo-stat-lines {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--lo-hairline);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: var(--t-note);
+  line-height: 18px;
+  color: var(--lo-muted);
+}
+@media (max-width: 900px) {
+  .lo-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    row-gap: 28px;
+  }
+  .lo-stat:nth-child(odd) {
+    padding-left: 0;
+    border-left: 0;
+  }
+}
+
+/* ── Row end slot: chip, swapped for an action (×) on hover/focus ─────── */
+.lo-swap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 28px;
+  min-height: 28px;
+  flex-shrink: 0;
+}
+.lo-swap-action {
+  position: absolute;
+  right: -4px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  pointer-events: none;
+}
+.lo-swap-row:hover .lo-swap-action,
+.lo-swap-row:focus-within .lo-swap-action {
+  opacity: 1;
+  pointer-events: auto;
+}
+.lo-swap-row:hover .lo-swap:has(.lo-swap-action) .lo-swap-main,
+.lo-swap-row:focus-within .lo-swap:has(.lo-swap-action) .lo-swap-main {
+  opacity: 0;
+  /* The hidden chip shares the actions' cell; it must not catch their clicks. */
+  pointer-events: none;
+}
+.lo-swap-action:active {
+  transform: translateY(-50%) scale(0.96);
+}
+/* Several labelled actions: chip and actions stack in one grid cell (no absolute overlay, no reflow on hover). */
+.lo-swap--stack {
+  display: grid;
+  justify-items: end;
+}
+.lo-swap--stack > * {
+  grid-area: 1 / 1;
+}
+.lo-swap--stack .lo-swap-action {
+  position: static;
+  transform: none;
+}
+.lo-swap--stack .lo-swap-action:active {
+  transform: none;
+}
+.lo-swap--stack .lo-swap-main {
+  align-self: center;
+}
+.lo-swap-actions {
+  display: flex;
+  gap: 2px;
+  margin-right: -8px; /* ghost buttons' own padding: keep their text on the row's right edge */
+  white-space: nowrap;
+}
+/* Touch / no-hover devices keep the action visible. */
+@media (hover: none) {
+  .lo-swap-action {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .lo-swap:has(.lo-swap-action) .lo-swap-main {
+    opacity: 0;
+  }
+}
+
+/* ── Right-click row menu ─────────────────────────────────────────────── */
+.lo-menu {
+  position: fixed;
+  z-index: 10000;
+  box-sizing: border-box;
+  padding: 6px;
+  background: #fff;
+  border: 1px solid var(--lo-card-border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(27, 34, 48, 0.14), 0 2px 6px rgba(27, 34, 48, 0.06);
+  transform-origin: top left;
+}
+.lo-menu-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  min-height: 36px;
+  justify-content: center;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  font: inherit;
+  font-size: var(--t-body);
+  font-weight: 500;
+  color: var(--lo-ink);
+  text-align: left;
+  cursor: default;
+}
+.lo-menu-item small {
+  font-size: var(--t-label);
+  font-weight: 400;
+  color: var(--lo-faint);
+}
+.lo-menu-item:hover,
+.lo-menu-item:focus-visible {
+  background: rgba(27, 34, 48, 0.055);
+  outline: 0;
+}
+.lo-menu-item--danger {
+  color: var(--lo-critical);
+}
+.lo-menu-item--danger:hover,
+.lo-menu-item--danger:focus-visible {
+  background: var(--lo-critical-bg);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .lo-menu {
+    animation: lo-menu-in 120ms var(--lo-ease);
+  }
+  @keyframes lo-menu-in {
+    from {
+      opacity: 0;
+      transform: scale(0.97);
+    }
+  }
+}
+
+/* Stronger text link (the one action under a summary) */
+.lo-link--strong {
+  font-size: var(--t-body);
+  color: var(--lo-ink);
+  text-decoration: underline;
+  text-decoration-color: #c5ccd8;
+  text-underline-offset: 3px;
+  min-height: 28px;
+}
+
+/* ── Details drawer content ───────────────────────────────────────────── */
+.lo-detail-title {
+  margin: 14px 0 4px;
+  font-size: var(--t-figure);
+  line-height: 28px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: var(--lo-ink);
+  overflow-wrap: anywhere;
+}
+.lo-detail-text {
+  margin: 0;
+  font-size: var(--t-body);
+  line-height: 24px;
+  color: var(--lo-ink);
+}
+.lo-quote {
+  margin: 0;
+  padding: 2px 0 2px 14px;
+  border-left: 2px solid #dfe4ec;
+  font-size: var(--t-body);
+  line-height: 24px;
+  color: var(--lo-ink);
+}
+.lo-quote--muted {
+  color: var(--lo-muted);
+  margin-top: 4px;
+}
+
+/* ── "What came up" graph ─────────────────────────────────────────────── */
+.lo-gnode {
+  cursor: default;
+  outline: none;
+}
+.lo-gnode:focus-visible circle:nth-of-type(2) {
+  stroke: var(--lo-ink);
+  stroke-width: 3;
+}
+.lo-glabel {
+  font-size: var(--t-label);
+  font-weight: 500;
+  fill: #7C8699;
+  paint-order: stroke;
+  stroke: #fff;
+  stroke-width: 4px;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+.lo-glabel--strong {
+  fill: #2B3445;
+  font-weight: 500;
+}
+.lo-graph {
+  position: relative;
+  /* Repaints stay inside the graph box (never invalidate the sidebar/window around it). */
+  contain: layout paint style;
+  isolation: isolate;
+  aspect-ratio: 920 / 500;
+  outline: none;
+  border-radius: 16px 16px 0 0;
+  overflow: hidden;
+  background: #fff;
+}
+.lo-graph:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--lo-focus);
+}
+.lo-graph > svg {
+  cursor: grab;
+  user-select: none;
+}
+.lo-graph > svg[data-panning='true'] {
+  cursor: grabbing;
+}
+.lo-graph-tools {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.lo-graph-zoom {
+  min-width: 44px;
+  padding-left: 4px;
+  font-size: var(--t-label);
+  font-variant-numeric: tabular-nums;
+  color: var(--lo-faint);
+  text-align: right;
+}
+.lo-graph-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 12px 20px 14px;
+  border-top: 1px solid var(--lo-hairline);
+}
+
+
+/* ── Vertical timeline: a line from date to date ──────────────────────── */
+.lo-hist {
+  padding: 4px 0 8px;
+}
+/* Year headings are the anchors of a long list: ink, semibold, with room above (less for the first). */
+.lo-hist-year {
+  padding: 16px 16px 4px;
+  font-size: var(--t-label);
+  line-height: 16px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--lo-ink);
+}
+.lo-hist section:first-child .lo-hist-year {
+  padding-top: 12px;
+}
+.lo-hist-row {
+  box-sizing: border-box;
+  position: relative;
+  display: grid;
+  grid-template-columns: 52px 24px minmax(0, 1fr) auto;
+  column-gap: 12px;
+  align-items: center;
+  width: 100%;
+  padding: 0 16px;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+}
+.lo-hist-row--event {
+  min-height: 56px;
+  padding-block: 8px;
+}
+.lo-hist-row--meeting {
+  height: 36px;
+  cursor: default;
+  transition: background-color 120ms var(--lo-ease);
+}
+.lo-hist-row--meeting:hover {
+  background: var(--lo-hover, rgba(27, 34, 48, 0.04));
+}
+.lo-hist-row--meeting:focus-visible {
+  outline: 2px solid var(--lo-focus);
+  outline-offset: -2px;
+}
+.lo-hist-date {
+  font-size: var(--t-note);
+  color: var(--lo-faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.lo-hist-dot {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+}
+.lo-hist-dot--quiet::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--n-300, #c5ccd8);
+}
+.lo-hist-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.lo-hist-title {
+  font-size: var(--t-body);
+  line-height: 20px;
+  font-weight: 500;
+  color: var(--lo-ink);
+  overflow-wrap: anywhere;
+}
+.lo-hist-sub {
+  font-size: var(--t-note);
+  line-height: 18px;
+  color: var(--lo-faint);
+  overflow-wrap: anywhere;
+}
+.lo-hist-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--t-body);
+  color: var(--lo-muted);
+}
+.lo-hist-kind {
+  flex: none;
+  color: var(--lo-ink);
+}
+.lo-hist-sum {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--lo-faint);
+}
+.lo-hist-x {
+  opacity: 0;
+}
+.lo-hist-row:hover .lo-hist-x,
+.lo-hist-row:focus-within .lo-hist-x {
+  opacity: 1;
+}
+
+/* ── Topic timeline (inside the details drawer) ───────────────────────── */
+.lo-ftl {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0 8px;
+}
+.lo-ftl-day {
+  display: grid;
+  grid-template-columns: 52px 28px minmax(0, 1fr);
+  column-gap: 12px;
+}
+.lo-ftl-year {
+  margin: 0;
+  padding: 8px 0 10px;
+  font-size: var(--t-note);
+  font-weight: 500;
+  line-height: 18px;
+  letter-spacing: 0.01em;
+  color: var(--lo-ink);
+}
+.lo-ftl-date {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  padding-top: 2px;
+  font-size: var(--t-note);
+  font-weight: 500;
+  line-height: 18px;
+  color: var(--lo-ink);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.lo-ftl-date small {
+  font-size: var(--t-label);
+  font-weight: 400;
+  color: var(--lo-faint);
+}
+.lo-ftl-rail {
+  position: relative;
+  display: flex;
+  justify-content: center;
+}
+.lo-ftl-rail::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  margin-left: -1px;
+  background: #e3e8f0;
+}
+.lo-ftl-day[data-last='true'] > .lo-ftl-rail--main::before {
+  /* The line runs the full height of the last day's points and stops with them. */
+  bottom: 22px;
+}
+.lo-ftl-dot {
+  position: relative;
+  z-index: 1;
+  width: 14px;
+  height: 14px;
+  margin-top: 4px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 4px #fff;
+}
+.lo-ftl-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 22px;
+  min-width: 0;
+}
+.lo-ftl-fact {
+  display: block;
+  width: calc(100% + 16px);
+  margin: 0 0 0 -8px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+.lo-ftl-fact:hover {
+  background: #f8fafc;
+}
+.lo-ftl-fact:focus-visible {
+  outline: 2px solid var(--lo-focus);
+}
+.lo-ftl-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--t-label);
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--lo-muted);
+}
+.lo-ftl-kind > span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.lo-ftl-text {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--t-body);
+  line-height: 23px;
+  color: var(--lo-ink);
+  overflow-wrap: anywhere;
+}
+.lo-ftl-rail--gap {
+  min-height: 30px;
+}
+.lo-ftl-rail--gap::before {
+  background: repeating-linear-gradient(to bottom, #e3e8f0 0 4px, transparent 4px 8px);
+}
+.lo-ftl-gap {
+  align-self: center;
+  margin-top: -14px;
+  padding-bottom: 6px;
+}
+
+/* ── Graph full screen: fills the main white card (not the sidebar) ───── */
+.lo-graph-full {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border-radius: inherit;
+}
+.lo-graph-full .lo-graph {
+  flex: 1;
+  min-height: 0;
+  aspect-ratio: auto;
+  border-radius: 0;
+}
+.lo-graph > svg {
+  width: 100%;
+  height: 100%;
+}
+
+/* ── Drawers float like the main card: inset, rounded, same hairline border ── */
+.lo-drawer-modal.lo-drawer-modal {
+  inset: 8px 8px 8px auto;
+  height: calc(100% - 16px);
+  max-height: calc(100% - 16px);
+  background: #fff;
+  border: 1px solid rgba(27, 34, 48, 0.06);
+  border-radius: var(--window-radius);
+  box-shadow: 0 1px 2px rgba(27, 34, 48, 0.04), 0 30px 80px rgba(60, 55, 70, 0.18);
+  overflow: hidden;
+}
+/* Closed: parked past the inset so no edge peeks at the window's side. */
+.lo-drawer-modal.lo-drawer-modal:not([class*='--active']) {
+  transform: translate(calc(100% + 24px));
+}
+/* Motion: in from the right, back out to the right. Strong ease-out, short, and the scrim fades with it.
+   Reshaped's own transitions are switched off so these keyframes are the only animation. */
+.lo-drawer-modal.lo-drawer-modal,
+.lo-drawer-overlay.lo-drawer-overlay {
+  transition: none !important;
+}
+.lo-drawer-modal.lo-drawer-modal {
+  animation: lo-drawer-in 300ms var(--lo-ease) both;
+}
+.lo-drawer-modal.lo-drawer-modal--out {
+  animation: lo-drawer-out 240ms var(--lo-ease) both;
+}
+.lo-drawer-overlay.lo-drawer-overlay {
+  animation: lo-scrim-in 300ms var(--lo-ease) both;
+}
+.lo-drawer-overlay.lo-drawer-overlay--out {
+  animation: lo-scrim-out 240ms var(--lo-ease) both;
+}
+@keyframes lo-drawer-in {
+  from {
+    transform: translateX(calc(100% + 24px));
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes lo-drawer-out {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(calc(100% + 24px));
+  }
+}
+@keyframes lo-scrim-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes lo-scrim-out {
+  to {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lo-drawer-modal.lo-drawer-modal,
+  .lo-drawer-modal.lo-drawer-modal--out {
+    animation-name: lo-scrim-in;
+  }
+  .lo-drawer-modal.lo-drawer-modal--out {
+    animation-name: lo-scrim-out;
+  }
+}
+.lo-drawer-modal .lo-drawer-head {
+  border-radius: var(--window-radius) var(--window-radius) 0 0;
+}
+
+/* Team graph page: the graph fills its parent (no card chrome, no full-screen toggle) */
+.lo-graph-full.lo-graph-page {
+  position: relative;
+  inset: auto;
+  height: 100%;
+  z-index: 0;
+  border-radius: 0;
+}
+.lo-graph-title {
+  position: absolute;
+  top: 20px;
+  left: 28px;
+  z-index: 6;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  pointer-events: none;
+  font-size: var(--t-section);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--lo-ink);
+}
+.lo-graph-title small {
+  font-size: var(--t-body);
+  font-weight: 400;
+  color: var(--lo-faint);
+}
+.lo-graph-empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.lo-garea {
+  font-size: var(--t-axis);
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.85;
+  paint-order: stroke;
+  stroke: #fff;
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+.lo-garea-btn {
+  cursor: default;
+  outline: none;
+}
+.lo-garea-btn:hover .lo-garea,
+.lo-garea-btn:focus-visible .lo-garea {
+  opacity: 1;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.lo-bullets {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  font-size: var(--t-body);
+  line-height: 23px;
+  color: var(--lo-ink);
+}
+.lo-bullets li + li {
+  margin-top: 4px;
+}
+.lo-chip-btn {
+  cursor: default;
+  font: inherit;
+  font-size: var(--t-label);
+  font-weight: 500;
+}
+.lo-chip-btn:hover {
+  background: #f8fafc;
+}
+
+/* ── Forms + dialogs ──────────────────────────────────────────────────── */
+.lo-btn--danger {
+  border-color: transparent;
+  background: var(--lo-danger);
+  color: #fff;
+  box-shadow: 0 1px 2px rgba(27, 34, 48, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+.lo-btn--danger:hover {
+  background: var(--lo-danger-hover);
+}
+.lo-btn--danger svg {
+  color: #fff;
+}
+.lo-dialog-modal.lo-dialog-modal {
+  border: 1px solid rgba(27, 34, 48, 0.06);
+  border-radius: 16px;
+  box-shadow: 0 1px 2px rgba(27, 34, 48, 0.04), 0 30px 80px rgba(60, 55, 70, 0.18);
+  overflow: hidden;
+}
+.lo-dialog {
+  padding: 24px;
+}
+.lo-dialog h2 {
+  margin: 0 0 4px;
+  font-size: var(--t-section);
+  line-height: 26px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--lo-ink);
+}
+.lo-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 16px;
+}
+.lo-dialog-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 24px;
+}
+.lo-grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+@media (max-width: 520px) {
+  .lo-grid2 {
+    grid-template-columns: 1fr;
+  }
+}
+/* Person colour: twelve swatches, a radio group (arrow keys move and pick). */
+.lo-swatches {
+  border: 0;
+  padding: 0;
+  margin: 16px 0 0;
+  min-width: 0;
+}
+.lo-swatches .lo-label {
+  padding: 0;
+  margin-bottom: 6px;
+}
+.lo-swatches-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.lo-swatch {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 50%;
+  padding: 0;
+  background: var(--sw);
+  cursor: default;
+  box-shadow: inset 0 0 0 1px rgba(27, 34, 48, 0.08);
+  transition: transform 120ms var(--lo-ease), box-shadow 120ms var(--lo-ease);
+}
+.lo-swatch:active {
+  transform: scale(0.96);
+}
+.lo-swatch.is-on {
+  box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--sw);
+}
+.lo-swatch:focus-visible {
+  outline: 2px solid var(--lo-focus);
+  outline-offset: 4px;
+}
+.lo-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.lo-label {
+  font-size: var(--t-note);
+  line-height: 18px;
+  font-weight: 500;
+  color: var(--lo-muted);
+}
+.lo-label i {
+  font-style: normal;
+  color: var(--lo-danger);
+}
+.lo-input,
+.lo-textarea {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0 12px;
+  border: 1px solid var(--lo-ctl-border);
+  border-radius: 10px;
+  background-color: #fff;
+  box-shadow: var(--lo-ctl-shadow);
+  font: inherit;
+  font-size: var(--t-body);
+  color: var(--lo-ink);
+}
+.lo-input {
+  height: 36px;
+}
+.lo-select.lo-input {
+  font-weight: 400;
+}
+.lo-textarea {
+  padding: 10px 12px;
+  line-height: 22px;
+  resize: vertical;
+}
+.lo-input::placeholder,
+.lo-textarea::placeholder {
+  color: var(--lo-faint);
+}
+.lo-input:focus-visible,
+.lo-textarea:focus-visible {
+  outline: 2px solid var(--lo-focus);
+  outline-offset: 1px;
+}
+.lo-select.lo-input {
+  padding-right: 32px;
+}
+
+/* ── Points of one 1:1: a vertical timeline split by kind (reuses .lo-ftl) ── */
+.lo-ftl--kind .lo-ftl-day {
+  grid-template-columns: 28px minmax(0, 1fr);
+}
+.lo-ftl--kind .lo-ftl-year {
+  padding: 2px 0 6px;
+}
+/* Points inside the 1:1 drawer: one step smaller so a long summary does not shout. */
+.lo-ftl--kind .lo-ftl-text {
+  font-size: var(--t-body);
+  line-height: 21px;
+}
+.lo-ftl--kind .lo-ftl-dot {
+  margin-top: 5px;
+}
+.lo-ftl-sub {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--t-label);
+  line-height: 16px;
+  color: var(--lo-faint);
+}
+.lo-ftl-state {
+  margin-left: 6px;
+  font-weight: 400;
+  color: var(--lo-faint);
+}
+
+/* ── Extraction progress ───────────────────────────────────────────────── */
+.lo-progressbar {
+  position: relative;
+  height: 4px;
+  border-radius: 6px;
+  background: #eef1f5;
+  overflow: hidden;
+}
+.lo-progressbar::after {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 35%;
+  border-radius: 6px;
+  background: var(--lo-ink);
+  animation: lo-indeterminate 1.4s var(--lo-ease) infinite;
+}
+@keyframes lo-indeterminate {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(290%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lo-progressbar::after {
+    animation: none;
+    width: 100%;
+    opacity: 0.25;
+  }
+}
+
+/* ── A point's details expanded in place inside a drawer ───────────────── */
+.lo-ftl-item {
+  min-width: 0;
+}
+.lo-ftl-fact[aria-expanded='true'] {
+  background: #f8fafc;
+}
+.lo-ftl-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 6px 0 10px 2px;
+}
+.lo-ftl-detail .lo-quote {
+  margin: 0;
+}
+
+/* ── Expand / collapse in place (Reveal) ───────────────────────────────── */
+/* Open: strong ease-out, 240ms. Close: quicker (160ms), the system is responding. Only height, opacity and a
+   4px lift move; closed content is hidden so it leaves the tab order. */
+.lo-reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    grid-template-rows 160ms var(--lo-ease),
+    opacity 120ms ease-out,
+    visibility 0s linear 160ms;
+}
+.lo-reveal[data-open='true'] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  visibility: visible;
+  transition:
+    grid-template-rows 240ms var(--lo-ease),
+    opacity 200ms ease-out 30ms,
+    visibility 0s;
+}
+.lo-reveal-inner {
+  min-height: 0;
+  overflow: hidden;
+  transform: translateY(-4px);
+  transition: transform 160ms var(--lo-ease);
+}
+.lo-reveal[data-open='true'] > .lo-reveal-inner {
+  transform: translateY(0);
+  transition: transform 240ms var(--lo-ease);
+}
+.lo-ftl-fact {
+  transition: background-color 120ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lo-reveal,
+  .lo-reveal[data-open='true'] {
+    transition: opacity 120ms ease-out;
+  }
+  .lo-reveal-inner,
+  .lo-reveal[data-open='true'] > .lo-reveal-inner {
+    transform: none;
+    transition: none;
+  }
+}
+
+/* ── Transcript editing: the text area fills the drawer, the buttons stay pinned to its bottom edge ── */
+.lo-drawer-body--edit {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: 0;
+}
+.lo-edit {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.lo-edit-area {
+  flex: 1;
+  min-height: 0;
+  resize: none;
+}
+.lo-edit-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px -20px 0 -24px;
+  padding: 14px 20px 16px 24px;
+  border-top: 1px solid var(--lo-hairline);
+  background: #fff;
+}
+
+/* Screen title: the top of the type scale. */
+.lo-page-title {
+  margin: 0;
+  font-size: var(--t-title);
+  line-height: 32px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: var(--lo-ink);
+}
+
+.lo-group-dot {
+  margin-left: 2px; /* label padding 16 + 2 + 10 puts the dot on the tick rings' centre line, 28px in */
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.lo-group-dot i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+/* Section title row with an action on the right; the title sits --sp-head above its card. */
+.lo-sechead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 24px;
+  margin-bottom: var(--sp-head);
+}
+
+/* About: label / value list */
+.lo-about {
+  margin: 0;
+  padding: 4px 0;
+}
+.lo-about-row {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  column-gap: 16px;
+  align-items: baseline;
+  min-height: 44px;
+  padding: 10px 16px;
+  box-sizing: border-box;
+}
+.lo-about-row + .lo-about-row {
+  border-top: 1px solid var(--lo-hairline);
+}
+.lo-about-row dt {
+  font-size: var(--t-note);
+  color: var(--lo-faint);
+}
+.lo-about-row dd {
+  margin: 0;
+  font-size: var(--t-body);
+  line-height: 22px;
+  color: var(--lo-ink);
+  overflow-wrap: anywhere;
+}
+.lo-about-row dd small {
+  margin-left: 8px;
+  font-size: var(--t-note);
+  color: var(--lo-faint);
+}

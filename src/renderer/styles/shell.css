@@ -1,0 +1,317 @@
+/*
+ * App shell — "Merged" direction: a flat light-grey frame (no gradient),
+ * sidebar on the glass, clean white content card. Palette: ink #1B2230, muted #667085,
+ * hairline #EEF1F5. Orange only for late / at-risk ("needs you").
+ * Nav switching is instant — no transitions on row state.
+ */
+:root {
+  /* Type scale: the only sizes text uses (size / line). Two weights, 400 and 500.
+     headline 40/44 · title 28/32 · figure 24/28 · section 16/22 · body 14/20 · note 13/18 · label 12/16 · axis 11/14 */
+  --t-headline: 40px;
+  --t-title: 28px;
+  --t-figure: 24px;
+  --t-section: 16px;
+  --t-body: 14px;
+  --t-note: 13px;
+  --t-label: 12px;
+  --t-axis: 11px;
+  --lh-headline: 44px;
+  --lh-title: 32px;
+  --lh-figure: 28px;
+  --lh-section: 22px;
+  --lh-body: 20px;
+  --lh-note: 18px;
+  --lh-label: 16px;
+  --lh-axis: 14px;
+  /* Radii: 6 chips, 10 controls and rows, 16 cards and drawers (pills 999 and dots 50% aside). */
+  --r-chip: 6px;
+  --r-ctl: 10px;
+  --r-card: 16px;
+  /* Spacing rules: title to its content 16, section to section 48. */
+  --sp-head: 16px;
+  --sp-section: 48px;
+  --shell-ink: #1b2230;
+  --shell-muted: #667085;
+  --shell-hairline: #eef1f5;
+  --shell-tint: rgba(27, 34, 48, 0.075);
+  /* The macOS window's own corner radius (measured: about 16px). The card and the drawers that float inside it use the same one. */
+  --window-radius: 16px;
+}
+.shell-root {
+  position: relative;
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+  box-sizing: border-box;
+  padding: 8px 8px 8px 0;
+  background: var(--n-50); /* flat frame in a plain browser; in the Mac app it is the window's vibrancy (below) */
+  color: var(--shell-ink);
+}
+html[data-vibrancy],
+html[data-vibrancy] body {
+  background: transparent !important;
+}
+/* A wash of white over the window's vibrancy: the material still shows, but calmer and lighter. 0 = pure material, 1 = flat white. */
+html[data-vibrancy] .shell-root {
+  --vibrancy-white: 0.45;
+  background: rgba(255, 255, 255, var(--vibrancy-white)) !important;
+}
+.shell-sidebar {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 208px;
+  width: 208px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  padding: 0 12px 0 14px; /* no bottom inset: Settings' hover ends on the card's bottom edge */
+  min-height: 0;
+}
+.shell-sidebar-drag {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 84px;
+  padding: 28px 8px 0 24px; /* the traffic lights sit above this row; 24px lines the wordmark up with the nav icons below */
+  box-sizing: border-box;
+  margin: 0 -12px 8px -14px;
+  white-space: nowrap;
+}
+.shell-brand {
+  /* The wordmark: the one serif in the chrome, set where the logo square used to be (next to the traffic lights). */
+  font-family: 'Newsreader Variable', 'Iowan Old Style', Georgia, serif;
+  font-optical-sizing: auto;
+  font-size: 26px;
+  line-height: 30px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: var(--shell-ink);
+  position: relative;
+  top: 4px; /* optical: sits a touch lower than the traffic lights' centre line */
+}
+.shell-row {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 10px;
+  /* Menu and project rows read as one list: same ink, size, height and text start. */
+  color: var(--shell-ink);
+  text-align: left;
+}
+.shell-row:hover {
+  background: rgba(27, 34, 48, 0.05);
+}
+.shell-row[data-selected='true'] {
+  background: var(--shell-tint);
+  color: var(--shell-ink);
+}
+.shell-team-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 28px;
+  margin-top: 22px;
+  padding: 0 4px 0 10px;
+}
+.shell-add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  color: #8a93a3;
+}
+.shell-add:hover {
+  background: var(--shell-tint);
+}
+.shell-team {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+}
+.shell-person {
+  padding: 0 8px 0 10px;
+}
+/* The dot sits centred in an 18px slot, the width of the menu icons, so names start where menu labels do. */
+.shell-dot {
+  width: 7px;
+  height: 7px;
+  margin: 0 5.5px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+@supports (corner-shape: squircle) {
+  .shell-dot {
+    border-radius: 50%;
+    corner-shape: squircle;
+  }
+}
+.shell-person-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--t-body);
+}
+.shell-count {
+  /* Plain attention-coloured text, no badge: a number is enough, and the orange says it needs you. */
+  box-sizing: border-box;
+  min-width: 20px;
+  color: var(--lo-attn);
+  font-size: var(--t-axis);
+  line-height: var(--lh-axis);
+  font-weight: 500;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.shell-settings {
+  margin-top: 8px;
+}
+.shell-card {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border: 1px solid rgba(27, 34, 48, 0.06);
+  border-radius: var(--window-radius);
+  box-shadow: 0 1px 2px rgba(27, 34, 48, 0.04), 0 30px 80px rgba(60, 55, 70, 0.1);
+  overflow: hidden;
+}
+.shell-dragstrip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 16px;
+  z-index: 2;
+}
+.shell-search {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 36px;
+  margin: 0 0 12px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 10px;
+  /* Frosted, like the sidebar itself: no hard border, just a hairline inside. */
+  background: rgba(255, 255, 255, 0.5);
+  box-shadow:
+    inset 0 0 0 1px rgba(27, 34, 48, 0.06),
+    0 1px 1px rgba(27, 34, 48, 0.03);
+  font: inherit;
+  font-size: var(--t-body);
+  font-weight: 500;
+  color: #8a93a3;
+  cursor: default;
+  transition:
+    background-color 120ms ease-out,
+    box-shadow 120ms ease-out,
+    color 120ms ease-out,
+    transform 160ms var(--lo-ease);
+}
+.shell-search:hover {
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow:
+    inset 0 0 0 1px rgba(27, 34, 48, 0.09),
+    0 1px 2px rgba(27, 34, 48, 0.05);
+  color: var(--shell-ink);
+}
+.shell-search:active {
+  transform: scale(0.98);
+}
+.shell-search:focus-visible {
+  outline: 2px solid var(--lo-focus);
+  outline-offset: 2px;
+}
+.shell-search svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.shell-search > span:nth-child(2) {
+  flex: 1;
+  text-align: left;
+}
+/* The shortcut is a quiet hint, not two buttons. */
+.shell-search .shell-keys {
+  gap: 2px;
+}
+.shell-search .shell-keys kbd {
+  min-width: 0;
+  height: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: var(--t-label);
+  font-weight: 500;
+  color: #a3abb8;
+}
+.lo-fab {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 20;
+  height: 40px;
+  border-radius: 16px;
+  box-shadow: 0 6px 20px rgba(27, 34, 48, 0.25);
+}
+.shell-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.shell-keys {
+  display: flex;
+  gap: 3px;
+}
+.shell-keys kbd {
+  box-sizing: border-box;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.14);
+  font-family: system-ui, sans-serif;
+  font-size: var(--t-axis);
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.85);
+}
+@media (max-width: 1000px) {
+  .shell-sidebar {
+    flex-basis: 208px;
+    width: 208px;
+  }
+}
+
+/* ── One content width for every screen (taken from Overview) ─────────── */
+.page {
+  box-sizing: border-box;
+  height: 100%;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 48px clamp(24px, 5vw, 72px) 56px;
+}
+.page-inner {
+  max-width: 920px;
+  margin: 0 auto;
+}
