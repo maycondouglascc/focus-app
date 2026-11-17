@@ -1,6 +1,9 @@
 //! Application screens mounted inside `AppShell` or standalone for tests.
 #![allow(dead_code)] // screens wired progressively across commits 4-7
 
+pub mod entry_tree;
+pub mod project_report;
+pub mod projects;
 pub mod settings;
 pub mod welcome;
 
