@@ -1099,20 +1099,54 @@ unsafe fn on_a11y_action_msg(hwnd: HWND) {
             let target = a11y::widget_id(req.target_node);
             match req.action {
                 Action::Focus => {
-                    focus_changed |= u.focus.focus_keyboard(target);
+                    let virtual_parent = active_tree(u).and_then(|t| {
+                        let (parent, vc) = t.find_virtual_child(target)?;
+                        let pd = t.data(parent)?;
+                        if vc.focusable && !vc.a11y.disabled && pd.focusable && !pd.disabled {
+                            Some(pd.id)
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(parent_id) = virtual_parent {
+                        focus_changed |= u.focus.focus_keyboard(parent_id);
+                        if let Some(h) = u.screen.as_mut() {
+                            if h.on_a11y_focus(target) {
+                                rebuild_screen_if_dirty(u, hwnd);
+                                focus_changed = true;
+                            }
+                        }
+                    } else {
+                        focus_changed |= u.focus.focus_keyboard(target);
+                    }
                     visual_changed = true;
                 }
                 Action::Click => {
-                    if active_tree(u)
+                    let direct_focusable = active_tree(u)
                         .and_then(|t| t.node_by_id(target).and_then(|n| t.data(n)))
-                        .is_some_and(|d| d.focusable && !d.disabled)
-                    {
+                        .is_some_and(|d| d.focusable && !d.disabled);
+                    if direct_focusable {
                         focus_changed |= u.focus.focus_keyboard(target);
+                    } else if let Some(parent_id) = active_tree(u).and_then(|t| {
+                        let (parent, vc) = t.find_virtual_child(target)?;
+                        let pd = t.data(parent)?;
+                        if vc.focusable && !vc.a11y.disabled && pd.focusable && !pd.disabled {
+                            Some(pd.id)
+                        } else {
+                            None
+                        }
+                    }) {
+                        focus_changed |= u.focus.focus_keyboard(parent_id);
+                        if let Some(h) = u.screen.as_mut() {
+                            focus_changed |= h.on_a11y_focus(target);
+                        }
                     }
                     if let Some(h) = u.screen.as_mut() {
                         if h.on_click(target) {
                             rebuild_screen_if_dirty(u, hwnd);
                             focus_changed = true;
+                        } else if focus_changed {
+                            rebuild_screen_if_dirty(u, hwnd);
                         }
                     }
                     if focus_changed {
@@ -1177,6 +1211,14 @@ unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
         }
         _ => {
             let prev = u.focus.focused();
+            let prev_vf = prev.and_then(|fid| {
+                u.screen.as_ref().and_then(|h| {
+                    h.tree()
+                        .node_by_id(fid)
+                        .and_then(|n| h.tree().data(n))
+                        .and_then(|d| d.virtual_focus)
+                })
+            });
             if let Some(h) = u.screen.as_mut() {
                 let (mut handled, mut dirty) = h.on_key(ev, &mut u.focus);
                 if !handled
@@ -1203,7 +1245,20 @@ unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
                     sync_rich_focus(u);
                     sync_timers(u, hwnd, false);
                 }
-                return (handled, u.focus.focused() != prev, dirty, false);
+                let cur_vf = u.focus.focused().and_then(|fid| {
+                    u.screen.as_ref().and_then(|h| {
+                        h.tree()
+                            .node_by_id(fid)
+                            .and_then(|n| h.tree().data(n))
+                            .and_then(|d| d.virtual_focus)
+                    })
+                });
+                return (
+                    handled,
+                    u.focus.focused() != prev || cur_vf != prev_vf,
+                    dirty,
+                    false,
+                );
             }
             (false, false, false, false)
         }

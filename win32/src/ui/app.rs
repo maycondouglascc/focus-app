@@ -843,6 +843,16 @@ impl Screen for AppShell {
         handled
     }
 
+    fn on_a11y_focus(&mut self, id: WidgetId) -> bool {
+        if !self.is_onboarded() {
+            return false;
+        }
+        match self.section {
+            Section::Calendar => self.calendar.on_a11y_focus(id),
+            _ => false,
+        }
+    }
+
     fn on_key(&mut self, ev: KeyEvent, focus: &mut FocusModel) -> bool {
         if !self.is_onboarded() {
             return self.welcome.on_key(ev, focus);

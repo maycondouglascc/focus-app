@@ -56,6 +56,9 @@ pub trait Screen {
     fn on_click(&mut self, _id: WidgetId) -> bool {
         false
     }
+    fn on_a11y_focus(&mut self, _id: WidgetId) -> bool {
+        false
+    }
     fn on_key(&mut self, _key: KeyEvent, _focus: &mut FocusModel) -> bool {
         false
     }
@@ -168,6 +171,15 @@ impl ScreenHost {
 
     pub fn on_click(&mut self, id: WidgetId) -> bool {
         if self.screen.on_click(id) {
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn on_a11y_focus(&mut self, id: WidgetId) -> bool {
+        if self.screen.on_a11y_focus(id) {
             self.dirty = true;
             true
         } else {

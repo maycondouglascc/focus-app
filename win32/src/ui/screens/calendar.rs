@@ -12,7 +12,7 @@ use crate::db::{Project, SharedStore, TimeEntry};
 use crate::format::{hm, money, range_label};
 use crate::stats::{earnings_by_currency, entry_ms};
 use crate::time::{add_days, add_days_start, iso_week, start_of_week_with_first};
-use crate::ui::input::KeyCode;
+use crate::ui::input::KeyEvent;
 use crate::ui::screen::{BuiltScreen, KeyModifiers, PointerReply, Screen, ScreenEnv};
 use crate::ui::strings;
 use crate::ui::text::{Align, Weight};
@@ -45,6 +45,8 @@ pub struct CalendarScreen {
 
     cached_projects: Vec<Project>,
     pub new_project_requested: bool,
+    #[cfg(test)]
+    pub last_opened_activity: Option<super::calendar_layout::ActivitySession>,
 }
 
 impl CalendarScreen {
@@ -64,6 +66,8 @@ impl CalendarScreen {
             id_empty_new_proj: None,
             cached_projects: Vec::new(),
             new_project_requested: false,
+            #[cfg(test)]
+            last_opened_activity: None,
         }
     }
 
@@ -107,6 +111,10 @@ impl CalendarScreen {
             }
             GridAction::OpenActivity(session, anchor_dip) => {
                 self.editor = None;
+                #[cfg(test)]
+                {
+                    self.last_opened_activity = Some(session.clone());
+                }
                 if let Some(hwnd) = window::hwnd() {
                     let is_24h = {
                         let st = self.store.borrow();
@@ -490,14 +498,27 @@ impl CalendarScreen {
             self.new_project_requested = true;
             return true;
         }
+        if self.grid.on_click(id) {
+            if let Some(action) = self.grid.pending_action.take() {
+                self.apply_grid_action(action, palette);
+            }
+            return true;
+        }
         false
     }
 
-    pub fn handle_key(&mut self, key: KeyCode) -> bool {
+    pub fn on_a11y_focus(&mut self, id: WidgetId) -> bool {
         if self.editor.is_some() {
             return false;
         }
-        if self.grid.on_key(key) {
+        self.grid.on_a11y_focus(id)
+    }
+
+    pub fn handle_key(&mut self, ev: KeyEvent) -> bool {
+        if self.editor.is_some() {
+            return false;
+        }
+        if self.grid.on_key(ev) {
             if let Some(action) = self.grid.pending_action.take() {
                 self.apply_grid_action(action, &Palette::LIGHT);
             }
@@ -620,15 +641,15 @@ impl Screen for CalendarScreen {
         self.handle_click(id, &Palette::LIGHT)
     }
 
-    fn on_key(
-        &mut self,
-        ev: crate::ui::input::KeyEvent,
-        focus: &mut crate::ui::focus::FocusModel,
-    ) -> bool {
+    fn on_a11y_focus(&mut self, id: WidgetId) -> bool {
+        CalendarScreen::on_a11y_focus(self, id)
+    }
+
+    fn on_key(&mut self, ev: KeyEvent, focus: &mut crate::ui::focus::FocusModel) -> bool {
         self.grid.set_canvas_focused(
             focus.focused().is_some() && focus.focused() == self.grid.canvas_id,
         );
-        self.handle_key(ev.key)
+        self.handle_key(ev)
     }
 
     fn on_text_change(&mut self, key: &str, value: &str) -> bool {
@@ -712,6 +733,7 @@ mod tests {
     use crate::locale::SystemLocale;
     use crate::ui::a11y;
     use crate::ui::focus::{FocusModel, FocusScope};
+    use crate::ui::input::KeyCode;
     use crate::ui::screen::ScreenHost;
     use crate::ui::text::TextSystem;
 
@@ -874,5 +896,212 @@ mod tests {
             .and_then(|n| host.tree().data(n))
             .map(|d| d.a11y.name.as_str());
         assert_eq!(grid_name, Some(strings::CAL_GRID_LABEL));
+    }
+
+    #[test]
+    fn week_grid_exposes_virtual_a11y_children_for_demo_entries_sessions_and_cursor_and_opens_popover_by_keyboard(
+    ) {
+        let text = TextSystem::new().expect("dwrite");
+        let palette = Palette::LIGHT;
+        let env = ScreenEnv {
+            width_dip: 1200.0,
+            height_dip: 800.0,
+            hover: None,
+            pressed: None,
+            focused: None,
+            palette: &palette,
+            text: &text,
+        };
+        let store = shared_store(Box::new(DemoStore::new(SystemLocale::en_us())));
+        let now_ms = store.borrow().now_ms();
+        let week_start = start_of_week_with_first(now_ms, 0);
+        let week_end = add_days_start(week_start, 7);
+        let week_entries = store.borrow().list_entries(week_start, week_end).unwrap();
+        assert!(!week_entries.is_empty());
+
+        let screen = CalendarScreen::new(Rc::clone(&store));
+        let mut focus = FocusModel::new();
+        let mut host = ScreenHost::mount(Box::new(screen), &env, &mut focus);
+        assert_eq!(a11y::validate_tree_names(host.tree()), Ok(()));
+
+        let grid_id = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == strings::CAL_GRID_LABEL)
+            .unwrap()
+            .id;
+        assert!(focus.focus_keyboard(grid_id));
+        let env_focused = ScreenEnv {
+            focused: focus.focused(),
+            ..env
+        };
+        host.mark_dirty();
+        assert!(host.rebuild_if_dirty(&env_focused, &mut focus));
+
+        let update = a11y::build_tree_update(
+            Some(host.tree()),
+            focus.focused(),
+            1.0,
+            (1200, 800),
+            strings::APP_NAME,
+        );
+        // Must expose one virtual child button per visible entry segment in the demo week.
+        let button_names: Vec<String> = update
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.role() == accesskit::Role::Button)
+            .filter_map(|(_, n)| n.label().map(str::to_string))
+            .collect();
+        for e in &week_entries {
+            let desc_part = if !e.description.is_empty() {
+                e.description.as_str()
+            } else {
+                ""
+            };
+            assert!(
+                button_names
+                    .iter()
+                    .any(|lbl| desc_part.is_empty() || lbl.contains(desc_part)),
+                "missing virtual a11y node for demo entry {:?} in {:?}",
+                e.description,
+                button_names
+            );
+        }
+        // Focus in UIA must target the virtual item under the cursor, not just the grid group.
+        assert_ne!(update.focus, a11y::ak_id(grid_id));
+
+        // Must also expose virtual nodes for demo activity sessions in Mix/Activity mode.
+        let activity_nodes: Vec<(accesskit::NodeId, String)> = update
+            .nodes
+            .iter()
+            .filter_map(|(nid, n)| {
+                let lbl = n.label()?;
+                if lbl.starts_with("Activity: ") {
+                    Some((*nid, lbl.to_string()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            !activity_nodes.is_empty(),
+            "expected virtual a11y buttons for demo activity sessions"
+        );
+
+        // Moving UIA focus onto a virtual activity node syncs WeekGrid cursor and UIA focus.
+        let target_sess_ak = activity_nodes[0].0;
+        let target_sess_wid = a11y::widget_id(target_sess_ak);
+        assert!(host.on_a11y_focus(target_sess_wid));
+        assert!(host.rebuild_if_dirty(&env_focused, &mut focus));
+        let update2 = a11y::build_tree_update(
+            Some(host.tree()),
+            focus.focused(),
+            1.0,
+            (1200, 800),
+            strings::APP_NAME,
+        );
+        assert_eq!(update2.focus, target_sess_ak);
+
+        // Activating 'A' or switching to Activity mode + Enter opens the activity session by keyboard.
+        let mut grid = WeekGridState::new();
+        let entries_all = store.borrow().list_entries(week_start, week_end).unwrap();
+        let activity_all = store.borrow().list_activity(week_start, week_end).unwrap();
+        let projs_map: HashMap<String, Project> = store
+            .borrow()
+            .list_projects()
+            .unwrap()
+            .into_iter()
+            .map(|p| (p.id.clone(), p))
+            .collect();
+        let mut t = Tree::new(style::column());
+        let r = t.root();
+        grid.mode = CalendarMode::Activity;
+        grid.build(
+            &mut t,
+            r,
+            week_start,
+            &entries_all,
+            &activity_all,
+            &projs_map,
+            now_ms,
+            8,
+            true,
+            &env_focused,
+        );
+        grid.set_canvas_focused(true);
+        // Find any virtual session and move focus to its slot, then press Enter -> OpenActivity!
+        let sess_vid = t
+            .data(t.node_by_id(grid.canvas_id.unwrap()).unwrap())
+            .unwrap()
+            .virtual_children
+            .iter()
+            .find(|c| c.a11y.name.starts_with("Activity: "))
+            .unwrap()
+            .id;
+        assert!(grid.on_a11y_focus(sess_vid));
+        let enter = KeyEvent {
+            key: KeyCode::Enter,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        };
+        assert!(grid.on_key(enter));
+        match grid.pending_action.take() {
+            Some(GridAction::OpenActivity(sess, _)) => assert!(sess.active_ms > 0),
+            other => panic!("expected GridAction::OpenActivity in Activity mode, got {other:?}"),
+        }
+
+        // Also test pressing 'A' in Mix mode to open ActivityPopover on the focused session slot.
+        let mut grid_mix = WeekGridState::new();
+        grid_mix.mode = CalendarMode::Mix;
+        let mut t2 = Tree::new(style::column());
+        let r2 = t2.root();
+        grid_mix.build(
+            &mut t2,
+            r2,
+            week_start,
+            &entries_all,
+            &activity_all,
+            &projs_map,
+            now_ms,
+            8,
+            true,
+            &env_focused,
+        );
+        let sess_slot_vid = t2
+            .data(t2.node_by_id(grid_mix.canvas_id.unwrap()).unwrap())
+            .unwrap()
+            .virtual_children
+            .iter()
+            .find(|c| c.a11y.name.starts_with("Activity: "))
+            .unwrap()
+            .id;
+        assert!(grid_mix.on_a11y_focus(sess_slot_vid));
+        grid_mix.set_canvas_focused(true);
+        let key_a = KeyEvent {
+            key: KeyCode::Other(0x41),
+            shift: false,
+            ctrl: false,
+            alt: false,
+        };
+        assert!(grid_mix.on_key(key_a));
+        assert!(matches!(
+            grid_mix.pending_action.take(),
+            Some(GridAction::OpenActivity(_, _))
+        ));
+
+        // Also test direct CalendarScreen::handle_click on virtual session -> records OpenActivity.
+        let mut cal = CalendarScreen::new(Rc::clone(&store));
+        let mut cal_tree = screen_root_tree(&env_focused);
+        let cal_root = cal_tree.root();
+        cal.build_content(&mut cal_tree, cal_root, cal_root, &env_focused);
+        cal_tree.layout(1200.0, 800.0, &text);
+        assert!(cal.handle_click(target_sess_wid, &palette));
+        assert!(cal.last_opened_activity.is_some());
+
+        // And host handling virtual click stays valid.
+        assert!(host.on_click(target_sess_wid));
     }
 }

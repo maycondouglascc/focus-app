@@ -195,6 +195,16 @@ pub struct A11yInfo {
     pub requires_name: bool,
 }
 
+/// Accessibility-only virtual child hosted inside a logical widget (for
+/// instance, entries and activity sessions drawn on the week grid canvas).
+#[derive(Clone, Debug)]
+pub struct VirtualA11yChild {
+    pub id: WidgetId,
+    pub rect: Rect,
+    pub focusable: bool,
+    pub a11y: A11yInfo,
+}
+
 pub struct NodeData {
     pub id: WidgetId,
     pub leaf: Option<Leaf>,
@@ -206,6 +216,8 @@ pub struct NodeData {
     pub scroll_x: f32,
     pub scroll_y: f32,
     pub a11y: A11yInfo,
+    pub virtual_children: Vec<VirtualA11yChild>,
+    pub virtual_focus: Option<WidgetId>,
 }
 
 impl NodeData {
@@ -221,6 +233,8 @@ impl NodeData {
             scroll_x: 0.0,
             scroll_y: 0.0,
             a11y: A11yInfo::default(),
+            virtual_children: Vec::new(),
+            virtual_focus: None,
         }
     }
 }
@@ -460,6 +474,30 @@ impl Tree {
         if let Some(d) = self.data_mut(node) {
             d.a11y = a11y;
         }
+    }
+
+    pub fn set_virtual_children(
+        &mut self,
+        node: Node,
+        children: Vec<VirtualA11yChild>,
+        focused: Option<WidgetId>,
+    ) {
+        if let Some(d) = self.data_mut(node) {
+            d.virtual_children = children;
+            d.virtual_focus = focused;
+        }
+    }
+
+    pub fn find_virtual_child(&self, id: WidgetId) -> Option<(Node, &VirtualA11yChild)> {
+        for node in self.all_nodes() {
+            let Some(d) = self.data(node) else {
+                continue;
+            };
+            if let Some(vc) = d.virtual_children.iter().find(|c| c.id == id) {
+                return Some((node, vc));
+            }
+        }
+        None
     }
 
     pub fn children(&self, node: Node) -> Vec<Node> {

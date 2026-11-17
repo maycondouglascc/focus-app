@@ -12,13 +12,14 @@ use crate::stats::{entry_ms, union_ms};
 use crate::time::{
     add_days_start, at_minutes, minutes_of_day, same_day, start_of_day, to_local, MIN,
 };
-use crate::ui::input::KeyCode;
+use crate::ui::input::{KeyCode, KeyEvent};
 use crate::ui::screen::{KeyModifiers, PointerReply, ScreenEnv};
 use crate::ui::strings;
 use crate::ui::text::{Align, Weight, Wrap};
 use crate::ui::theme::{app_color, mix, parse_hex_color, Palette, NO_PROJECT};
 use crate::ui::tree::{
-    style, A11yInfo, A11yRole, DrawCmd, HitMode, Leaf, Node, PaintStyle, Rect, Tree, WidgetId,
+    keyed_widget_id, style, A11yInfo, A11yRole, DrawCmd, HitMode, Leaf, Node, PaintStyle, Rect,
+    Tree, VirtualA11yChild, WidgetId,
 };
 use crate::ui::widgets::add_label;
 use crate::ui::window;
@@ -91,6 +92,27 @@ enum GridDrag {
 }
 
 #[derive(Clone, Debug)]
+enum VirtualTargetKind {
+    Entry {
+        entry: TimeEntry,
+        day_idx: usize,
+        min: i32,
+        anchor: Rect,
+    },
+    Session {
+        session: ActivitySession,
+        day_idx: usize,
+        min: i32,
+        anchor: Rect,
+    },
+    CursorSlot {
+        day_idx: usize,
+        min: i32,
+        anchor: Rect,
+    },
+}
+
+#[derive(Clone, Debug)]
 pub enum GridAction {
     OpenEntry(EntryDraft, #[allow(dead_code)] Rect),
     UpdateEntry { id: String, patch: EntryPatch },
@@ -127,6 +149,8 @@ pub struct WeekGridState {
     cursor_min: i32,
     drag: Option<GridDrag>,
     last_pointer_dip: Option<(f32, f32)>,
+    virtual_targets: HashMap<WidgetId, VirtualTargetKind>,
+    focused_virtual_override: Option<WidgetId>,
     pub pending_action: Option<GridAction>,
     pub drag_frames_rendered: u64,
 }
@@ -168,6 +192,8 @@ impl WeekGridState {
             cursor_min: 9 * 60,
             drag: None,
             last_pointer_dip: None,
+            virtual_targets: HashMap::new(),
+            focused_virtual_override: None,
             pending_action: None,
             drag_frames_rendered: 0,
         }
@@ -182,6 +208,266 @@ impl WeekGridState {
 
     pub fn set_canvas_focused(&mut self, focused: bool) {
         self.canvas_focused = focused;
+    }
+
+    fn canvas_to_screen_rect(&self, r: Rect) -> Rect {
+        let cr = self.canvas_rect();
+        Rect {
+            x: cr.x + r.x,
+            y: cr.y + r.y,
+            w: r.w,
+            h: r.h,
+        }
+    }
+
+    fn ensure_cursor_visible(&mut self) {
+        let top = (self.cursor_min as f32) * DIP_PER_MIN;
+        let bot = ((self.cursor_min + 30) as f32) * DIP_PER_MIN;
+        let vh = self.viewport_rect().h;
+        if top < self.scroll_y {
+            self.scroll_y = top;
+        } else if bot > self.scroll_y + vh {
+            self.scroll_y = (bot - vh).max(0.0);
+        }
+    }
+
+    pub fn on_a11y_focus(&mut self, id: WidgetId) -> bool {
+        let Some(target) = self.virtual_targets.get(&id).cloned() else {
+            return false;
+        };
+        let (day_idx, min) = match target {
+            VirtualTargetKind::Entry { day_idx, min, .. }
+            | VirtualTargetKind::Session { day_idx, min, .. }
+            | VirtualTargetKind::CursorSlot { day_idx, min, .. } => (day_idx, min),
+        };
+        self.cursor_day = day_idx.min(6);
+        self.cursor_min = ((min / 30) * 30).clamp(0, 23 * 60 + 30);
+        self.focused_virtual_override = Some(id);
+        self.ensure_cursor_visible();
+        true
+    }
+
+    pub fn on_click(&mut self, id: WidgetId) -> bool {
+        let Some(target) = self.virtual_targets.get(&id).cloned() else {
+            return false;
+        };
+        match target {
+            VirtualTargetKind::Entry { entry, anchor, .. } => {
+                self.pending_action = Some(GridAction::OpenEntry(
+                    EntryDraft::from_entry(&entry),
+                    anchor,
+                ));
+            }
+            VirtualTargetKind::Session {
+                session, anchor, ..
+            } => {
+                self.pending_action = Some(GridAction::OpenActivity(session, anchor));
+            }
+            VirtualTargetKind::CursorSlot {
+                day_idx,
+                min,
+                anchor,
+            } => {
+                let day = self.week_days[day_idx.min(6)];
+                let start = at_minutes(day, min);
+                let end = start + 30 * MIN;
+                self.pending_action = Some(GridAction::OpenEntry(
+                    EntryDraft {
+                        id: None,
+                        project_id: None,
+                        description: String::new(),
+                        start,
+                        end: Some(end),
+                        billable: false,
+                        source: "calendar".into(),
+                    },
+                    anchor,
+                ));
+            }
+        }
+        true
+    }
+
+    fn build_virtual_a11y(&mut self, canvas_w: f32) -> (Vec<VirtualA11yChild>, Option<WidgetId>) {
+        self.virtual_targets.clear();
+        let mut children = Vec::new();
+        let cursor_d = self.cursor_day.min(6);
+        let cursor_day_ts = self.week_days[cursor_d];
+        let cursor_slot_s = at_minutes(cursor_day_ts, self.cursor_min);
+        let cursor_slot_e = cursor_slot_s + 30 * MIN;
+        let mut focused_entry_id: Option<WidgetId> = None;
+        let mut focused_sess_id: Option<WidgetId> = None;
+
+        let show_act = matches!(self.mode, CalendarMode::Activity | CalendarMode::Mix);
+        let show_ent = matches!(self.mode, CalendarMode::Time | CalendarMode::Mix);
+        let preview = self.preview_entries();
+
+        for di in 0..7 {
+            let day = self.week_days[di];
+            if day == 0 {
+                continue;
+            }
+            let day_end = add_days_start(day, 1);
+            let day_name = weekday_short(to_local(day).weekday_mon0());
+
+            if show_ent {
+                let segs = layout_day(&preview, day, self.now_ms);
+                for seg in segs {
+                    let vid = keyed_widget_id(&format!("cal.v.entry.{}.{}", seg.entry.id, di));
+                    let rect = self.entry_box(canvas_w, di, &seg, day_end);
+                    let proj = seg
+                        .entry
+                        .project_id
+                        .as_deref()
+                        .and_then(|pid| self.projects_by_id.get(pid));
+                    let title = if !seg.entry.description.trim().is_empty() {
+                        seg.entry.description.as_str()
+                    } else if let Some(pr) = proj {
+                        pr.name.as_str()
+                    } else {
+                        strings::PROJ_REP_NO_DESC
+                    };
+                    let start_t = format::time(seg.start, self.is_24h);
+                    let end_t = if seg.entry.end.is_none() && seg.end >= self.now_ms {
+                        "now".to_string()
+                    } else {
+                        format::time(seg.end, self.is_24h)
+                    };
+                    let name = format!(
+                        "{title}, {day_name} {start_t}–{end_t} ({})",
+                        duration((seg.end - seg.start).max(0))
+                    );
+                    let desc = proj.map(|pr| pr.name.clone());
+                    let start_min =
+                        (minutes_of_day(seg.start).floor() as i32).clamp(0, 23 * 60 + 30);
+                    let anchor = self.canvas_to_screen_rect(rect);
+                    self.virtual_targets.insert(
+                        vid,
+                        VirtualTargetKind::Entry {
+                            entry: seg.entry.clone(),
+                            day_idx: di,
+                            min: start_min,
+                            anchor,
+                        },
+                    );
+                    children.push(VirtualA11yChild {
+                        id: vid,
+                        rect,
+                        focusable: true,
+                        a11y: A11yInfo {
+                            role: A11yRole::Button,
+                            name,
+                            description: desc,
+                            clickable: true,
+                            requires_name: true,
+                            ..Default::default()
+                        },
+                    });
+                    if di == cursor_d
+                        && focused_entry_id.is_none()
+                        && seg.start < cursor_slot_e
+                        && seg.end > cursor_slot_s
+                    {
+                        focused_entry_id = Some(vid);
+                    }
+                }
+            }
+
+            if show_act {
+                for (si, s) in self.sessions_by_day[di].iter().enumerate() {
+                    let vid = keyed_widget_id(&format!("cal.v.sess.{di}.{si}.{}", s.key));
+                    let rect = self.session_box(canvas_w, di, s, day_end);
+                    let title = session_label(s);
+                    let name = format!(
+                        "Activity: {title}, {day_name} {}–{} ({})",
+                        format::time(s.start, self.is_24h),
+                        format::time(s.end, self.is_24h),
+                        duration(s.active_ms)
+                    );
+                    let start_min = (minutes_of_day(s.start).floor() as i32).clamp(0, 23 * 60 + 30);
+                    let anchor = self.canvas_to_screen_rect(rect);
+                    self.virtual_targets.insert(
+                        vid,
+                        VirtualTargetKind::Session {
+                            session: s.clone(),
+                            day_idx: di,
+                            min: start_min,
+                            anchor,
+                        },
+                    );
+                    children.push(VirtualA11yChild {
+                        id: vid,
+                        rect,
+                        focusable: true,
+                        a11y: A11yInfo {
+                            role: A11yRole::Button,
+                            name,
+                            clickable: true,
+                            requires_name: true,
+                            ..Default::default()
+                        },
+                    });
+                    if di == cursor_d
+                        && focused_sess_id.is_none()
+                        && s.start < cursor_slot_e
+                        && s.end > cursor_slot_s
+                    {
+                        focused_sess_id = Some(vid);
+                    }
+                }
+            }
+        }
+
+        let (col_x, col_w, lane_w, _) = self.col_geometry(canvas_w, cursor_d);
+        let cw = if self.mode == CalendarMode::Activity {
+            (col_w - 4.0).max(12.0)
+        } else {
+            (lane_w.max(20.0) - 4.0).max(12.0)
+        };
+        let cy = (self.cursor_min as f32) * DIP_PER_MIN;
+        let cursor_rect = Rect {
+            x: col_x + 2.0,
+            y: cy,
+            w: cw,
+            h: 30.0 * DIP_PER_MIN,
+        };
+        let cursor_vid = keyed_widget_id("cal.v.cursor");
+        let day_name = weekday_short(to_local(cursor_day_ts).weekday_mon0());
+        let cursor_name = format!(
+            "Time slot: {day_name} {}–{}",
+            format::time(cursor_slot_s, self.is_24h),
+            format::time(cursor_slot_e, self.is_24h)
+        );
+        let cursor_anchor = self.canvas_to_screen_rect(cursor_rect);
+        self.virtual_targets.insert(
+            cursor_vid,
+            VirtualTargetKind::CursorSlot {
+                day_idx: cursor_d,
+                min: self.cursor_min,
+                anchor: cursor_anchor,
+            },
+        );
+        children.push(VirtualA11yChild {
+            id: cursor_vid,
+            rect: cursor_rect,
+            focusable: true,
+            a11y: A11yInfo {
+                role: A11yRole::Button,
+                name: cursor_name,
+                clickable: true,
+                requires_name: true,
+                ..Default::default()
+            },
+        });
+
+        let override_valid = self
+            .focused_virtual_override
+            .filter(|id| self.virtual_targets.contains_key(id));
+        let vfocus = override_valid
+            .or(focused_entry_id)
+            .or(focused_sess_id)
+            .or(Some(cursor_vid));
+        (children, vfocus)
     }
 
     fn snap_min(min: f64, disable_snap: bool) -> f64 {
@@ -920,6 +1206,8 @@ impl WeekGridState {
         self.canvas_node = Some(canvas);
         self.viewport_id = Some(tree.set_key(viewport, "cal.grid_viewport"));
         self.canvas_id = Some(tree.set_key(canvas, "cal.grid"));
+        let (vchildren, vfocus) = self.build_virtual_a11y(canvas_w);
+        tree.set_virtual_children(canvas, vchildren, vfocus);
     }
 
     pub fn on_pointer_down(
@@ -1313,43 +1601,98 @@ impl WeekGridState {
         }
     }
 
-    pub fn on_key(&mut self, key: KeyCode) -> bool {
+    pub fn on_key(&mut self, ev: KeyEvent) -> bool {
         if !self.canvas_focused {
             return false;
         }
-        match key {
+        match ev.key {
             KeyCode::Left => {
+                self.focused_virtual_override = None;
                 self.cursor_day = self.cursor_day.saturating_sub(1);
                 true
             }
             KeyCode::Right => {
+                self.focused_virtual_override = None;
                 self.cursor_day = (self.cursor_day + 1).min(6);
                 true
             }
             KeyCode::Up => {
+                self.focused_virtual_override = None;
                 self.cursor_min = (self.cursor_min - 30).max(0);
-                let cy = (self.cursor_min as f32) * DIP_PER_MIN;
-                if cy < self.scroll_y {
-                    self.scroll_y = cy;
-                }
+                self.ensure_cursor_visible();
                 true
             }
             KeyCode::Down => {
+                self.focused_virtual_override = None;
                 self.cursor_min = (self.cursor_min + 30).min(23 * 60 + 30);
-                let cy = ((self.cursor_min + 30) as f32) * DIP_PER_MIN;
-                let vh = self.viewport_rect().h;
-                if cy > self.scroll_y + vh {
-                    self.scroll_y = cy - vh;
-                }
+                self.ensure_cursor_visible();
                 true
             }
             KeyCode::PageUp => self.on_wheel_at(0.0, 0.0, 200.0),
             KeyCode::PageDown => self.on_wheel_at(0.0, 0.0, -200.0),
-            KeyCode::Enter | KeyCode::Space => {
-                let day = self.week_days[self.cursor_day.min(6)];
+            KeyCode::Other(0x41) | KeyCode::Other(0x49) if !ev.ctrl && !ev.alt => {
+                if self.mode == CalendarMode::Time {
+                    return false;
+                }
+                let day_idx = self.cursor_day.min(6);
+                let day = self.week_days[day_idx];
+                let day_end = add_days_start(day, 1);
                 let slot_s = at_minutes(day, self.cursor_min);
                 let slot_e = slot_s + 30 * MIN;
-                let anchor = self.viewport_rect();
+                let Some(sess) = self.sessions_by_day[day_idx]
+                    .iter()
+                    .find(|s| s.start < slot_e && s.end > slot_s)
+                    .cloned()
+                else {
+                    return false;
+                };
+                let box_r =
+                    self.session_box(self.last_canvas_w.max(200.0), day_idx, &sess, day_end);
+                let anchor = self.canvas_to_screen_rect(box_r);
+                self.pending_action = Some(GridAction::OpenActivity(sess, anchor));
+                true
+            }
+            KeyCode::Enter | KeyCode::Space if !ev.ctrl && !ev.alt => {
+                if !ev.shift {
+                    if let Some(vid) = self.focused_virtual_override {
+                        if self.on_click(vid) {
+                            return true;
+                        }
+                    }
+                }
+                let day_idx = self.cursor_day.min(6);
+                let day = self.week_days[day_idx];
+                let day_end = add_days_start(day, 1);
+                let slot_s = at_minutes(day, self.cursor_min);
+                let slot_e = slot_s + 30 * MIN;
+                let (col_x, _, lane_w, _) =
+                    self.col_geometry(self.last_canvas_w.max(200.0), day_idx);
+                let anchor = self.canvas_to_screen_rect(Rect {
+                    x: col_x + 2.0,
+                    y: (self.cursor_min as f32) * DIP_PER_MIN,
+                    w: lane_w.max(24.0),
+                    h: 30.0 * DIP_PER_MIN,
+                });
+
+                if self.mode == CalendarMode::Activity
+                    || (ev.shift && self.mode == CalendarMode::Mix)
+                {
+                    let Some(sess) = self.sessions_by_day[day_idx]
+                        .iter()
+                        .find(|s| s.start < slot_e && s.end > slot_s)
+                        .cloned()
+                    else {
+                        return false;
+                    };
+                    let box_r =
+                        self.session_box(self.last_canvas_w.max(200.0), day_idx, &sess, day_end);
+                    self.pending_action = Some(GridAction::OpenActivity(
+                        sess,
+                        self.canvas_to_screen_rect(box_r),
+                    ));
+                    return true;
+                }
+
                 if let Some(existing) = self.entries.iter().find(|e| {
                     let end = e.end.unwrap_or(self.now_ms);
                     e.start < slot_e && end > slot_s
@@ -1359,11 +1702,15 @@ impl WeekGridState {
                         anchor,
                     ));
                 } else {
-                    let desc = self.sessions_by_day[self.cursor_day.min(6)]
-                        .iter()
-                        .find(|s| s.start < slot_e && s.end > slot_s)
-                        .map(session_label)
-                        .unwrap_or_default();
+                    let desc = if self.mode == CalendarMode::Mix {
+                        self.sessions_by_day[day_idx]
+                            .iter()
+                            .find(|s| s.start < slot_e && s.end > slot_s)
+                            .map(session_label)
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
                     self.pending_action = Some(GridAction::OpenEntry(
                         EntryDraft {
                             id: None,
