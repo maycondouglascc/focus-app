@@ -18,8 +18,7 @@ use crate::ui::widgets::toggle::{self, ToggleKind, ToggleProps};
 use crate::ui::widgets::{add_label, Interact};
 
 use super::{
-    build_card, build_hairline, build_scroll_page, build_section_title, screen_root_tree,
-    scroll_wheel_step, PopupSelectSlot,
+    build_card, build_hairline, build_section_title, screen_root_tree, PageScroll, PopupSelectSlot,
 };
 
 const IDLE_MINUTES: [u32; 6] = [1, 2, 3, 5, 10, 15];
@@ -29,8 +28,8 @@ const KEY_EXCL_TITLES: &str = "settings.excluded_titles";
 pub struct SettingsScreen {
     store: SharedStore,
     confirm_clear: bool,
-    scroll_y: f32,
-    viewport_h: f32,
+    error: Option<String>,
+    scroll: PageScroll,
     draft_apps: String,
     draft_titles: String,
     apps_rev: u64,
@@ -63,8 +62,8 @@ impl SettingsScreen {
         Self {
             store,
             confirm_clear: false,
-            scroll_y: 0.0,
-            viewport_h: 720.0,
+            error: None,
+            scroll: PageScroll::default(),
             draft_apps: s.excluded_apps.join(", "),
             draft_titles: s.excluded_title_patterns.join(", "),
             apps_rev: 0,
@@ -93,8 +92,18 @@ impl SettingsScreen {
             .unwrap_or_else(|_| Settings::defaults_for(b.system_locale()))
     }
 
-    fn save(&self, patch: SettingsPatch) {
-        let _ = self.store.borrow_mut().save_settings(patch);
+    fn save(&mut self, patch: SettingsPatch) -> bool {
+        let had_err = self.error.is_some();
+        match self.store.borrow_mut().save_settings(patch) {
+            Ok(_) => {
+                self.error = None;
+                had_err
+            }
+            Err(e) => {
+                self.error = Some(e);
+                true
+            }
+        }
     }
 
     fn currency_options(cur: &str) -> Vec<String> {
@@ -111,7 +120,11 @@ impl SettingsScreen {
                 if is_24h {
                     format!("{h:02}:00")
                 } else {
-                    let suffix = if h >= 12 { "PM" } else { "AM" };
+                    let suffix = if h >= 12 {
+                        strings::SETTINGS_TIME_PM
+                    } else {
+                        strings::SETTINGS_TIME_AM
+                    };
                     let h12 = match h % 12 {
                         0 => 12,
                         v => v,
@@ -268,12 +281,11 @@ impl SettingsScreen {
         parent: Node,
         env: &ScreenEnv<'_>,
     ) -> Option<Node> {
-        self.viewport_h = env.height_dip;
         let s = self.settings();
         let is_24h = s.time_format.is_24h(self.store.borrow().system_locale());
         let p = env.palette;
 
-        let (_vp, col) = build_scroll_page(tree, parent, 720.0, 28.0, 14.0, self.scroll_y);
+        let col = self.scroll.build(tree, parent, 720.0, 28.0, 14.0);
 
         // Headline
         let head = tree.add_container(
@@ -293,6 +305,9 @@ impl SettingsScreen {
             Align::Left,
             p.text,
         );
+        if let Some(ref err) = self.error {
+            add_label(tree, col, err, 12.5, Weight::Medium, Align::Left, p.danger);
+        }
 
         // 1. Activity monitor
         build_section_title(tree, col, strings::SETTINGS_SEC_MONITOR, p);
@@ -341,7 +356,10 @@ impl SettingsScreen {
             env,
         );
         build_hairline(tree, mon_card, p);
-        let idle_labels: Vec<String> = IDLE_MINUTES.iter().map(|m| format!("{m} min")).collect();
+        let idle_labels: Vec<String> = IDLE_MINUTES
+            .iter()
+            .map(|m| format!("{m} {}", strings::SETTINGS_IDLE_UNIT))
+            .collect();
         let idle_refs: Vec<&str> = idle_labels.iter().map(String::as_str).collect();
         let idle_idx = IDLE_MINUTES.iter().position(|&m| m == s.idle_minutes);
         Self::build_select_row(
@@ -627,12 +645,18 @@ impl SettingsScreen {
             return true;
         }
         if Some(id) == self.id_delete_confirm {
-            let _ = self.store.borrow_mut().clear_activity();
+            match self.store.borrow_mut().clear_activity() {
+                Ok(_) => self.error = None,
+                Err(e) => self.error = Some(e),
+            }
             self.confirm_clear = false;
             return true;
         }
         if Some(id) == self.sel_idle.trigger_id {
-            let labels: Vec<String> = IDLE_MINUTES.iter().map(|m| format!("{m} min")).collect();
+            let labels: Vec<String> = IDLE_MINUTES
+                .iter()
+                .map(|m| format!("{m} {}", strings::SETTINGS_IDLE_UNIT))
+                .collect();
             let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
             let idx = IDLE_MINUTES.iter().position(|&m| m == s.idle_minutes);
             self.sel_idle.open(&refs, idx, palette);
@@ -760,20 +784,18 @@ impl SettingsScreen {
         if key == KEY_EXCL_APPS {
             self.draft_apps = value.to_string();
             let list = format::parse_csv_tags(value);
-            self.save(SettingsPatch {
+            return self.save(SettingsPatch {
                 excluded_apps: Some(list),
                 ..Default::default()
             });
-            return false;
         }
         if key == KEY_EXCL_TITLES {
             self.draft_titles = value.to_string();
             let list = format::parse_csv_tags(value);
-            self.save(SettingsPatch {
+            return self.save(SettingsPatch {
                 excluded_title_patterns: Some(list),
                 ..Default::default()
             });
-            return false;
         }
         false
     }
@@ -803,8 +825,31 @@ impl SettingsScreen {
     }
 
     pub fn handle_wheel(&mut self, delta_dip: f32) -> bool {
-        let max_scroll = (1150.0 - self.viewport_h).max(0.0);
-        scroll_wheel_step(&mut self.scroll_y, delta_dip, max_scroll)
+        self.scroll.wheel(delta_dip)
+    }
+
+    pub fn handle_key(&mut self, key: crate::ui::input::KeyCode) -> bool {
+        self.scroll.on_key(key)
+    }
+
+    pub fn sync_after_layout(
+        &mut self,
+        tree: &mut Tree,
+        focused: Option<WidgetId>,
+        scroll_to_focused: bool,
+    ) {
+        self.scroll.sync(tree, focused, scroll_to_focused);
+    }
+
+    pub fn reset_transient(&mut self) {
+        self.confirm_clear = false;
+        self.error = None;
+        self.scroll.reset();
+        self.sel_idle.clear();
+        self.sel_currency.clear();
+        self.sel_day_start.clear();
+        self.sel_first_day.clear();
+        self.sel_time_format.clear();
     }
 }
 
@@ -828,8 +873,25 @@ impl Screen for SettingsScreen {
         self.handle_text_submit(key, value)
     }
 
+    fn on_key(
+        &mut self,
+        ev: crate::ui::input::KeyEvent,
+        _focus: &mut crate::ui::focus::FocusModel,
+    ) -> bool {
+        self.handle_key(ev.key)
+    }
+
     fn on_wheel(&mut self, delta_dip: f32) -> bool {
         self.handle_wheel(delta_dip)
+    }
+
+    fn sync_after_layout(
+        &mut self,
+        tree: &mut Tree,
+        focused: Option<WidgetId>,
+        scroll_to_focused: bool,
+    ) {
+        SettingsScreen::sync_after_layout(self, tree, focused, scroll_to_focused);
     }
 
     fn on_escape(&mut self) -> bool {
@@ -941,5 +1003,82 @@ mod tests {
         assert!(host.on_click(mon_btn_id));
         assert!(host.rebuild_if_dirty(&env, &mut focus));
         assert_eq!(a11y::validate_tree_names(host.tree()), Ok(()));
+    }
+
+    #[test]
+    fn settings_scrolls_dynamically_beyond_legacy_cap_and_follows_tab_focus() {
+        let text = TextSystem::new().expect("dwrite");
+        let palette = Palette::LIGHT;
+        let short_env = ScreenEnv {
+            width_dip: 1024.0,
+            height_dip: 420.0,
+            hover: None,
+            pressed: None,
+            focused: None,
+            palette: &palette,
+            text: &text,
+        };
+        let store = shared_store(Box::new(DemoStore::new(
+            crate::locale::SystemLocale::en_us(),
+        )));
+        let screen = SettingsScreen::new(Rc::clone(&store));
+        let mut focus = FocusModel::new();
+        let mut host = ScreenHost::mount(Box::new(screen), &short_env, &mut focus);
+
+        // Measure actual scroll range via wheel on a short 420 DIP viewport: real Settings content
+        // extends well past 1150 DIP (`max_y > 1150 - 420`).
+        for _ in 0..30 {
+            let _ = host.on_wheel(-120.0);
+        }
+        assert!(host.rebuild_if_dirty(&short_env, &mut focus));
+
+        let del_rect_scrolled = host
+            .tree()
+            .node_by_id(
+                host.tree()
+                    .all_nodes()
+                    .into_iter()
+                    .filter_map(|n| host.tree().data(n))
+                    .find(|d| d.a11y.name == strings::SETTINGS_DELETE_BTN)
+                    .unwrap()
+                    .id,
+            )
+            .map(|n| host.tree().rect(n))
+            .unwrap();
+        assert!(
+            del_rect_scrolled.y + del_rect_scrolled.h <= short_env.height_dip + 1.0,
+            "bottom delete button should be reachable at max scroll: {del_rect_scrolled:?}"
+        );
+
+        // Reset back to top (Shift+Tab / Tab to first element scrolls back up into view).
+        let first_id = focus.tab(false).unwrap();
+        host.mark_dirty();
+        assert!(host.rebuild_if_dirty(&short_env, &mut focus));
+        let first_rect = host.tree().rect(host.tree().node_by_id(first_id).unwrap());
+        assert!(first_rect.y >= 0.0 && first_rect.y < short_env.height_dip);
+
+        // Tab repeatedly until Delete button -> viewport must auto-scroll so it becomes visible.
+        let del_id = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == strings::SETTINGS_DELETE_BTN)
+            .unwrap()
+            .id;
+        for _ in 0..30 {
+            if focus.focused() == Some(del_id) {
+                break;
+            }
+            focus.tab(false);
+        }
+        assert_eq!(focus.focused(), Some(del_id));
+        host.mark_dirty();
+        assert!(host.rebuild_if_dirty(&short_env, &mut focus));
+        let del_rect_tab = host.tree().rect(host.tree().node_by_id(del_id).unwrap());
+        assert!(
+            del_rect_tab.y >= 0.0 && del_rect_tab.y + del_rect_tab.h <= short_env.height_dip,
+            "Tab to offscreen widget must auto-scroll into view: {del_rect_tab:?}"
+        );
     }
 }

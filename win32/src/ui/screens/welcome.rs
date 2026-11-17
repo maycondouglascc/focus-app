@@ -11,15 +11,15 @@ use crate::ui::widgets::button::{self, ButtonProps, ButtonVariant};
 use crate::ui::widgets::toggle::{self, ToggleKind, ToggleProps};
 use crate::ui::widgets::{add_label, glyph, Interact};
 
-use super::{build_card, build_hairline, build_scroll_page, screen_root_tree, scroll_wheel_step};
+use super::{build_card, build_hairline, screen_root_tree, PageScroll};
 
 pub struct WelcomeScreen {
     store: SharedStore,
     monitor_enabled: bool,
     browser_tabs: bool,
     claude_sessions: bool,
-    scroll_y: f32,
-    viewport_h: f32,
+    error: Option<String>,
+    scroll: PageScroll,
     id_monitor: Option<WidgetId>,
     id_browser: Option<WidgetId>,
     id_claude: Option<WidgetId>,
@@ -38,8 +38,8 @@ impl WelcomeScreen {
             monitor_enabled: s.monitor_enabled,
             browser_tabs: s.browser_tabs,
             claude_sessions: s.claude_sessions,
-            scroll_y: 0.0,
-            viewport_h: 720.0,
+            error: None,
+            scroll: PageScroll::default(),
             id_monitor: None,
             id_browser: None,
             id_claude: None,
@@ -179,10 +179,9 @@ impl WelcomeScreen {
 
 impl WelcomeScreen {
     pub fn build_content(&mut self, tree: &mut Tree, root: Node, env: &ScreenEnv<'_>) {
-        self.viewport_h = env.height_dip;
         let p = env.palette;
 
-        let (_vp, col) = build_scroll_page(tree, root, 620.0, 28.0, 0.0, self.scroll_y);
+        let col = self.scroll.build(tree, root, 620.0, 28.0, 0.0);
         let card = build_card(tree, col, 28.0, 16.0, p);
 
         add_label(
@@ -294,6 +293,10 @@ impl WelcomeScreen {
             },
         );
 
+        if let Some(ref err) = self.error {
+            add_label(tree, card, err, 12.0, Weight::Medium, Align::Left, p.danger);
+        }
+
         let foot = tree.add_container(
             card,
             Style {
@@ -348,9 +351,14 @@ impl Screen for WelcomeScreen {
                 onboarded: Some(true),
                 ..Default::default()
             };
-            let _ = self.store.borrow_mut().save_settings(patch);
-            if let Some(cb) = self.on_complete.as_mut() {
-                cb();
+            match self.store.borrow_mut().save_settings(patch) {
+                Ok(_) => {
+                    self.error = None;
+                    if let Some(cb) = self.on_complete.as_mut() {
+                        cb();
+                    }
+                }
+                Err(e) => self.error = Some(e),
             }
             return true;
         }
@@ -358,8 +366,24 @@ impl Screen for WelcomeScreen {
     }
 
     fn on_wheel(&mut self, delta_dip: f32) -> bool {
-        let max_scroll = (600.0 - self.viewport_h).max(0.0);
-        scroll_wheel_step(&mut self.scroll_y, delta_dip, max_scroll)
+        self.scroll.wheel(delta_dip)
+    }
+
+    fn on_key(
+        &mut self,
+        ev: crate::ui::input::KeyEvent,
+        _focus: &mut crate::ui::focus::FocusModel,
+    ) -> bool {
+        self.scroll.on_key(ev.key)
+    }
+
+    fn sync_after_layout(
+        &mut self,
+        tree: &mut Tree,
+        focused: Option<WidgetId>,
+        scroll_to_focused: bool,
+    ) {
+        self.scroll.sync(tree, focused, scroll_to_focused);
     }
 }
 

@@ -8,7 +8,7 @@ use taffy::prelude::*;
 use crate::db::SharedStore;
 use crate::format::hm;
 use crate::time::{add_days, start_of_week_with_first};
-use crate::ui::focus::FocusModel;
+use crate::ui::focus::{FocusModel, FocusScope};
 use crate::ui::input::{KeyCode, KeyEvent};
 use crate::ui::screen::{BuiltScreen, KeyModifiers, PointerReply, Screen, ScreenEnv};
 use crate::ui::screens::activity::ActivityScreen;
@@ -101,8 +101,23 @@ impl AppShell {
         }
     }
 
+    fn reset_leaving_section(&mut self) {
+        crate::ui::popup::close();
+        match self.section {
+            Section::Calendar => self.calendar.reset_transient(),
+            Section::Activity => self.activity.reset_transient(),
+            Section::Reports => self.reports.reset_transient(),
+            Section::Projects => self.projects.reset_transient(),
+            Section::Project(_) => self.project_report = None,
+            Section::Settings => self.settings.reset_transient(),
+        }
+    }
+
     pub fn navigate(&mut self, section: Section) {
         self.welcome_override = false;
+        if self.section != section {
+            self.reset_leaving_section();
+        }
         match section {
             Section::Project(pid) => {
                 let resolved = if pid.is_empty() {
@@ -135,6 +150,19 @@ impl AppShell {
         self.welcome_override = true;
     }
 
+    fn has_modal(&self) -> bool {
+        match self.section {
+            Section::Calendar => self.calendar.has_modal(),
+            Section::Reports => self.reports.has_modal(),
+            Section::Projects => self.projects.has_modal(),
+            Section::Project(_) => self
+                .project_report
+                .as_ref()
+                .is_some_and(ProjectReportScreen::has_modal),
+            Section::Activity | Section::Settings => false,
+        }
+    }
+
     fn is_onboarded(&self) -> bool {
         if self.welcome_override {
             return false;
@@ -150,6 +178,7 @@ impl AppShell {
     fn build_nav_row(
         tree: &mut Tree,
         parent: Node,
+        key: &str,
         icon: char,
         label: &str,
         selected: bool,
@@ -174,7 +203,7 @@ impl AppShell {
                 ..Default::default()
             },
         );
-        let id = tree.id(row);
+        let id = tree.set_key(row, key);
         let interact = Interact::from_state(prev_id, env.hover, env.pressed, false);
         let bg = if selected {
             Some(p.accent_bg)
@@ -383,6 +412,7 @@ impl AppShell {
         self.id_nav_calendar = Some(Self::build_nav_row(
             tree,
             nav_box,
+            "nav.calendar",
             glyph::CALENDAR,
             strings::NAV_CALENDAR,
             self.section == Section::Calendar,
@@ -393,6 +423,7 @@ impl AppShell {
         self.id_nav_activity = Some(Self::build_nav_row(
             tree,
             nav_box,
+            "nav.activity",
             glyph::ACTIVITY,
             strings::NAV_ACTIVITY,
             self.section == Section::Activity,
@@ -403,6 +434,7 @@ impl AppShell {
         self.id_nav_reports = Some(Self::build_nav_row(
             tree,
             nav_box,
+            "nav.reports",
             glyph::REPORTS,
             strings::NAV_REPORTS,
             self.section == Section::Reports,
@@ -413,6 +445,7 @@ impl AppShell {
         self.id_nav_projects = Some(Self::build_nav_row(
             tree,
             nav_box,
+            "nav.projects",
             glyph::PROJECTS,
             strings::NAV_PROJECTS,
             self.section == Section::Projects,
@@ -468,7 +501,7 @@ impl AppShell {
             tree.set_focusable(empty_row, true);
             tree.set_a11y(
                 empty_row,
-                interactive_a11y(A11yRole::Button, "Create a project", false),
+                interactive_a11y(A11yRole::Button, strings::SIDEBAR_CREATE_PROJECT, false),
             );
             tree.add_leaf(
                 empty_row,
@@ -482,21 +515,16 @@ impl AppShell {
             add_label(
                 tree,
                 empty_row,
-                "Create a project",
+                strings::SIDEBAR_CREATE_PROJECT,
                 12.0,
                 Weight::Regular,
                 Align::Left,
                 p.muted,
             );
-            self.id_side_empty_proj = Some(tree.id(empty_row));
+            self.id_side_empty_proj = Some(tree.set_key(empty_row, "nav.empty_project"));
         } else {
             for pr in active_projects.iter().take(12) {
                 let is_sel = matches!(&self.section, Section::Project(cur) if cur == &pr.id);
-                let prev_id = self
-                    .id_side_projects
-                    .iter()
-                    .find(|(_, pid)| pid == &pr.id)
-                    .map(|(id, _)| *id);
                 let row = tree.add_container(
                     proj_list,
                     Style {
@@ -513,8 +541,8 @@ impl AppShell {
                         ..Default::default()
                     },
                 );
-                let rid = tree.id(row);
-                let interact = Interact::from_state(prev_id, env.hover, env.pressed, false);
+                let rid = tree.set_key(row, &format!("nav.proj.{}", pr.id));
+                let interact = Interact::from_state(Some(rid), env.hover, env.pressed, false);
                 let bg = if is_sel {
                     Some(p.accent_bg)
                 } else if interact.hovered {
@@ -598,6 +626,7 @@ impl AppShell {
         self.id_nav_settings = Some(Self::build_nav_row(
             tree,
             side,
+            "nav.settings",
             glyph::SETTINGS,
             strings::NAV_SETTINGS,
             self.section == Section::Settings,
@@ -809,13 +838,28 @@ impl Screen for AppShell {
         handled
     }
 
+    fn on_a11y_focus(&mut self, id: WidgetId) -> bool {
+        if !self.is_onboarded() {
+            return false;
+        }
+        match self.section {
+            Section::Calendar => self.calendar.on_a11y_focus(id),
+            _ => false,
+        }
+    }
+
     fn on_key(&mut self, ev: KeyEvent, focus: &mut FocusModel) -> bool {
         if !self.is_onboarded() {
             return self.welcome.on_key(ev, focus);
         }
 
-        // Global shortcuts (Ctrl+1..4,, | Ctrl+N | Ctrl+Space)
-        if ev.ctrl && !ev.alt && !ev.shift {
+        let modal_or_popup = matches!(
+            focus.active_scope(),
+            FocusScope::Modal(_) | FocusScope::Popup(_)
+        ) || self.has_modal();
+
+        // Global shortcuts (Ctrl+1..4,, | Ctrl+N | Ctrl+Space) are suspended while a modal is open.
+        if !modal_or_popup && ev.ctrl && !ev.alt && !ev.shift {
             match ev.key {
                 KeyCode::Space => {
                     self.calendar.timer.toggle_start_stop(&self.store);
@@ -858,13 +902,14 @@ impl Screen for AppShell {
 
         match self.section {
             Section::Calendar => self.calendar.on_key(ev, focus),
+            Section::Activity => self.activity.on_key(ev, focus),
             Section::Projects => self.projects.on_key(ev, focus),
             Section::Project(_) => self
                 .project_report
                 .as_mut()
                 .is_some_and(|pr| pr.on_key(ev, focus)),
             Section::Reports => self.reports.on_key(ev, focus),
-            _ => false,
+            Section::Settings => self.settings.on_key(ev, focus),
         }
     }
 
@@ -984,12 +1029,20 @@ impl Screen for AppShell {
         }
     }
 
-    fn wants_tick(&self) -> bool {
-        self.is_onboarded() && self.section == Section::Calendar && self.calendar.wants_tick()
+    fn wants_tick(&self) -> Option<u32> {
+        if self.is_onboarded() && self.section == Section::Calendar {
+            self.calendar.wants_tick()
+        } else {
+            None
+        }
     }
 
-    fn on_tick(&mut self) -> bool {
-        self.is_onboarded() && self.section == Section::Calendar && self.calendar.handle_tick()
+    fn on_tick(&mut self, tree: &mut Tree) -> crate::ui::screen::TickReply {
+        if self.is_onboarded() && self.section == Section::Calendar {
+            self.calendar.handle_tick(tree)
+        } else {
+            crate::ui::screen::TickReply::default()
+        }
     }
 
     fn wants_autoscroll(&self) -> bool {
@@ -1020,6 +1073,39 @@ impl Screen for AppShell {
             Section::Settings => self.settings.on_popup_poll(),
         }
     }
+
+    fn sync_after_layout(
+        &mut self,
+        tree: &mut Tree,
+        focused: Option<WidgetId>,
+        scroll_to_focused: bool,
+    ) {
+        if !self.is_onboarded() {
+            self.welcome
+                .sync_after_layout(tree, focused, scroll_to_focused);
+            return;
+        }
+        match self.section {
+            Section::Calendar => {}
+            Section::Activity => self
+                .activity
+                .sync_after_layout(tree, focused, scroll_to_focused),
+            Section::Reports => self
+                .reports
+                .sync_after_layout(tree, focused, scroll_to_focused),
+            Section::Projects => self
+                .projects
+                .sync_after_layout(tree, focused, scroll_to_focused),
+            Section::Project(_) => {
+                if let Some(ref mut pr) = self.project_report {
+                    pr.sync_after_layout(tree, focused, scroll_to_focused);
+                }
+            }
+            Section::Settings => self
+                .settings
+                .sync_after_layout(tree, focused, scroll_to_focused),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1029,7 +1115,6 @@ mod tests {
     use crate::demo::DemoStore;
     use crate::locale::SystemLocale;
     use crate::ui::a11y;
-    use crate::ui::focus::FocusModel;
     use crate::ui::screen::ScreenHost;
     use crate::ui::text::TextSystem;
     use std::rc::Rc;
@@ -1114,5 +1199,200 @@ mod tests {
             store.borrow().running_entry().unwrap().is_some(),
             was_running
         );
+    }
+
+    #[test]
+    fn global_shortcuts_do_not_fire_while_modal_is_open_and_dialog_sync_rev_increments() {
+        let text = TextSystem::new().expect("dwrite");
+        let palette = Palette::LIGHT;
+        let env = ScreenEnv {
+            width_dip: 1280.0,
+            height_dip: 820.0,
+            hover: None,
+            pressed: None,
+            focused: None,
+            palette: &palette,
+            text: &text,
+        };
+        let store = shared_store(Box::new(DemoStore::new(SystemLocale::en_us())));
+        let mut shell = AppShell::new(Rc::clone(&store));
+        shell.navigate(Section::Projects);
+        let mut focus = FocusModel::new();
+        let mut host = ScreenHost::mount(Box::new(shell), &env, &mut focus);
+
+        // Open New project dialog via Ctrl+N.
+        let ctrl_n = KeyEvent {
+            key: KeyCode::Other(0x4E),
+            shift: false,
+            ctrl: true,
+            alt: false,
+        };
+        let (h, d) = host.on_key(ctrl_n, &mut focus);
+        assert!(h && d);
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        host.on_text_change("project_dlg.name", "Draft Project");
+
+        // Pressing Ctrl+N or Ctrl+2 while modal is open must NOT replace the dialog or navigate.
+        let (h2, _) = host.on_key(ctrl_n, &mut focus);
+        assert!(!h2);
+        let ctrl_2 = KeyEvent {
+            key: KeyCode::Other(0x32),
+            shift: false,
+            ctrl: true,
+            alt: false,
+        };
+        let (h3, _) = host.on_key(ctrl_2, &mut focus);
+        assert!(!h3);
+        // Verify name survived and Create saves the project cleanly.
+        let save_id = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == crate::ui::strings::PROJECT_BTN_CREATE)
+            .unwrap()
+            .id;
+        assert!(host.on_click(save_id));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        assert!(store
+            .borrow()
+            .list_projects()
+            .unwrap()
+            .iter()
+            .any(|p| p.name == "Draft Project"));
+
+        // Reopening dialogs always produces strictly increasing sync_rev.
+        let first = crate::ui::screens::projects::ProjectDialogState::for_new("USD", &[]);
+        let second = crate::ui::screens::projects::ProjectDialogState::for_new("USD", &[]);
+        assert!(second.sync_rev() > first.sync_rev());
+    }
+
+    #[test]
+    fn navigating_away_resets_transient_dialogs_and_confirmations() {
+        let text = TextSystem::new().expect("dwrite");
+        let palette = Palette::LIGHT;
+        let env = ScreenEnv {
+            width_dip: 1280.0,
+            height_dip: 820.0,
+            hover: None,
+            pressed: None,
+            focused: None,
+            palette: &palette,
+            text: &text,
+        };
+        let store = shared_store(Box::new(DemoStore::new(SystemLocale::en_us())));
+        let mut shell = AppShell::new(Rc::clone(&store));
+        shell.navigate(Section::Projects);
+        let mut focus = FocusModel::new();
+        let mut host = ScreenHost::mount(Box::new(shell), &env, &mut focus);
+
+        // Open New project dialog on Projects.
+        let new_id = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == crate::ui::strings::PROJECTS_NEW_BTN)
+            .unwrap()
+            .id;
+        assert!(host.on_click(new_id));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        assert!(matches!(focus.active_scope(), FocusScope::Modal(_)));
+
+        // Navigate to Settings via sidebar button, arm Delete activity history, then leave and come back.
+        let settings_nav_id = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == crate::ui::strings::NAV_SETTINGS)
+            .unwrap()
+            .id;
+        assert!(host.on_click(settings_nav_id));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        assert_eq!(focus.active_scope(), FocusScope::Main);
+
+        // Go back to Projects: modal must no longer be open.
+        let projects_nav_id = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == crate::ui::strings::NAV_PROJECTS)
+            .unwrap()
+            .id;
+        assert!(host.on_click(projects_nav_id));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        assert_eq!(focus.active_scope(), FocusScope::Main);
+
+        // Now navigate to Settings, click Delete activity history, navigate to Calendar, return to Settings.
+        let settings_nav_id2 = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == crate::ui::strings::NAV_SETTINGS)
+            .unwrap()
+            .id;
+        assert!(host.on_click(settings_nav_id2));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        let del_btn_id = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == crate::ui::strings::SETTINGS_DELETE_BTN)
+            .unwrap()
+            .id;
+        assert!(host.on_click(del_btn_id));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        assert!(host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .any(|d| d.a11y.name == crate::ui::strings::SETTINGS_DELETE_CONFIRM_BTN));
+
+        let cal_nav_id = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == crate::ui::strings::NAV_CALENDAR)
+            .unwrap()
+            .id;
+        assert!(host.on_click(cal_nav_id));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+
+        let settings_nav_id3 = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == crate::ui::strings::NAV_SETTINGS)
+            .unwrap()
+            .id;
+        assert!(host.on_click(settings_nav_id3));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        assert!(!host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .any(|d| d.a11y.name == crate::ui::strings::SETTINGS_DELETE_CONFIRM_BTN));
+
+        // Sidebar project items resolve hover from their stable key after id_side_projects resets.
+        let proj_wid = crate::ui::tree::keyed_widget_id("nav.proj.p1");
+        assert!(host.tree().node_by_id(proj_wid).is_some());
+        let mut env_hover = env;
+        env_hover.hover = Some(proj_wid);
+        host.mark_dirty();
+        assert!(host.rebuild_if_dirty(&env_hover, &mut focus));
+        let hovered_bg = host
+            .tree()
+            .node_by_id(proj_wid)
+            .and_then(|n| host.tree().data(n))
+            .and_then(|d| d.paint.bg);
+        assert_eq!(hovered_bg, Some(palette.ctl_hover));
     }
 }

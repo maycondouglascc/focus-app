@@ -24,6 +24,17 @@ pub fn build(
     props: &SegmentedProps<'_>,
     palette: &Palette,
 ) -> (Node, Vec<WidgetId>) {
+    build_keyed(tree, parent, props, None, palette)
+}
+
+/// Builds a segmented control with optional stable widget keys (`"<prefix>.<i>"`).
+pub fn build_keyed(
+    tree: &mut Tree,
+    parent: Node,
+    props: &SegmentedProps<'_>,
+    key_prefix: Option<&str>,
+    palette: &Palette,
+) -> (Node, Vec<WidgetId>) {
     let track = tree.add_container(
         parent,
         Style {
@@ -76,7 +87,10 @@ pub fn build(
                 ..Default::default()
             },
         );
-        let item_id = tree.id(item);
+        let item_id = match key_prefix {
+            Some(prefix) => tree.set_key(item, &format!("{prefix}.{idx}")),
+            None => tree.id(item),
+        };
         let interact = Interact::from_state(Some(item_id), props.hover, None, props.disabled);
         let bg = if is_selected {
             Some(palette.surface)

@@ -161,6 +161,13 @@ pub fn validate_tree_names(tree: &Tree) -> Result<(), Vec<(WidgetId, A11yRole)>>
         if node_requires_name(data) && data.a11y.name.trim().is_empty() {
             missing.push((data.id, data.a11y.role));
         }
+        for vc in &data.virtual_children {
+            if (vc.focusable || vc.a11y.requires_name || vc.a11y.clickable)
+                && vc.a11y.name.trim().is_empty()
+            {
+                missing.push((vc.id, vc.a11y.role));
+            }
+        }
     }
     if missing.is_empty() {
         Ok(())
@@ -203,9 +210,19 @@ pub fn build_tree_update(
     push_node(tree, root, true, scale, root_name, &mut nodes);
 
     let focus_id = focused
-        .filter(|id| {
-            tree.node_by_id(*id)
-                .is_some_and(|n| !is_subtree_hidden(tree, n))
+        .and_then(|id| {
+            let n = tree.node_by_id(id)?;
+            if is_subtree_hidden(tree, n) {
+                return None;
+            }
+            if let Some(d) = tree.data(n) {
+                if let Some(vf) = d.virtual_focus {
+                    if d.virtual_children.iter().any(|c| c.id == vf) {
+                        return Some(vf);
+                    }
+                }
+            }
+            Some(id)
         })
         .unwrap_or(root_widget_id);
 
@@ -315,8 +332,9 @@ fn push_node(
     }
 
     let children = tree.children(node);
-    if !children.is_empty() {
-        let child_ids: Vec<AkNodeId> = children.iter().map(|c| ak_id(tree.id(*c))).collect();
+    if !children.is_empty() || !data.virtual_children.is_empty() {
+        let mut child_ids: Vec<AkNodeId> = children.iter().map(|c| ak_id(tree.id(*c))).collect();
+        child_ids.extend(data.virtual_children.iter().map(|vc| ak_id(vc.id)));
         ak.set_children(child_ids);
     }
 
@@ -324,6 +342,43 @@ fn push_node(
 
     for child in children {
         push_node(tree, child, false, scale, root_name, out);
+    }
+
+    for vc in &data.virtual_children {
+        let mut vak = AkNode::new(map_role(vc.a11y.role, false));
+        if !vc.a11y.name.is_empty() {
+            vak.set_label(vc.a11y.name.as_str());
+        }
+        if let Some(desc) = &vc.a11y.description {
+            vak.set_description(desc.as_str());
+        }
+        if let Some(val) = &vc.a11y.value {
+            vak.set_value(val.as_str());
+        }
+        let v_disabled = disabled || vc.a11y.disabled;
+        if v_disabled {
+            vak.set_disabled();
+        }
+        if data.hidden {
+            vak.set_hidden();
+        }
+        let vx0 = r.x + vc.rect.x;
+        let vy0 = r.y + vc.rect.y;
+        vak.set_bounds(AkRect {
+            x0: (vx0 * scale) as f64,
+            y0: (vy0 * scale) as f64,
+            x1: ((vx0 + vc.rect.w) * scale) as f64,
+            y1: ((vy0 + vc.rect.h) * scale) as f64,
+        });
+        if !v_disabled {
+            if vc.focusable {
+                vak.add_action(Action::Focus);
+            }
+            if vc.a11y.clickable {
+                vak.add_action(Action::Click);
+            }
+        }
+        out.push((ak_id(vc.id), vak));
     }
 }
 

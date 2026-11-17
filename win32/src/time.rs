@@ -142,7 +142,7 @@ pub fn to_local(epoch_ms: i64) -> LocalDateTime {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn from_local_tz(
+fn raw_from_local_tz(
     year: i32,
     month: u8,
     day: u8,
@@ -151,7 +151,7 @@ pub fn from_local_tz(
     second: u8,
     ms: u16,
     tz: Option<&TIME_ZONE_INFORMATION>,
-) -> i64 {
+) -> Option<i64> {
     let local_st = SYSTEMTIME {
         wYear: year.clamp(1601, 9999) as u16,
         wMonth: month.clamp(1, 12) as u16,
@@ -167,12 +167,36 @@ pub fn from_local_tz(
     // SAFETY: `tz_ptr` is null or valid reference; `local_st` and `utc_st` are stack structs.
     let ok = unsafe { TzSpecificLocalTimeToSystemTime(Some(tz_ptr), &local_st, &mut utc_st) };
     if ok.is_ok() {
-        if let Some(t) = utc_st_to_epoch_ms(&utc_st) {
+        utc_st_to_epoch_ms(&utc_st)
+    } else {
+        None
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn from_local_tz(
+    year: i32,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+    ms: u16,
+    tz: Option<&TIME_ZONE_INFORMATION>,
+) -> i64 {
+    let target_days = days_from_civil(year, month, day);
+    let mut try_hour = hour.min(23);
+    while let Some(t) = raw_from_local_tz(year, month, day, try_hour, minute, second, ms, tz) {
+        let back = to_local_tz(t, tz);
+        if days_from_civil(back.year, back.month, back.day) >= target_days || try_hour >= 23 {
             return t;
         }
+        // Midnight (or early morning) DST spring-forward rolled back into the previous day;
+        // advance by an hour to match JS `Date.setHours(0)` landing on 01:00.
+        try_hour += 1;
     }
     // Fallback to pure civil UTC if out of Win32 SYSTEMTIME range.
-    days_from_civil(year, month, day) * DAY
+    target_days * DAY
         + i64::from(hour) * HOUR
         + i64::from(minute) * MIN
         + i64::from(second) * 1000
@@ -203,12 +227,33 @@ pub fn add_days(t: i64, n: i32) -> i64 {
     add_days_tz(t, n, None)
 }
 
+/// Shifts `t` by `n` local calendar days and returns the start of that day.
+pub fn add_days_start_tz(t: i64, n: i32, tz: Option<&TIME_ZONE_INFORMATION>) -> i64 {
+    let l = to_local_tz(t, tz);
+    let (y, m, d) = civil_from_days(days_from_civil(l.year, l.month, l.day) + i64::from(n));
+    from_local_tz(y, m, d, 0, 0, 0, 0, tz)
+}
+
+/// Shifts `t` by `n` local calendar days and returns the start of that day.
+pub fn add_days_start(t: i64, n: i32) -> i64 {
+    add_days_start_tz(t, n, None)
+}
+
+/// Week start aligned to `first_day_mon0` (`0 = Monday`, `6 = Sunday`).
+pub fn start_of_week_with_first_tz(
+    t: i64,
+    first_day_mon0: u8,
+    tz: Option<&TIME_ZONE_INFORMATION>,
+) -> i64 {
+    let day0 = start_of_day_tz(t, tz);
+    let dow = to_local_tz(day0, tz).weekday_mon0();
+    let offset = (dow + 7 - (first_day_mon0 % 7)) % 7;
+    add_days_start_tz(day0, -i32::from(offset), tz)
+}
+
 /// Week start aligned to `first_day_mon0` (`0 = Monday`, `6 = Sunday`).
 pub fn start_of_week_with_first(t: i64, first_day_mon0: u8) -> i64 {
-    let day0 = start_of_day(t);
-    let dow = to_local(day0).weekday_mon0();
-    let offset = (dow + 7 - (first_day_mon0 % 7)) % 7;
-    add_days(day0, -i32::from(offset))
+    start_of_week_with_first_tz(t, first_day_mon0, None)
 }
 
 /// Weeks start on Monday by default (matching Electron `startOfWeek`).
@@ -276,6 +321,17 @@ pub fn iso_week(t: i64) -> u32 {
     let jan4_l = to_local(jan4_epoch);
     let jan4_thu_days = days_from_civil(ty, 1, 4) + 3 - i64::from(jan4_l.weekday_mon0());
     (1 + (thu_days - jan4_thu_days) / 7) as u32
+}
+
+/// ISO week number for a 7-day calendar week starting at `week_start`. Uses the Thursday
+/// falling inside `[week_start, week_start + 7d)` so Sunday/Saturday-start weeks report the
+/// ISO week containing their weekdays (e.g. Sun 2026-11-15..Sat 2026-11-21 -> W47, not W46).
+pub fn week_iso_number(week_start: i64) -> u32 {
+    let thu = (0..7)
+        .map(|d| add_days_start(week_start, d))
+        .find(|&ts| to_local(ts).weekday_mon0() == 3)
+        .unwrap_or_else(|| add_days_start(week_start, 3));
+    iso_week(thu)
 }
 
 #[cfg(test)]
@@ -368,6 +424,86 @@ mod tests {
         assert_eq!(
             (sl.year, sl.month, sl.day, sl.weekday_mon0()),
             (2026, 11, 15, 6)
+        );
+    }
+
+    /// Synthetic Chile/Santiago-style TZ: UTC-4 standard, UTC-3 DST springing forward
+    /// at 00:00 on the 1st Sunday of September (`00:00` does not exist).
+    fn santiago_tz() -> TIME_ZONE_INFORMATION {
+        TIME_ZONE_INFORMATION {
+            Bias: 240, // UTC-4
+            StandardDate: SYSTEMTIME {
+                wYear: 0,
+                wMonth: 4,
+                wDayOfWeek: 0, // Sunday
+                wDay: 1,       // 1st occurrence
+                wHour: 0,
+                ..Default::default()
+            },
+            StandardBias: 0,
+            DaylightDate: SYSTEMTIME {
+                wYear: 0,
+                wMonth: 9,
+                wDayOfWeek: 0, // Sunday
+                wDay: 1,       // 1st occurrence (2026-09-06)
+                wHour: 0,
+                ..Default::default()
+            },
+            DaylightBias: -60, // UTC-3
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn midnight_spring_forward_keeps_same_local_day_and_advances_week_cleanly() {
+        let tz = santiago_tz();
+        // 2026-09-06 is the 1st Sunday of September: 00:00 jumps to 01:00.
+        let sep6_mid = from_local_tz(2026, 9, 6, 12, 0, 0, 0, Some(&tz));
+        let sep6_sod = start_of_day_tz(sep6_mid, Some(&tz));
+        let l6 = to_local_tz(sep6_sod, Some(&tz));
+        assert_eq!((l6.year, l6.month, l6.day, l6.hour), (2026, 9, 6, 1));
+
+        // Stepping 7 days from Sat 2026-09-05 must produce 7 distinct days without repeating Sep 5.
+        let sep5_mid = from_local_tz(2026, 9, 5, 12, 0, 0, 0, Some(&tz));
+        let mut d = start_of_day_tz(sep5_mid, Some(&tz));
+        let mut dates = Vec::new();
+        for _ in 0..7 {
+            let ld = to_local_tz(d, Some(&tz));
+            dates.push((ld.month, ld.day, ld.hour));
+            d = add_days_start_tz(d, 1, Some(&tz));
+        }
+        assert_eq!(
+            dates,
+            [
+                (9, 5, 0),
+                (9, 6, 1),
+                (9, 7, 0),
+                (9, 8, 0),
+                (9, 9, 0),
+                (9, 10, 0),
+                (9, 11, 0),
+            ]
+        );
+        // Sep 6 is 23 hours long; week starts are anchored at the true start of day.
+        assert_eq!(
+            add_days_start_tz(sep6_sod, 1, Some(&tz)) - sep6_sod,
+            23 * HOUR
+        );
+        let mon_l = to_local_tz(
+            start_of_week_with_first_tz(sep6_mid, 0, Some(&tz)),
+            Some(&tz),
+        );
+        assert_eq!(
+            (mon_l.year, mon_l.month, mon_l.day, mon_l.hour),
+            (2026, 8, 31, 0)
+        );
+        let sun_l = to_local_tz(
+            start_of_week_with_first_tz(sep6_mid, 6, Some(&tz)),
+            Some(&tz),
+        );
+        assert_eq!(
+            (sun_l.year, sun_l.month, sun_l.day, sun_l.hour),
+            (2026, 9, 6, 1)
         );
     }
 

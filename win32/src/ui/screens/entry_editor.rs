@@ -2,6 +2,8 @@
 //! create, edit, stop running timer, delete, midnight-wrapping end time,
 //! 24-hour duration cap, and live earnings preview.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use taffy::prelude::*;
 
 use crate::db::{EntryInput, EntryPatch, Project, SharedStore, TimeEntry};
@@ -27,6 +29,8 @@ const KEY_ENTRY_DESC: &str = "entry_dlg.desc";
 const KEY_ENTRY_DATE: &str = "entry_dlg.date";
 const KEY_ENTRY_START: &str = "entry_dlg.start";
 const KEY_ENTRY_END: &str = "entry_dlg.end";
+
+static NEXT_ENTRY_SYNC_REV: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntryDraft {
@@ -69,6 +73,8 @@ pub struct EntryEditorState {
     pub date_text: String,
     pub start_text: String,
     pub end_text: String,
+    initial_date_text: String,
+    initial_end_text: String,
     pub error: Option<String>,
     sync_rev: u64,
 
@@ -95,11 +101,13 @@ impl EntryEditorState {
             description: draft.description.clone(),
             project_id: draft.project_id.clone(),
             billable: draft.billable,
+            initial_date_text: date_text.clone(),
+            initial_end_text: end_text.clone(),
             date_text,
             start_text,
             end_text,
             error: None,
-            sync_rev: 1,
+            sync_rev: NEXT_ENTRY_SYNC_REV.fetch_add(1, Ordering::Relaxed),
             draft,
             id_close: None,
             sel_project: PopupSelectSlot::default(),
@@ -158,25 +166,47 @@ impl EntryEditorState {
                 return EntryEditorOutcome::None;
             }
         };
-        if stop_after && end.is_none() {
-            let now = store.borrow().now_ms();
-            end = Some(now.max(start + 60_000));
-        }
 
         let mut st = store.borrow_mut();
         let res = if let Some(ref existing_id) = self.draft.id {
+            // Re-read the entry so saving an entry whose timer stopped elsewhere
+            // never sends `end: Some(None)` and accidentally restarts it.
+            let current = match st.get_entry(existing_id) {
+                Ok(c) => c,
+                Err(e) => {
+                    self.error = Some(e);
+                    return EntryEditorOutcome::None;
+                }
+            };
+            let patch_end = if self.is_running() {
+                if stop_after && current.end.is_none() {
+                    Some(Some(st.now_ms().max(start + 60_000)))
+                } else {
+                    None
+                }
+            } else if self.end_text != self.initial_end_text
+                || self.date_text != self.initial_date_text
+                || current.end.is_some_and(|ce| ce <= start)
+            {
+                Some(end)
+            } else {
+                None
+            };
             st.update_entry(
                 existing_id,
                 EntryPatch {
                     project_id: Some(self.project_id.clone()),
                     description: Some(self.description.clone()),
                     start: Some(start),
-                    end: Some(end),
+                    end: patch_end,
                     billable: Some(self.billable),
                     source: Some(self.draft.source.clone()),
                 },
             )
         } else {
+            if stop_after && end.is_none() {
+                end = Some(st.now_ms().max(start + 60_000));
+            }
             st.create_entry(EntryInput {
                 project_id: self.project_id.clone(),
                 description: self.description.clone(),
@@ -793,5 +823,58 @@ mod tests {
         // Invalid time fails gracefully with error message.
         editor.on_text_change(KEY_ENTRY_START, "99:99");
         assert!(editor.parse_times().is_err());
+    }
+
+    #[test]
+    fn saving_running_entry_after_external_stop_does_not_reopen_timer() {
+        let text = TextSystem::new().expect("dwrite");
+        let palette = Palette::LIGHT;
+        let env = ScreenEnv {
+            width_dip: 1000.0,
+            height_dip: 700.0,
+            hover: None,
+            pressed: None,
+            focused: None,
+            palette: &palette,
+            text: &text,
+        };
+        let store = shared_store(Box::new(DemoStore::new(SystemLocale::en_us())));
+        // DemoStore starts with a running timer; open editor on it.
+        let running = store.borrow().running_entry().unwrap().unwrap();
+        let mut editor = EntryEditorState::new(EntryDraft::from_entry(&running));
+
+        // Simulate stopping the timer externally (and even starting a second timer) while editor is open.
+        let stopped = store.borrow_mut().stop_timer().unwrap().unwrap();
+        assert!(stopped.end.is_some());
+        let second = store
+            .borrow_mut()
+            .start_timer(crate::db::TimerStartInput {
+                project_id: None,
+                description: "Second timer".into(),
+                billable: false,
+            })
+            .unwrap();
+
+        editor.on_text_change(KEY_ENTRY_DESC, "Updated description");
+        let mut tree = Tree::new(style::column());
+        let root = tree.root();
+        let _card = editor.build(&mut tree, root, &store, &[], &env);
+        let save_id = editor.id_save.unwrap();
+        let (handled, out) = editor.on_click(save_id, &store, &[], &palette);
+        assert!(handled);
+        assert_eq!(out, EntryEditorOutcome::Saved);
+
+        // First entry must remain stopped; only the second timer should be running.
+        let entries = store
+            .borrow()
+            .list_entries(running.start - HOUR, second.start + HOUR)
+            .unwrap();
+        let first_now = entries.iter().find(|e| e.id == running.id).unwrap();
+        assert_eq!(first_now.end, stopped.end);
+        assert_eq!(first_now.description, "Updated description");
+        assert_eq!(
+            store.borrow().running_entry().unwrap().unwrap().id,
+            second.id
+        );
     }
 }

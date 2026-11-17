@@ -7,9 +7,9 @@ use crate::db::{EntryPatch, Project, SharedStore, TimerStartInput};
 use crate::format;
 use crate::ui::screen::ScreenEnv;
 use crate::ui::strings;
-use crate::ui::text::{Align, Weight};
+use crate::ui::text::{Align, Weight, Wrap};
 use crate::ui::theme::parse_hex_color;
-use crate::ui::tree::{style, Node, PaintStyle, Tree, WidgetId};
+use crate::ui::tree::{style, Leaf, Node, PaintStyle, Tree, WidgetId};
 use crate::ui::widgets::button::{self, ButtonProps, ButtonSize, ButtonVariant};
 use crate::ui::widgets::select::{self, SelectProps};
 use crate::ui::widgets::text_field::{self, TextFieldProps};
@@ -24,8 +24,10 @@ pub struct TimerBarState {
     project_id: Option<String>,
     billable: bool,
     last_running_id: Option<String>,
+    last_running_start: Option<i64>,
     desc_sync_rev: u64,
 
+    clock_node: Option<Node>,
     id_desc_slot: Option<WidgetId>,
     sel_project: PopupSelectSlot,
     id_bill_btn: Option<WidgetId>,
@@ -45,7 +47,9 @@ impl TimerBarState {
             project_id: None,
             billable: false,
             last_running_id: None,
+            last_running_start: None,
             desc_sync_rev: 0,
+            clock_node: None,
             id_desc_slot: None,
             sel_project: PopupSelectSlot::default(),
             id_bill_btn: None,
@@ -57,6 +61,7 @@ impl TimerBarState {
         let running = store.borrow().running_entry().unwrap_or(None);
         match running {
             Some(e) => {
+                self.last_running_start = Some(e.start);
                 if self.last_running_id.as_deref() != Some(e.id.as_str()) {
                     self.last_running_id = Some(e.id);
                     self.description = e.description;
@@ -66,6 +71,7 @@ impl TimerBarState {
                 }
             }
             None => {
+                self.last_running_start = None;
                 if self.last_running_id.is_some() {
                     self.last_running_id = None;
                     self.description.clear();
@@ -77,6 +83,21 @@ impl TimerBarState {
         }
     }
 
+    pub fn is_running_cached(&self) -> bool {
+        self.last_running_id.is_some()
+    }
+
+    /// Updates only the elapsed clock label inside the existing layout tree (no SQL or Taffy rebuild).
+    pub fn update_clock_in_tree(&self, tree: &mut Tree, now_ms: i64) -> bool {
+        let (Some(node), Some(start)) = (self.clock_node, self.last_running_start) else {
+            return false;
+        };
+        let text = format::clock((now_ms - start).max(0));
+        tree.replace_styled_text(node, text);
+        true
+    }
+
+    #[cfg(test)]
     pub fn is_running(&self, store: &SharedStore) -> bool {
         store.borrow().running_entry().ok().flatten().is_some()
     }
@@ -243,7 +264,7 @@ impl TimerBarState {
         }
         let sel_int =
             Interact::from_state(self.sel_project.trigger_id, env.hover, env.pressed, false);
-        let (_, proj_id) = select::build(
+        let (proj_node, _) = select::build(
             tree,
             proj_box,
             &SelectProps {
@@ -258,7 +279,7 @@ impl TimerBarState {
             },
             p,
         );
-        self.sel_project.trigger_id = Some(proj_id);
+        self.sel_project.trigger_id = Some(tree.set_key(proj_node, "timer.project"));
 
         // Billable toggle button ($)
         let mut bill_props = ButtonProps::new("$");
@@ -270,7 +291,8 @@ impl TimerBarState {
         };
         bill_props.size = ButtonSize::Small;
         bill_props.interact = Interact::from_state(self.id_bill_btn, env.hover, env.pressed, false);
-        let (bill_node, bill_id) = button::build(tree, bar, &bill_props, p);
+        let (bill_node, _) = button::build(tree, bar, &bill_props, p);
+        let bill_id = tree.set_key(bill_node, "timer.billable");
         if let Some(d) = tree.data_mut(bill_node) {
             d.a11y.toggled = Some(self.billable);
         }
@@ -293,15 +315,26 @@ impl TimerBarState {
                 ..Default::default()
             },
         );
-        crate::ui::widgets::add_label(
-            tree,
+        let clock_node = tree.add_leaf(
             clock_box,
-            &clock_text,
-            13.5,
-            Weight::SemiBold,
-            Align::Right,
-            if running.is_some() { p.accent } else { p.muted },
+            Style {
+                size: Size {
+                    width: percent(1.0_f32),
+                    height: auto(),
+                },
+                ..Default::default()
+            },
+            Leaf::StyledText {
+                text: clock_text,
+                size: 13.5,
+                weight: Weight::SemiBold,
+                align: Align::Right,
+                wrap: Wrap::NoWrap,
+                color: if running.is_some() { p.accent } else { p.muted },
+            },
         );
+        let _ = tree.set_key(clock_node, "timer.clock");
+        self.clock_node = Some(clock_node);
 
         // Start / Stop primary action button
         let is_run = running.is_some();
@@ -320,8 +353,8 @@ impl TimerBarState {
         act_props.size = ButtonSize::Icon;
         act_props.interact =
             Interact::from_state(self.id_toggle_btn, env.hover, env.pressed, false);
-        let (_, act_id) = button::build(tree, bar, &act_props, p);
-        self.id_toggle_btn = Some(act_id);
+        let (act_node, _) = button::build(tree, bar, &act_props, p);
+        self.id_toggle_btn = Some(tree.set_key(act_node, "timer.toggle"));
     }
 
     pub fn on_click(
@@ -478,5 +511,27 @@ mod tests {
             store.borrow().running_entry().unwrap().unwrap().description,
             "Review PR"
         );
+
+        // Project dot appearing/disappearing must not shift Project/Billable/Toggle widget IDs.
+        let mut t1 = Tree::new(style::column());
+        let r1 = t1.root();
+        bar.project_id = None;
+        bar.build(&mut t1, r1, &store, &projects, &env);
+        let ids_without_dot = (
+            bar.sel_project.trigger_id,
+            bar.id_bill_btn,
+            bar.id_toggle_btn,
+        );
+
+        let mut t2 = Tree::new(style::column());
+        let r2 = t2.root();
+        bar.project_id = Some(projects[0].id.clone());
+        bar.build(&mut t2, r2, &store, &projects, &env);
+        let ids_with_dot = (
+            bar.sel_project.trigger_id,
+            bar.id_bill_btn,
+            bar.id_toggle_btn,
+        );
+        assert_eq!(ids_without_dot, ids_with_dot);
     }
 }

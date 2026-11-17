@@ -1,6 +1,8 @@
 //! Projects list screen (`ProjectsScreen`) using SQL-aggregated summaries
 //! plus the reusable `ProjectDialogState` modal for create/edit/archive/delete.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use taffy::prelude::*;
 
 use crate::db::{Project, ProjectInput, ProjectPatch, ProjectSummary, SharedStore};
@@ -20,14 +22,17 @@ use crate::ui::widgets::text_field::{self, TextFieldProps};
 use crate::ui::widgets::toggle::{self, ToggleKind, ToggleProps};
 use crate::ui::widgets::{add_label, glyph, interactive_a11y, Interact};
 
-use super::{
-    build_card, build_empty_state, build_scroll_page, screen_root_tree, scroll_wheel_step,
-    PopupSelectSlot,
-};
+use super::{build_card, build_empty_state, screen_root_tree, PageScroll, PopupSelectSlot};
 
 const KEY_PROJ_NAME: &str = "project_dlg.name";
 const KEY_PROJ_CLIENT: &str = "project_dlg.client";
 const KEY_PROJ_RATE: &str = "project_dlg.rate";
+
+static NEXT_PROJECT_SYNC_REV: AtomicU64 = AtomicU64::new(1);
+
+fn next_project_sync_rev() -> u64 {
+    NEXT_PROJECT_SYNC_REV.fetch_add(1, Ordering::Relaxed)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectDialogOutcome {
@@ -63,6 +68,11 @@ pub struct ProjectDialogState {
 }
 
 impl ProjectDialogState {
+    #[cfg(test)]
+    pub fn sync_rev(&self) -> u64 {
+        self.sync_rev
+    }
+
     pub fn for_new(default_currency: &str, used_colors: &[String]) -> Self {
         let pick_color = PROJECT_COLOR_HEX
             .iter()
@@ -79,7 +89,7 @@ impl ProjectDialogState {
             billable: true,
             confirm_delete: false,
             error: None,
-            sync_rev: 1,
+            sync_rev: next_project_sync_rev(),
             id_close: None,
             id_billable: None,
             id_swatch_ids: Vec::new(),
@@ -109,7 +119,7 @@ impl ProjectDialogState {
             editing: Some(p),
             confirm_delete: false,
             error: None,
-            sync_rev: 1,
+            sync_rev: next_project_sync_rev(),
             id_close: None,
             id_billable: None,
             id_swatch_ids: Vec::new(),
@@ -149,11 +159,11 @@ impl ProjectDialogState {
     fn try_save(&mut self, store: &SharedStore) -> ProjectDialogOutcome {
         let clean_name = self.name.trim();
         if clean_name.is_empty() {
-            self.error = Some("Give the project a name.".into());
+            self.error = Some(strings::PROJECT_ERR_NO_NAME.into());
             return ProjectDialogOutcome::None;
         }
         let Some(rate_val) = self.parse_rate() else {
-            self.error = Some("Hourly rate must be a valid non-negative number.".into());
+            self.error = Some(strings::PROJECT_ERR_BAD_RATE.into());
             return ProjectDialogOutcome::None;
         };
 
@@ -218,7 +228,7 @@ impl ProjectDialogState {
             &TextFieldProps {
                 key: KEY_PROJ_NAME,
                 aria_label: strings::PROJECT_FIELD_NAME,
-                placeholder: "Website redesign",
+                placeholder: strings::PROJECT_FIELD_NAME_HINT,
                 value: &self.name,
                 multiline: false,
                 min_height: 32.0,
@@ -305,7 +315,7 @@ impl ProjectDialogState {
             &TextFieldProps {
                 key: KEY_PROJ_RATE,
                 aria_label: strings::PROJECT_FIELD_RATE,
-                placeholder: "0 = non-billable",
+                placeholder: strings::PROJECT_FIELD_RATE_HINT,
                 value: &self.rate,
                 multiline: false,
                 min_height: 32.0,
@@ -637,8 +647,7 @@ impl ProjectDialogState {
     pub fn on_text_change(&mut self, key: &str, value: &str) -> bool {
         if key == KEY_PROJ_NAME {
             self.name = value.to_string();
-            self.error = None;
-            return false;
+            return self.error.take().is_some();
         }
         if key == KEY_PROJ_CLIENT {
             self.client = value.to_string();
@@ -646,8 +655,7 @@ impl ProjectDialogState {
         }
         if key == KEY_PROJ_RATE {
             self.rate = value.to_string();
-            self.error = None;
-            return false;
+            return self.error.take().is_some();
         }
         false
     }
@@ -704,8 +712,7 @@ pub struct ProjectsScreen {
     store: SharedStore,
     show_archived: bool,
     sort: SortState,
-    scroll_y: f32,
-    viewport_h: f32,
+    scroll: PageScroll,
     dialog: Option<ProjectDialogState>,
 
     id_new_btn: Option<WidgetId>,
@@ -728,8 +735,7 @@ impl ProjectsScreen {
                 col: 2,
                 dir: SortDir::Desc,
             },
-            scroll_y: 0.0,
-            viewport_h: 720.0,
+            scroll: PageScroll::default(),
             dialog: None,
             id_new_btn: None,
             id_empty_new_btn: None,
@@ -739,6 +745,16 @@ impl ProjectsScreen {
             opened_project: None,
             on_open_project: None,
         }
+    }
+
+    pub fn has_modal(&self) -> bool {
+        self.dialog.is_some()
+    }
+
+    pub fn reset_transient(&mut self) {
+        self.dialog = None;
+        self.opened_project = None;
+        self.scroll.reset();
     }
 
     #[cfg(test)]
@@ -771,14 +787,13 @@ impl ProjectsScreen {
         parent: Node,
         env: &ScreenEnv<'_>,
     ) -> Option<Node> {
-        self.viewport_h = env.height_dip;
         let p = env.palette;
 
         let (now_ms, all_projects, summaries) = {
             let st = self.store.borrow();
             let now = st.now_ms();
             let month_from = start_of_month(now);
-            let month_to = crate::time::add_months(month_from, 1);
+            let month_to = crate::time::start_of_day(crate::time::add_months(month_from, 1));
             let projs = st.list_projects().unwrap_or_default();
             let sums = st
                 .project_summaries(month_from, month_to)
@@ -798,7 +813,7 @@ impl ProjectsScreen {
             .collect();
         Self::sort_projects(&mut visible, self.sort);
 
-        let (_vp, col) = build_scroll_page(tree, parent, 960.0, 28.0, 16.0, self.scroll_y);
+        let col = self.scroll.build(tree, parent, 960.0, 28.0, 16.0);
 
         // Header
         let head = tree.add_container(
@@ -819,9 +834,9 @@ impl ProjectsScreen {
         let headline = if visible.is_empty() {
             strings::PROJECTS_TITLE.to_string()
         } else if visible.len() == 1 {
-            "1 project".into()
+            strings::PROJECTS_COUNT_ONE.into()
         } else {
-            format!("{} projects", visible.len())
+            format!("{} {}", visible.len(), strings::PROJECTS_COUNT_MANY_SUFFIX)
         };
         add_label(
             tree,
@@ -886,14 +901,14 @@ impl ProjectsScreen {
                     sortable: true,
                 },
                 TableColumn {
-                    label: strings::PROJECTS_STATUS_ACTIVE, // label dynamically unused if col is Earned:
+                    label: strings::PROJECTS_COL_EARNED,
                     width: Some(110.0),
                     align: Align::Right,
                     sortable: true,
                 },
             ];
             let mut columns = cols;
-            columns[4].label = "Earned";
+            columns[4].label = strings::PROJECTS_COL_EARNED;
 
             // Prepare formatted cell strings cleanly so borrows outlive `TableRow`.
             let formatted: Vec<[String; 5]> = visible
@@ -914,7 +929,7 @@ impl ProjectsScreen {
                     let rate_cell = if proj.rate > 0.0 {
                         format!("{}/h", format::money(proj.rate, &proj.currency))
                     } else {
-                        "Internal".into()
+                        strings::PROJECTS_INTERNAL.into()
                     };
                     let month_cell = if sum.month_ms > 0 {
                         format::hm(sum.month_ms)
@@ -995,7 +1010,11 @@ impl ProjectsScreen {
             let lbl = if self.show_archived {
                 strings::PROJECTS_HIDE_ARCHIVED.to_string()
             } else {
-                format!("Show {archived_count} archived")
+                format!(
+                    "{} {archived_count} {}",
+                    strings::PROJECTS_ARCHIVED_SHOW_PREFIX,
+                    strings::PROJECTS_ARCHIVED_SUFFIX
+                )
             };
             let mut btn = ButtonProps::new(&lbl);
             btn.variant = ButtonVariant::Ghost;
@@ -1100,7 +1119,19 @@ impl ProjectsScreen {
     }
 
     pub fn handle_key(&mut self, key: KeyCode) -> bool {
-        self.dialog.as_mut().is_some_and(|d| d.on_key(key))
+        if let Some(ref mut dlg) = self.dialog {
+            return dlg.on_key(key);
+        }
+        self.scroll.on_key(key)
+    }
+
+    pub fn sync_after_layout(
+        &mut self,
+        tree: &mut Tree,
+        focused: Option<WidgetId>,
+        scroll_to_focused: bool,
+    ) {
+        self.scroll.sync(tree, focused, scroll_to_focused);
     }
 
     pub fn handle_escape(&mut self) -> bool {
@@ -1116,9 +1147,7 @@ impl ProjectsScreen {
         if self.dialog.is_some() {
             return false;
         }
-        let max_scroll =
-            (self.row_project_ids.len() as f32 * 40.0 + 180.0 - self.viewport_h).max(0.0);
-        scroll_wheel_step(&mut self.scroll_y, delta_dip, max_scroll)
+        self.scroll.wheel(delta_dip)
     }
 
     pub fn handle_popup_poll(&mut self) -> bool {
@@ -1164,6 +1193,15 @@ impl Screen for ProjectsScreen {
 
     fn on_popup_poll(&mut self) -> bool {
         self.handle_popup_poll()
+    }
+
+    fn sync_after_layout(
+        &mut self,
+        tree: &mut Tree,
+        focused: Option<WidgetId>,
+        scroll_to_focused: bool,
+    ) {
+        ProjectsScreen::sync_after_layout(self, tree, focused, scroll_to_focused);
     }
 }
 
@@ -1225,9 +1263,10 @@ mod tests {
         assert!(host.rebuild_if_dirty(&env, &mut focus));
         assert!(matches!(focus.active_scope(), FocusScope::Modal(_)));
 
-        // Fill name + rate and save.
-        host.on_text_change(KEY_PROJ_NAME, "Telemetry Portal");
-        host.on_text_change(KEY_PROJ_RATE, "180");
+        // Typing into Name clears the validation error AND marks dirty to redraw it away.
+        assert!(host.on_text_change(KEY_PROJ_NAME, "Telemetry Portal"));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        assert!(!host.on_text_change(KEY_PROJ_RATE, "180"));
         let save_id2 = host
             .tree()
             .all_nodes()

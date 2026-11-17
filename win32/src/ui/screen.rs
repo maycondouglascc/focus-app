@@ -39,6 +39,12 @@ pub struct KeyModifiers {
 
 /// Response returned by screen-level pointer handlers (e.g., WeekGrid drag).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TickReply {
+    pub repaint: bool,
+    pub rebuild: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PointerReply {
     pub handled: bool,
     pub capture: bool,
@@ -54,6 +60,9 @@ pub struct PointerReply {
 pub trait Screen {
     fn build(&mut self, env: &ScreenEnv<'_>) -> BuiltScreen;
     fn on_click(&mut self, _id: WidgetId) -> bool {
+        false
+    }
+    fn on_a11y_focus(&mut self, _id: WidgetId) -> bool {
         false
     }
     fn on_key(&mut self, _key: KeyEvent, _focus: &mut FocusModel) -> bool {
@@ -93,11 +102,11 @@ pub trait Screen {
         false
     }
     fn sync_drag_tree(&mut self, _tree: &mut Tree) {}
-    fn wants_tick(&self) -> bool {
-        false
+    fn wants_tick(&self) -> Option<u32> {
+        None
     }
-    fn on_tick(&mut self) -> bool {
-        false
+    fn on_tick(&mut self, _tree: &mut Tree) -> TickReply {
+        TickReply::default()
     }
     fn wants_autoscroll(&self) -> bool {
         false
@@ -107,6 +116,13 @@ pub trait Screen {
     }
     fn on_popup_poll(&mut self) -> bool {
         false
+    }
+    fn sync_after_layout(
+        &mut self,
+        _tree: &mut Tree,
+        _focused: Option<WidgetId>,
+        _scroll_to_focused: bool,
+    ) {
     }
 }
 
@@ -118,6 +134,7 @@ pub struct ScreenHost {
     dirty: bool,
     last_w: f32,
     last_h: f32,
+    last_focused: Option<WidgetId>,
 }
 
 impl ScreenHost {
@@ -126,6 +143,8 @@ impl ScreenHost {
         built.tree.layout(env.width_dip, env.height_dip, env.text);
         debug_assert_eq!(a11y::validate_tree_names(&built.tree), Ok(()));
         sync_focus(focus, &built.tree, built.modal_root);
+        let cur_focus = focus.focused();
+        screen.sync_after_layout(&mut built.tree, cur_focus, false);
         Self {
             screen,
             tree: built.tree,
@@ -133,6 +152,7 @@ impl ScreenHost {
             dirty: false,
             last_w: env.width_dip,
             last_h: env.height_dip,
+            last_focused: cur_focus,
         }
     }
 
@@ -157,6 +177,11 @@ impl ScreenHost {
         self.last_h = env.height_dip;
         self.dirty = false;
         sync_focus(focus, &self.tree, self.modal_root);
+        let cur_focus = focus.focused();
+        let moved = cur_focus.is_some() && cur_focus != self.last_focused;
+        self.screen
+            .sync_after_layout(&mut self.tree, cur_focus, moved);
+        self.last_focused = cur_focus;
         true
     }
 
@@ -164,10 +189,27 @@ impl ScreenHost {
         self.tree.layout(width_dip, height_dip, text);
         self.last_w = width_dip;
         self.last_h = height_dip;
+        self.screen
+            .sync_after_layout(&mut self.tree, self.last_focused, false);
+    }
+
+    pub fn sync_focused_scroll(&mut self, focused: WidgetId) {
+        self.screen
+            .sync_after_layout(&mut self.tree, Some(focused), true);
+        self.last_focused = Some(focused);
     }
 
     pub fn on_click(&mut self, id: WidgetId) -> bool {
         if self.screen.on_click(id) {
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn on_a11y_focus(&mut self, id: WidgetId) -> bool {
+        if self.screen.on_a11y_focus(id) {
             self.dirty = true;
             true
         } else {
@@ -272,17 +314,16 @@ impl ScreenHost {
         self.screen.sync_drag_tree(&mut self.tree);
     }
 
-    pub fn wants_tick(&self) -> bool {
+    pub fn wants_tick(&self) -> Option<u32> {
         self.screen.wants_tick()
     }
 
-    pub fn on_tick(&mut self) -> bool {
-        if self.screen.on_tick() {
+    pub fn on_tick(&mut self) -> TickReply {
+        let reply = self.screen.on_tick(&mut self.tree);
+        if reply.rebuild {
             self.dirty = true;
-            true
-        } else {
-            false
         }
+        reply
     }
 
     pub fn wants_autoscroll(&self) -> bool {

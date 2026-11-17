@@ -23,9 +23,7 @@ use crate::ui::widgets::segmented::{self, SegmentedProps};
 use crate::ui::widgets::{add_label, glyph, Interact};
 
 use super::project_report::ClaudeGrouping;
-use super::{
-    build_card, build_empty_state, build_scroll_page, screen_root_tree, scroll_wheel_step,
-};
+use super::{build_card, build_empty_state, screen_root_tree, PageScroll};
 
 const CLAUDE: &str = "Claude Code";
 
@@ -72,8 +70,7 @@ pub struct ActivityScreen {
     period_nav: PeriodNavState,
     selected_app: Option<String>,
     claude_by: ClaudeGrouping,
-    scroll_y: f32,
-    viewport_h: f32,
+    scroll: PageScroll,
 
     id_all_chip: Option<WidgetId>,
     id_chips: Vec<(WidgetId, String)>,
@@ -89,8 +86,7 @@ impl ActivityScreen {
             period_nav: PeriodNavState::new(PeriodKind::Week, now_ms),
             selected_app: None,
             claude_by: ClaudeGrouping::Project,
-            scroll_y: 0.0,
-            viewport_h: 720.0,
+            scroll: PageScroll::default(),
             id_all_chip: None,
             id_chips: Vec::new(),
             id_app_rows: Vec::new(),
@@ -105,7 +101,6 @@ impl ActivityScreen {
         parent: Node,
         env: &ScreenEnv<'_>,
     ) -> Option<Node> {
-        self.viewport_h = env.height_dip;
         let p = env.palette;
 
         let (
@@ -288,7 +283,7 @@ impl ActivityScreen {
         };
         let _ = first_day_mon0;
 
-        let (_vp, col) = build_scroll_page(tree, parent, 1140.0, 28.0, 16.0, self.scroll_y);
+        let col = self.scroll.build(tree, parent, 1140.0, 28.0, 16.0);
 
         // Header
         let head = tree.add_container(
@@ -869,8 +864,25 @@ impl ActivityScreen {
     }
 
     pub fn handle_wheel(&mut self, delta_dip: f32) -> bool {
-        let max_scroll = (1150.0 - self.viewport_h).max(0.0);
-        scroll_wheel_step(&mut self.scroll_y, delta_dip, max_scroll)
+        self.scroll.wheel(delta_dip)
+    }
+
+    pub fn sync_after_layout(
+        &mut self,
+        tree: &mut Tree,
+        focused: Option<WidgetId>,
+        scroll_to_focused: bool,
+    ) {
+        self.scroll.sync(tree, focused, scroll_to_focused);
+    }
+
+    pub fn handle_key(&mut self, key: crate::ui::input::KeyCode) -> bool {
+        self.scroll.on_key(key)
+    }
+
+    pub fn reset_transient(&mut self) {
+        self.scroll.reset();
+        self.period_nav.clear_popup();
     }
 }
 
@@ -886,6 +898,14 @@ impl Screen for ActivityScreen {
         self.handle_click(id, &Palette::LIGHT)
     }
 
+    fn on_key(
+        &mut self,
+        ev: crate::ui::input::KeyEvent,
+        _focus: &mut crate::ui::focus::FocusModel,
+    ) -> bool {
+        self.handle_key(ev.key)
+    }
+
     fn on_escape(&mut self) -> bool {
         self.handle_escape()
     }
@@ -896,6 +916,15 @@ impl Screen for ActivityScreen {
 
     fn on_popup_poll(&mut self) -> bool {
         self.period_nav.poll_popup()
+    }
+
+    fn sync_after_layout(
+        &mut self,
+        tree: &mut Tree,
+        focused: Option<WidgetId>,
+        scroll_to_focused: bool,
+    ) {
+        ActivityScreen::sync_after_layout(self, tree, focused, scroll_to_focused);
     }
 }
 

@@ -8,8 +8,8 @@ use taffy::prelude::*;
 
 use crate::format::{month_long, month_short, range_label, weekday_short};
 use crate::time::{
-    add_days, add_months, iso_week, start_of_day, start_of_month, start_of_week_with_first,
-    start_of_year, to_local, HOUR,
+    add_days, add_days_start, add_months, start_of_day, start_of_month, start_of_week_with_first,
+    start_of_year, to_local, week_iso_number, HOUR,
 };
 use crate::ui::screen::ScreenEnv;
 use crate::ui::strings;
@@ -78,7 +78,7 @@ fn month_bucket(from: i64, label: String) -> PeriodBucket {
     let l = to_local(from);
     PeriodBucket {
         from,
-        to: add_months(from, 1),
+        to: start_of_day(add_months(from, 1)),
         label,
         title: format!("{} {}", month_long(l.month), l.year),
     }
@@ -91,13 +91,13 @@ pub fn build_period(kind: PeriodKind, anchor_ms: i64, now_ms: i64, first_day_mon
         PeriodKind::All => Period {
             kind,
             from: 0,
-            to: add_months(start_of_month(now_ms), 1),
+            to: start_of_day(add_months(start_of_month(now_ms), 1)),
             unit: BucketUnit::Month,
             buckets: Vec::new(),
         },
         PeriodKind::Day => {
             let from = start_of_day(anchor_ms);
-            let to = add_days(from, 1);
+            let to = add_days_start(from, 1);
             let buckets = (0..24)
                 .map(|h| PeriodBucket {
                     from: from + i64::from(h) * HOUR,
@@ -142,14 +142,14 @@ pub fn build_period(kind: PeriodKind, anchor_ms: i64, now_ms: i64, first_day_mon
                 start_of_month(anchor_ms)
             };
             let to = if kind == PeriodKind::Week {
-                add_days(from, 7)
+                add_days_start(from, 7)
             } else {
-                add_months(from, 1)
+                start_of_day(add_months(from, 1))
             };
             let mut buckets = Vec::new();
             let mut d = from;
             while d < to {
-                let next = add_days(d, 1);
+                let next = add_days_start(d, 1);
                 let l = to_local(d);
                 let label = if kind == PeriodKind::Week {
                     weekday_short(l.weekday_mon0()).to_string()
@@ -271,7 +271,7 @@ pub fn period_title(p: &Period, now_ms: i64) -> String {
             }
         }
         PeriodKind::Week => {
-            let w = iso_week(p.from);
+            let w = week_iso_number(p.from);
             if current {
                 format!("{} · W{w}", strings::PERIOD_THIS_WEEK_PREFIX)
             } else {
@@ -306,6 +306,10 @@ impl PeriodNavState {
             anchor_ms: now_ms,
             ..Default::default()
         }
+    }
+
+    pub fn clear_popup(&mut self) {
+        self.popup_result = None;
     }
 
     pub fn period(&self, now_ms: i64, first_day_mon0: u8) -> Period {
@@ -570,6 +574,16 @@ mod tests {
         let sun_week = build_period(PeriodKind::Week, now, now, 6);
         assert_eq!(sun_week.buckets.len(), 7);
         assert_eq!(sun_week.buckets[0].label, "Sun");
+        assert_eq!(period_title(&sun_week, now), "This week · W47");
+
+        // Past Sunday-start week around year boundary: Sun 2025-12-28..Sat 2026-01-03 -> W1 (Thu 2026-01-01).
+        let ny_sun = from_local(2025, 12, 29, 12, 0, 0, 0);
+        let ny_week = build_period(PeriodKind::Week, ny_sun, now, 6);
+        assert!(
+            period_title(&ny_week, now).ends_with("W1"),
+            "got {}",
+            period_title(&ny_week, now)
+        );
 
         let month = build_period(PeriodKind::Month, now, now, 0);
         assert_eq!(month.buckets.len(), 30);

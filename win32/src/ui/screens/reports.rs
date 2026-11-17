@@ -29,10 +29,7 @@ use crate::ui::window;
 use super::entry_editor::{EntryDraft, EntryEditorOutcome, EntryEditorState};
 use super::entry_tree::EntryTreeState;
 use super::project_report::ChartMetric;
-use super::{
-    build_card, build_scroll_page, build_stat_card, screen_root_tree, scroll_wheel_step,
-    PopupSelectSlot,
-};
+use super::{build_card, build_stat_card, screen_root_tree, PageScroll, PopupSelectSlot};
 
 const NONE_KEY: &str = "__none";
 
@@ -57,8 +54,7 @@ pub struct ReportsScreen {
     period_nav: PeriodNavState,
     filter: ProjectFilter,
     metric: ChartMetric,
-    scroll_y: f32,
-    viewport_h: f32,
+    scroll: PageScroll,
     entry_tree: EntryTreeState,
     entry_editor: Option<EntryEditorState>,
     csv_dialog: Option<CsvExportDialog>,
@@ -83,8 +79,7 @@ impl ReportsScreen {
             period_nav: PeriodNavState::new(PeriodKind::Month, now_ms),
             filter: ProjectFilter::All,
             metric: ChartMetric::Hours,
-            scroll_y: 0.0,
-            viewport_h: 720.0,
+            scroll: PageScroll::default(),
             entry_tree: EntryTreeState::new(),
             entry_editor: None,
             csv_dialog: None,
@@ -98,6 +93,20 @@ impl ReportsScreen {
             cached_period_title: String::new(),
             go_timer_requested: false,
         }
+    }
+
+    pub fn has_modal(&self) -> bool {
+        self.csv_dialog.is_some() || self.entry_editor.is_some()
+    }
+
+    pub fn reset_transient(&mut self) {
+        self.entry_editor = None;
+        self.csv_dialog = None;
+        self.export_notice = None;
+        self.sel_filter.clear();
+        self.period_nav.clear_popup();
+        self.go_timer_requested = false;
+        self.scroll.reset();
     }
 
     fn filter_options(projects: &[Project]) -> Vec<(ProjectFilter, String)> {
@@ -126,7 +135,7 @@ impl ReportsScreen {
             })
             .collect();
         let default_name = format!("focus-{}.csv", clean_title.trim_matches('-'));
-        let Some(path) = pick_csv_save_path(hwnd, &default_name) else {
+        let Some(path) = pick_csv_save_path(hwnd, &default_name)? else {
             return Ok(false);
         };
         let bytes = {
@@ -157,7 +166,6 @@ impl ReportsScreen {
         parent: Node,
         env: &ScreenEnv<'_>,
     ) -> Option<Node> {
-        self.viewport_h = env.height_dip;
         let p = env.palette;
 
         let (
@@ -275,7 +283,7 @@ impl ReportsScreen {
             }
         };
 
-        let (_vp, col) = build_scroll_page(tree, parent, 1140.0, 28.0, 16.0, self.scroll_y);
+        let col = self.scroll.build(tree, parent, 1140.0, 28.0, 16.0);
 
         // Header: Project filter Select + PeriodNav + Export CSV
         let head = tree.add_container(
@@ -734,6 +742,7 @@ impl ReportsScreen {
         }
         let now_ms = self.store.borrow().now_ms();
         if self.period_nav.on_click(id, now_ms, palette) {
+            self.export_notice = None;
             return true;
         }
         if Some(id) == self.sel_filter.trigger_id {
@@ -785,7 +794,16 @@ impl ReportsScreen {
         if self.entry_editor.is_some() || self.csv_dialog.is_some() {
             return false;
         }
-        self.entry_tree.handle_key(key)
+        self.entry_tree.handle_key(key) || self.scroll.on_key(key)
+    }
+
+    pub fn sync_after_layout(
+        &mut self,
+        tree: &mut Tree,
+        focused: Option<WidgetId>,
+        scroll_to_focused: bool,
+    ) {
+        self.scroll.sync(tree, focused, scroll_to_focused);
     }
 
     pub fn handle_escape(&mut self) -> bool {
@@ -811,8 +829,7 @@ impl ReportsScreen {
                 }
             }
         }
-        let max_scroll = (1100.0 - self.viewport_h).max(0.0);
-        scroll_wheel_step(&mut self.scroll_y, delta_dip, max_scroll)
+        self.scroll.wheel(delta_dip)
     }
 }
 
@@ -865,13 +882,28 @@ impl Screen for ReportsScreen {
         self.handle_wheel_at(x_dip, y_dip, dy_dip)
     }
 
+    fn sync_after_layout(
+        &mut self,
+        tree: &mut Tree,
+        focused: Option<WidgetId>,
+        scroll_to_focused: bool,
+    ) {
+        ReportsScreen::sync_after_layout(self, tree, focused, scroll_to_focused);
+    }
+
     fn on_popup_poll(&mut self) -> bool {
         let mut changed = self.period_nav.poll_popup();
+        if changed {
+            self.export_notice = None;
+        }
         if let Some(res) = self.sel_filter.poll() {
             if let Some(idx) = res {
                 let opts = Self::filter_options(&self.cached_projects);
                 if let Some((f, _)) = opts.get(idx) {
-                    self.filter = f.clone();
+                    if &self.filter != f {
+                        self.filter = f.clone();
+                        self.export_notice = None;
+                    }
                 }
             }
             changed = true;
@@ -951,5 +983,54 @@ mod tests {
         assert!(dirty);
         assert!(host.rebuild_if_dirty(&env, &mut focus));
         assert_eq!(focus.active_scope(), FocusScope::Main);
+    }
+
+    #[test]
+    fn export_notice_clears_when_period_changes() {
+        let text = TextSystem::new().expect("dwrite");
+        let palette = Palette::LIGHT;
+        let env = ScreenEnv {
+            width_dip: 1200.0,
+            height_dip: 800.0,
+            hover: None,
+            pressed: None,
+            focused: None,
+            palette: &palette,
+            text: &text,
+        };
+        let store = shared_store(Box::new(DemoStore::new(SystemLocale::en_us())));
+        let mut screen = ReportsScreen::new(Rc::clone(&store));
+        screen.export_notice = Some("Exported 5 rows".into());
+        let mut focus = FocusModel::new();
+        let mut host = ScreenHost::mount(Box::new(screen), &env, &mut focus);
+        assert!(host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .any(|d| matches!(
+                &d.leaf,
+                Some(crate::ui::tree::Leaf::StyledText { text, .. }) if text == "Exported 5 rows"
+            )));
+
+        let prev_btn = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == strings::PERIOD_PREV_LABEL && d.a11y.clickable)
+            .unwrap()
+            .id;
+        assert!(host.on_click(prev_btn));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        assert!(!host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .any(|d| matches!(
+                &d.leaf,
+                Some(crate::ui::tree::Leaf::StyledText { text, .. }) if text == "Exported 5 rows"
+            )));
     }
 }

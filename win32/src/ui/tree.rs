@@ -14,6 +14,17 @@ use super::theme::Color;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct WidgetId(pub u64);
 
+/// Derives a deterministic non-zero `WidgetId` outside the sequential range
+/// (`bit 62` set so it stays positive as `i64` and never collides with `1..`).
+pub fn keyed_widget_id(key: &str) -> WidgetId {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in key.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    WidgetId(0x4000_0000_0000_0000 | (hash & 0x3FFF_FFFF_FFFF_FFFF))
+}
+
 /// Drawing primitives emitted in a leaf's local `(0, 0, w, h)` DIP coordinate space.
 #[allow(dead_code)] // variants used progressively by widgets and chart primitives
 #[derive(Clone, Debug)]
@@ -184,6 +195,16 @@ pub struct A11yInfo {
     pub requires_name: bool,
 }
 
+/// Accessibility-only virtual child hosted inside a logical widget (for
+/// instance, entries and activity sessions drawn on the week grid canvas).
+#[derive(Clone, Debug)]
+pub struct VirtualA11yChild {
+    pub id: WidgetId,
+    pub rect: Rect,
+    pub focusable: bool,
+    pub a11y: A11yInfo,
+}
+
 pub struct NodeData {
     pub id: WidgetId,
     pub leaf: Option<Leaf>,
@@ -194,7 +215,10 @@ pub struct NodeData {
     pub hidden: bool,
     pub scroll_x: f32,
     pub scroll_y: f32,
+    pub scrollable_y: bool,
     pub a11y: A11yInfo,
+    pub virtual_children: Vec<VirtualA11yChild>,
+    pub virtual_focus: Option<WidgetId>,
 }
 
 impl NodeData {
@@ -209,7 +233,10 @@ impl NodeData {
             hidden: false,
             scroll_x: 0.0,
             scroll_y: 0.0,
+            scrollable_y: false,
             a11y: A11yInfo::default(),
+            virtual_children: Vec::new(),
+            virtual_focus: None,
         }
     }
 }
@@ -345,6 +372,28 @@ impl Tree {
             .id
     }
 
+    /// Assigns a deterministic key-derived `WidgetId` to `node` so focus and hover
+    /// survive conditional siblings appearing or disappearing on rebuild.
+    pub fn set_key(&mut self, node: Node, key: &str) -> WidgetId {
+        let new_id = keyed_widget_id(key);
+        let Some(old_id) = self.data(node).map(|d| d.id) else {
+            return new_id;
+        };
+        if old_id == new_id {
+            return new_id;
+        }
+        debug_assert!(
+            !self.by_id.contains_key(&new_id),
+            "duplicate stable widget key: {key}"
+        );
+        self.by_id.remove(&old_id);
+        if let Some(d) = self.data_mut(node) {
+            d.id = new_id;
+        }
+        self.by_id.insert(new_id, node.0);
+        new_id
+    }
+
     pub fn node_by_id(&self, id: WidgetId) -> Option<Node> {
         self.by_id.get(&id).copied().map(Node)
     }
@@ -417,9 +466,91 @@ impl Tree {
         }
     }
 
+    pub fn set_scrollable_y(&mut self, node: Node, scrollable: bool) {
+        if let Some(d) = self.data_mut(node) {
+            d.scrollable_y = scrollable;
+        }
+    }
+
+    /// Sets the root container height to `100%` of the available viewport height.
+    pub fn set_root_height_fill(&mut self) {
+        if let Ok(mut st) = self.taffy.style(self.root).cloned() {
+            st.size.height = percent(1.0_f32);
+            let _ = self.taffy.set_style(self.root, st);
+        }
+    }
+
+    /// Computes maximum vertical scroll offset (`content_h - viewport_h`, >= 0) from laid-out geometry.
+    pub fn scroll_max_y(&self, viewport: Node) -> f32 {
+        let Ok(vp_l) = self.taffy.layout(viewport.0) else {
+            return 0.0;
+        };
+        let vp_h = vp_l.size.height;
+        let mut content_bottom = 0.0_f32;
+        for child in self.children(viewport) {
+            if self.data(child).is_some_and(|d| d.hidden) {
+                continue;
+            }
+            if let Ok(cl) = self.taffy.layout(child.0) {
+                content_bottom = content_bottom.max(cl.location.y + cl.size.height);
+            }
+        }
+        (content_bottom + vp_l.padding.bottom - vp_h).max(0.0)
+    }
+
+    /// Scrolls `viewport` vertically if `target` lies outside its visible DIP window.
+    /// Returns `Some(new_scroll_y)` when `scroll_y` changed.
+    pub fn scroll_node_into_view(&mut self, viewport: Node, target: Node) -> Option<f32> {
+        let mut anc = self.parent(target);
+        let mut is_descendant = false;
+        while let Some(p) = anc {
+            if p == viewport {
+                is_descendant = true;
+                break;
+            }
+            anc = self.parent(p);
+        }
+        if !is_descendant {
+            return None;
+        }
+
+        let cur_scroll = self.data(viewport).map(|d| d.scroll_y).unwrap_or(0.0);
+        let vp_rect = self.rect(viewport);
+        if vp_rect.h <= 1.0 {
+            return None;
+        }
+        let t_rect = self.rect(target);
+        let rel_top = t_rect.y - vp_rect.y;
+        let rel_bot = rel_top + t_rect.h;
+        let margin = 12.0_f32.min(vp_rect.h * 0.15);
+
+        let next_scroll = if rel_top < margin {
+            cur_scroll + rel_top - margin
+        } else if rel_bot > vp_rect.h - margin {
+            cur_scroll + (rel_bot - (vp_rect.h - margin))
+        } else {
+            return None;
+        };
+        let clamped = next_scroll.clamp(0.0, self.scroll_max_y(viewport));
+        if (clamped - cur_scroll).abs() > 0.2 {
+            self.set_scroll(viewport, 0.0, clamped);
+            Some(clamped)
+        } else {
+            None
+        }
+    }
+
     pub fn replace_canvas(&mut self, node: Node, cmds: Vec<DrawCmd>) {
         if let Some(d) = self.data_mut(node) {
             d.leaf = Some(Leaf::Canvas(cmds));
+        }
+    }
+
+    pub fn replace_styled_text(&mut self, node: Node, new_text: String) {
+        if let Some(d) = self.data_mut(node) {
+            if let Some(Leaf::StyledText { ref mut text, .. }) = d.leaf {
+                *text = new_text;
+            }
         }
     }
 
@@ -427,6 +558,30 @@ impl Tree {
         if let Some(d) = self.data_mut(node) {
             d.a11y = a11y;
         }
+    }
+
+    pub fn set_virtual_children(
+        &mut self,
+        node: Node,
+        children: Vec<VirtualA11yChild>,
+        focused: Option<WidgetId>,
+    ) {
+        if let Some(d) = self.data_mut(node) {
+            d.virtual_children = children;
+            d.virtual_focus = focused;
+        }
+    }
+
+    pub fn find_virtual_child(&self, id: WidgetId) -> Option<(Node, &VirtualA11yChild)> {
+        for node in self.all_nodes() {
+            let Some(d) = self.data(node) else {
+                continue;
+            };
+            if let Some(vc) = d.virtual_children.iter().find(|c| c.id == id) {
+                return Some((node, vc));
+            }
+        }
+        None
     }
 
     pub fn children(&self, node: Node) -> Vec<Node> {

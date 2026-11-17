@@ -26,9 +26,9 @@ use windows::Win32::UI::Input::Pointer::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, IsWindow, LoadCursorW,
     PostMessageW, RegisterClassW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, IDC_ARROW,
-    PT_PEN, PT_TOUCH, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, WA_INACTIVE,
-    WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_GETOBJECT, WM_KEYDOWN, WM_KILLFOCUS, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_PAINT,
+    PT_PEN, PT_TOUCH, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WA_INACTIVE, WINDOW_EX_STYLE,
+    WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
+    WM_GETOBJECT, WM_KEYDOWN, WM_KILLFOCUS, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_PAINT,
     WM_POINTERCAPTURECHANGED, WM_POINTERDOWN, WM_POINTERENTER, WM_POINTERHWHEEL, WM_POINTERLEAVE,
     WM_POINTERUP, WM_POINTERUPDATE, WM_POINTERWHEEL, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE,
     WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED, WNDCLASSW, WS_CLIPCHILDREN,
@@ -162,11 +162,13 @@ pub fn monitor_work_area(anchor: Option<ScreenRect>) -> ScreenRect {
 }
 
 /// Events emitted from an open popup window to its widget controller.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // consumed by Select and Popover in commits 6-7
+#[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)] // consumed by Select and Popover
 pub enum PopupEvent {
     Click(WidgetId),
     Key(KeyEvent),
+    Wheel(f32),
+    FocusChanged(Option<WidgetId>),
     Closed,
 }
 
@@ -221,6 +223,11 @@ pub fn is_open() -> bool {
     let hwnd = POPUP.with(|p| p.try_borrow().ok().and_then(|g| g.as_ref().map(|a| a.hwnd)));
     // SAFETY: `IsWindow` safely validates any HWND value.
     hwnd.is_some_and(|h| unsafe { IsWindow(Some(h)).as_bool() })
+}
+
+#[cfg(test)]
+pub fn active_hwnd() -> Option<HWND> {
+    POPUP.with(|p| p.try_borrow().ok().and_then(|g| g.as_ref().map(|a| a.hwnd)))
 }
 
 /// Opens a new `WS_POPUP` window, closing any previous popup first.
@@ -431,6 +438,10 @@ pub fn refresh_layout_with_height(desired_h_dip: Option<f32>) {
             let root_id = p.tree.id(p.tree.root());
             p.focus
                 .sync_from_tree(&p.tree, |_, _| FocusScope::Popup(root_id));
+            let cur = p.focus.focused();
+            let _ = p
+                .delegate
+                .on_event(PopupEvent::FocusChanged(cur), &mut p.tree, &mut p.focus);
         });
         sync_a11y(hwnd);
         let _ = InvalidateRect(Some(hwnd), None, false);
@@ -630,15 +641,28 @@ unsafe fn on_pointer_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
 unsafe fn on_wheel_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
     let delta = (wparam.0 >> 16) as i16;
     let horizontal = msg == WM_MOUSEHWHEEL || msg == WM_POINTERHWHEEL;
-    with_popup(|p| {
-        let _ = if horizontal {
-            p.pointer.wheel.push_horizontal_dip(delta, 48.0)
+    let (handled, dirty) = with_popup(|p| {
+        let dy = if horizontal {
+            let _ = p.pointer.wheel.push_horizontal_dip(delta, 48.0);
+            0.0
         } else {
             p.pointer.wheel.push_vertical_dip(delta, 48.0)
         };
-    });
-    let _ = hwnd;
-    msg == WM_POINTERWHEEL || msg == WM_POINTERHWHEEL
+        if dy.abs() > 0.01 {
+            let out = p
+                .delegate
+                .on_event(PopupEvent::Wheel(dy), &mut p.tree, &mut p.focus);
+            (out.handled, out.dirty)
+        } else {
+            (false, false)
+        }
+    })
+    .unwrap_or((false, false));
+    if dirty {
+        sync_a11y(hwnd);
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+    handled || msg == WM_POINTERWHEEL || msg == WM_POINTERHWHEEL
 }
 
 fn translate_key(wparam: WPARAM) -> KeyEvent {
@@ -680,39 +704,78 @@ unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
         close();
         return true;
     }
-    let (handled, focus_changed, dirty, should_close, notify_owner, resize_h, owner) =
-        with_popup(|p| match ev.key {
-            KeyCode::Tab if !ev.ctrl && !ev.alt => {
-                let prev = p.focus.focused();
-                let prev_vis = p.focus.is_focus_visible();
-                let next = p.focus.tab(ev.shift);
-                (
-                    true,
-                    next != prev,
-                    next != prev || p.focus.is_focus_visible() != prev_vis,
-                    false,
-                    false,
-                    None,
-                    p.owner,
-                )
+    let (
+        handled,
+        focus_changed,
+        dirty,
+        activated_click,
+        should_close,
+        notify_owner,
+        resize_h,
+        owner,
+    ) = with_popup(|p| match ev.key {
+        KeyCode::Tab if !ev.ctrl && !ev.alt => {
+            let prev = p.focus.focused();
+            let prev_vis = p.focus.is_focus_visible();
+            let next = p.focus.tab(ev.shift);
+            let mut scroll_dirty = false;
+            if next != prev {
+                let fout =
+                    p.delegate
+                        .on_event(PopupEvent::FocusChanged(next), &mut p.tree, &mut p.focus);
+                scroll_dirty = fout.dirty;
             }
-            _ => {
-                let prev = p.focus.focused();
-                let out = p
-                    .delegate
-                    .on_event(PopupEvent::Key(ev), &mut p.tree, &mut p.focus);
-                (
-                    out.handled,
-                    p.focus.focused() != prev,
-                    out.dirty,
-                    out.close,
-                    out.notify_owner,
-                    out.resize_h_dip,
-                    p.owner,
-                )
+            (
+                true,
+                next != prev,
+                next != prev || p.focus.is_focus_visible() != prev_vis || scroll_dirty,
+                false,
+                false,
+                false,
+                None,
+                p.owner,
+            )
+        }
+        _ => {
+            let prev = p.focus.focused();
+            let mut out = p
+                .delegate
+                .on_event(PopupEvent::Key(ev), &mut p.tree, &mut p.focus);
+            let mut activated_click = false;
+            if !out.handled
+                && !ev.ctrl
+                && !ev.alt
+                && !ev.shift
+                && matches!(ev.key, KeyCode::Enter | KeyCode::Space)
+            {
+                if let Some(fid) = p.focus.focused() {
+                    let is_clickable = p
+                        .tree
+                        .node_by_id(fid)
+                        .and_then(|n| p.tree.data(n))
+                        .is_some_and(|d| !d.disabled && d.a11y.clickable);
+                    if is_clickable {
+                        out =
+                            p.delegate
+                                .on_event(PopupEvent::Click(fid), &mut p.tree, &mut p.focus);
+                        out.handled = true;
+                        activated_click = true;
+                    }
+                }
             }
-        })
-        .unwrap_or((false, false, false, false, false, None, None));
+            (
+                out.handled,
+                p.focus.focused() != prev,
+                out.dirty,
+                activated_click,
+                out.close,
+                out.notify_owner,
+                out.resize_h_dip,
+                p.owner,
+            )
+        }
+    })
+    .unwrap_or((false, false, false, false, false, false, None, None));
 
     if should_close {
         close();
@@ -723,7 +786,7 @@ unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
             let _ = PostMessageW(Some(ow), WM_POPUP_NOTIFY, WPARAM(0), LPARAM(0));
         }
     }
-    if resize_h.is_some() {
+    if resize_h.is_some() || (activated_click && dirty) {
         refresh_layout_with_height(resize_h);
         return handled;
     }
@@ -766,6 +829,7 @@ unsafe fn on_paint(hwnd: HWND) {
             show_title_bar: false,
             tree: Some(&p.tree),
             focus_ring,
+            render_rich_slots: false,
         });
         match res {
             Ok(()) => false,
@@ -828,7 +892,12 @@ unsafe extern "system" fn popup_wnd_proc(
             return LRESULT(0);
         }
         WM_DPICHANGED => {
-            let dpi = (wparam.0 & 0xFFFF) as u32;
+            let raw_dpi = (wparam.0 & 0xFFFF) as u32;
+            let dpi = if raw_dpi > 0 {
+                raw_dpi
+            } else {
+                GetDpiForWindow(hwnd)
+            };
             let scale = frame::scale(dpi);
             let r = &*(lparam.0 as *const RECT);
             let target_w =
@@ -842,7 +911,7 @@ unsafe extern "system" fn popup_wnd_proc(
                 r.top,
                 target_w,
                 target_h,
-                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE,
+                SWP_NOZORDER | SWP_NOACTIVATE,
             );
             return LRESULT(0);
         }
@@ -939,7 +1008,17 @@ unsafe extern "system" fn popup_wnd_proc(
                 for req in requests {
                     let id = a11y::widget_id(req.target_node);
                     match req.action {
-                        Action::Focus => dirty |= p.focus.focus_keyboard(id),
+                        Action::Focus => {
+                            if p.focus.focus_keyboard(id) {
+                                dirty = true;
+                                let fout = p.delegate.on_event(
+                                    PopupEvent::FocusChanged(Some(id)),
+                                    &mut p.tree,
+                                    &mut p.focus,
+                                );
+                                dirty |= fout.dirty;
+                            }
+                        }
                         Action::Click => {
                             let out = p.delegate.on_event(
                                 PopupEvent::Click(id),
@@ -1161,8 +1240,27 @@ mod tests {
         )
         .expect("open second popup");
         assert!(is_open());
-        // SAFETY: `hwnd2` is our active popup HWND.
+
+        // WM_DPICHANGED must actually resize the popup to the scaled DIP size (no SWP_NOSIZE).
+        let dpi_192 = ((192usize) << 16) | 192usize;
+        let suggested = RECT {
+            left: work.left + 40,
+            top: work.top + 40,
+            right: work.left + 440,
+            bottom: work.top + 280,
+        };
+        // SAFETY: `hwnd2` is our live popup HWND and `suggested` is a valid stack RECT.
         unsafe {
+            let _ = SendMessageW(
+                hwnd2,
+                WM_DPICHANGED,
+                Some(WPARAM(dpi_192)),
+                Some(LPARAM(&suggested as *const RECT as isize)),
+            );
+            let mut scaled_rc = RECT::default();
+            assert!(GetWindowRect(hwnd2, &mut scaled_rc).is_ok());
+            assert_eq!(scaled_rc.right - scaled_rc.left, 400);
+            assert_eq!(scaled_rc.bottom - scaled_rc.top, 240);
             let _ = SendMessageW(
                 hwnd2,
                 WM_ACTIVATE,

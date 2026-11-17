@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::db::{Activity, TimeEntry};
 use crate::stats::union_ms;
-use crate::time::{add_days, overlap};
+use crate::time::{add_days_start, overlap};
 
 pub const HOUR_DIP: f32 = 52.0;
 pub const SNAP_MIN: i32 = 15;
@@ -24,10 +24,10 @@ pub struct EntrySeg {
     pub clipped_bottom: bool,
 }
 
-/// Splits entries into one segment per day `[day_start, add_days(day_start, 1))`
+/// Splits entries into one segment per day `[day_start, add_days_start(day_start, 1))`
 /// and places mutually overlapping clusters side by side cleanly.
 pub fn layout_day(entries: &[TimeEntry], day_start: i64, now_ms: i64) -> Vec<EntrySeg> {
-    let day_end = add_days(day_start, 1);
+    let day_end = add_days_start(day_start, 1);
     let mut segs: Vec<EntrySeg> = entries
         .iter()
         .filter_map(|e| {
@@ -135,7 +135,7 @@ pub fn activity_sessions(
     gap_ms: i64,
     min_ms: i64,
 ) -> Vec<ActivitySession> {
-    let day_end = add_days(day_start, 1);
+    let day_end = add_days_start(day_start, 1);
     let mut rows: Vec<(&Activity, i64, i64)> = items
         .iter()
         .filter_map(|a| {
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn layout_day_clusters_overlaps_and_clips_across_midnight() {
         let day = from_local(2026, 11, 18, 0, 0, 0, 0);
-        let next = add_days(day, 1);
+        let next = add_days_start(day, 1);
 
         // Cluster 1: A (9-11), B (9:30-10:30), C (10-12) -> 3 columns.
         // Non-overlapping D (14-15) -> 1 column.
@@ -333,8 +333,74 @@ mod tests {
             .filter(|s| matches!(s.entry.id.as_str(), "a" | "b" | "c"))
             .collect();
         assert!(cluster.iter().all(|s| s.cols == 3));
+        assert_eq!(cluster[0].entry.id, "a");
+        assert_eq!(cluster[0].col, 0);
+        assert_eq!(cluster[1].entry.id, "b");
+        assert_eq!(cluster[1].col, 1);
+        assert_eq!(cluster[2].entry.id, "c");
+        assert_eq!(cluster[2].col, 2);
         assert_eq!(segs.last().unwrap().entry.id, "d");
         assert_eq!(segs.last().unwrap().cols, 1);
+        assert_eq!(segs.last().unwrap().col, 0);
+    }
+
+    #[test]
+    fn layout_day_handles_abutting_chain_reuse_and_equal_starts() {
+        let day = from_local(2026, 11, 18, 0, 0, 0, 0);
+        let entries = vec![
+            // Abutting pair (end == start): must NOT overlap -> each col=0, cols=1.
+            entry(
+                "ab1",
+                local_day_at(2026, 11, 18, 7 * 60),
+                local_day_at(2026, 11, 18, 8 * 60),
+            ),
+            entry(
+                "ab2",
+                local_day_at(2026, 11, 18, 8 * 60),
+                local_day_at(2026, 11, 18, 9 * 60),
+            ),
+            // Chain A–B–C: A(9:00..10:00) overlaps B(9:30..10:30); C(10:00..11:00) abuts A
+            // and overlaps B -> C reuses column 0, cluster width stays cols=2.
+            entry(
+                "ch_a",
+                local_day_at(2026, 11, 18, 9 * 60),
+                local_day_at(2026, 11, 18, 10 * 60),
+            ),
+            entry(
+                "ch_b",
+                local_day_at(2026, 11, 18, 9 * 60 + 30),
+                local_day_at(2026, 11, 18, 10 * 60 + 30),
+            ),
+            entry(
+                "ch_c",
+                local_day_at(2026, 11, 18, 10 * 60),
+                local_day_at(2026, 11, 18, 11 * 60),
+            ),
+            // Equal start times: longer block placed first (col=0), shorter second (col=1), cols=2.
+            entry(
+                "eq_short",
+                local_day_at(2026, 11, 18, 13 * 60),
+                local_day_at(2026, 11, 18, 13 * 60 + 30),
+            ),
+            entry(
+                "eq_long",
+                local_day_at(2026, 11, 18, 13 * 60),
+                local_day_at(2026, 11, 18, 14 * 60 + 30),
+            ),
+        ];
+
+        let segs = layout_day(&entries, day, add_days_start(day, 1));
+        let find = |id: &str| segs.iter().find(|s| s.entry.id == id).unwrap();
+
+        assert_eq!((find("ab1").col, find("ab1").cols), (0, 1));
+        assert_eq!((find("ab2").col, find("ab2").cols), (0, 1));
+
+        assert_eq!((find("ch_a").col, find("ch_a").cols), (0, 2));
+        assert_eq!((find("ch_b").col, find("ch_b").cols), (1, 2));
+        assert_eq!((find("ch_c").col, find("ch_c").cols), (0, 2));
+
+        assert_eq!((find("eq_long").col, find("eq_long").cols), (0, 2));
+        assert_eq!((find("eq_short").col, find("eq_short").cols), (1, 2));
     }
 
     #[test]

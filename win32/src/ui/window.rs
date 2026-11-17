@@ -3,6 +3,7 @@
 //! drawn through a DirectComposition swap chain (see `render.rs`).
 
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -21,18 +22,19 @@ use windows::Win32::UI::Input::Pointer::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, IsWindow,
-    IsZoomed, KillTimer, LoadCursorW, PeekMessageW, RegisterClassW, SetForegroundWindow, SetTimer,
-    SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, HTBOTTOM,
-    HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTCLOSE, HTLEFT, HTMAXBUTTON, HTMINBUTTON,
-    HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, PT_PEN,
-    PT_TOUCH, SIZE_MINIMIZED, SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SM_CYSIZEFRAME, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
-    SW_SHOW, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_COMMAND, WM_DESTROY, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_GETOBJECT, WM_KEYDOWN, WM_KILLFOCUS, WM_MOUSEHWHEEL, WM_MOUSEWHEEL,
-    WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_PAINT,
-    WM_POINTERCAPTURECHANGED, WM_POINTERDOWN, WM_POINTERENTER, WM_POINTERHWHEEL, WM_POINTERLEAVE,
-    WM_POINTERUP, WM_POINTERUPDATE, WM_POINTERWHEEL, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE,
-    WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED, WM_TIMER, WNDCLASSW, WS_CLIPCHILDREN,
+    IsZoomed, KillTimer, LoadCursorW, PeekMessageW, PostMessageW, RegisterClassW,
+    SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW,
+    CS_VREDRAW, CW_USEDEFAULT, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTCLOSE,
+    HTLEFT, HTMAXBUTTON, HTMINBUTTON, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, MSG,
+    NCCALCSIZE_PARAMS, PM_REMOVE, PT_PEN, PT_TOUCH, SIZE_MINIMIZED, SM_CXPADDEDBORDER,
+    SM_CXSIZEFRAME, SM_CYSIZEFRAME, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, WINDOW_EX_STYLE, WM_APP,
+    WM_CAPTURECHANGED, WM_CHAR, WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETOBJECT,
+    WM_KEYDOWN, WM_KILLFOCUS, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST,
+    WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_PAINT, WM_POINTERCAPTURECHANGED,
+    WM_POINTERDOWN, WM_POINTERENTER, WM_POINTERHWHEEL, WM_POINTERLEAVE, WM_POINTERUP,
+    WM_POINTERUPDATE, WM_POINTERWHEEL, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
+    WM_SYSKEYDOWN, WM_THEMECHANGED, WM_TIMER, WNDCLASSW, WS_CLIPCHILDREN,
     WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
 
@@ -42,9 +44,13 @@ use super::frame::{self, Hit};
 use super::input::{KeyCode, KeyEvent, PointerButton, PointerKind, PointerState};
 use super::popup::WM_POPUP_NOTIFY;
 use super::prefs::{self, SystemPrefs};
-use super::render::{reset_shared, DrawError, FrameOpts, Hover, Renderer};
+use super::render::{
+    cache_text_system, create_text_system_raw, is_cold_start, reset_shared, text_system,
+    warmup_d3d, DrawError, FrameOpts, Hover, Renderer,
+};
 use super::screen::{KeyModifiers, Screen, ScreenEnv, ScreenHost};
 use super::strings;
+use super::text::TextSystem;
 use super::theme::Palette;
 use super::tree::{Rect, Tree, WidgetId};
 use super::widgets::text_field::{
@@ -61,10 +67,12 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const EN_CHANGE: u16 = 0x0300;
 const TIMER_TICK_ID: usize = 1;
 const TIMER_AUTOSCROLL_ID: usize = 2;
+const WM_APP_SYNC_RICH: u32 = WM_APP + 6;
 
 struct Ui {
     hwnd: HWND,
-    /// `None` after a device loss or a failed creation; rebuilt on the next paint.
+    text: Rc<TextSystem>,
+    /// `None` until the first paint or after a device loss; rebuilt on the next paint.
     renderer: Option<Renderer>,
     hover: Hover,
     prefs: SystemPrefs,
@@ -79,9 +87,10 @@ struct Ui {
     rich_fields: Vec<RichEditField>,
     paint_count: u64,
     screen_capturing: bool,
-    tick_timer_on: bool,
+    tick_timer_ms: Option<u32>,
     autoscroll_timer_on: bool,
     syncing_rich: bool,
+    rich_sync_pending: bool,
 }
 
 thread_local! {
@@ -156,24 +165,29 @@ pub fn set_screen(screen: Box<dyn Screen>) -> bool {
     let (dpi, (w, h)) = unsafe { (GetDpiForWindow(hwnd), client_size(hwnd)) };
     let scale = frame::scale(dpi);
     let mounted = with_ui(|u| {
-        let Some(text) = u.renderer.as_ref().map(|r| r.text()) else {
-            return false;
-        };
+        let text = Rc::clone(&u.text);
+        let palette = u.palette;
         let env = ScreenEnv {
             width_dip: w as f32 / scale,
             height_dip: h as f32 / scale,
             hover: u.pointer.hovered,
             pressed: u.pointer.pressed,
             focused: u.focus.focused(),
-            palette: &u.palette,
-            text,
+            palette: &palette,
+            text: &text,
         };
         let host = ScreenHost::mount(screen, &env, &mut u.focus);
         sync_rect_cache(Some(host.tree()));
+        let has_rich = !host.tree().rich_text_slots().is_empty();
         u.screen = Some(host);
         u.screen_capturing = false;
-        sync_rich_fields(u);
-        sync_rich_focus(u);
+        if u.paint_count == 0 && has_rich {
+            u.rich_sync_pending = true;
+        } else {
+            u.rich_sync_pending = false;
+            sync_rich_fields(u);
+            sync_rich_focus(u);
+        }
         sync_timers(u, hwnd, false);
         true
     })
@@ -259,6 +273,14 @@ fn find_create_preview_range(tree: &Tree, id: WidgetId) -> Option<String> {
 pub fn bench_drag_4k(frames: u32) -> Result<DragBenchMetrics, String> {
     let setup = with_ui(|u| -> Result<(WidgetId, WidgetId, Rect), String> {
         let palette = u.palette;
+        if u.renderer.is_none() {
+            // SAFETY: `u.hwnd` is owned by this thread.
+            let (w, h) = unsafe { client_size(u.hwnd) };
+            u.renderer = Renderer::new(u.hwnd, w as u32, h as u32).ok();
+            if let Some(r) = u.renderer.as_ref() {
+                r.set_text_scale(u.prefs.text_scale);
+            }
+        }
         {
             let r = u
                 .renderer
@@ -267,7 +289,7 @@ pub fn bench_drag_4k(frames: u32) -> Result<DragBenchMetrics, String> {
             r.resize(3840, 2160).map_err(|e| format!("{e:?}"))?;
             r.set_present_sync(false);
         }
-        let text = u.renderer.as_ref().unwrap().text();
+        let text = Rc::clone(&u.text);
         let host = u
             .screen
             .as_mut()
@@ -279,7 +301,7 @@ pub fn bench_drag_4k(frames: u32) -> Result<DragBenchMetrics, String> {
             pressed: None,
             focused: None,
             palette: &palette,
-            text,
+            text: &text,
         };
         host.mark_dirty();
         host.rebuild_if_dirty(&env, &mut u.focus);
@@ -424,6 +446,7 @@ pub fn bench_drag_4k(frames: u32) -> Result<DragBenchMetrics, String> {
                 show_title_bar: true,
                 tree: Some(host.tree()),
                 focus_ring: None,
+                render_rich_slots: false,
             })
             .map_err(|e| format!("{e:?}"))?;
 
@@ -445,6 +468,7 @@ pub fn bench_drag_4k(frames: u32) -> Result<DragBenchMetrics, String> {
                     show_title_bar: true,
                     tree: Some(host.tree()),
                     focus_ring: None,
+                    render_rich_slots: false,
                 })
                 .map_err(|e| format!("{e:?}"))?;
                 samples.push(tf.elapsed().as_secs_f64() * 1000.0);
@@ -489,11 +513,18 @@ fn active_tree(ui: &Ui) -> Option<&Tree> {
     ui.screen.as_ref().map(|h| h.tree()).or(ui.tree.as_ref())
 }
 
+fn ensure_rich_synced(ui: &mut Ui) {
+    if ui.rich_sync_pending {
+        ui.rich_sync_pending = false;
+        sync_rich_fields(ui);
+        sync_rich_focus(ui);
+    }
+}
+
 fn rebuild_screen_if_dirty(ui: &mut Ui, hwnd: HWND) -> bool {
+    let text = Rc::clone(&ui.text);
+    let palette = ui.palette;
     let Some(host) = ui.screen.as_mut() else {
-        return false;
-    };
-    let Some(text) = ui.renderer.as_ref().map(|r| r.text()) else {
         return false;
     };
     // SAFETY: `hwnd` is owned by this thread.
@@ -505,11 +536,12 @@ fn rebuild_screen_if_dirty(ui: &mut Ui, hwnd: HWND) -> bool {
         hover: ui.pointer.hovered,
         pressed: ui.pointer.pressed,
         focused: ui.focus.focused(),
-        palette: &ui.palette,
-        text,
+        palette: &palette,
+        text: &text,
     };
     let rebuilt = host.rebuild_if_dirty(&env, &mut ui.focus);
     if rebuilt {
+        ui.rich_sync_pending = false;
         sync_rect_cache(Some(host.tree()));
         sync_rich_fields(ui);
         sync_rich_focus(ui);
@@ -577,6 +609,9 @@ unsafe fn client_size(hwnd: HWND) -> (i32, i32) {
 }
 
 unsafe fn create() -> Option<HWND> {
+    warmup_d3d();
+    let bg_prefs_text = is_cold_start()
+        .then(|| std::thread::spawn(|| (SystemPrefs::query(), create_text_system_raw())));
     let hinstance = HINSTANCE(GetModuleHandleW(None).ok()?.0);
     let class = w!("FocusMainWindow");
     let wc = WNDCLASSW {
@@ -605,7 +640,10 @@ unsafe fn create() -> Option<HWND> {
         None,
     )
     .ok()?;
-    let sys_prefs = SystemPrefs::query();
+    let (sys_prefs, text) = match bg_prefs_text.and_then(|h| h.join().ok()) {
+        Some((p, Ok(raw_text))) => (p, cache_text_system(raw_text)),
+        _ => (SystemPrefs::query(), text_system().ok()?),
+    };
     let mica = prefs::apply_mica(hwnd, sys_prefs.high_contrast);
     let palette = Palette::for_system(sys_prefs.high_contrast);
     let _ = SetWindowPos(
@@ -617,24 +655,15 @@ unsafe fn create() -> Option<HWND> {
         0,
         SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
     );
-    let (w, h) = client_size(hwnd);
-    let renderer = match Renderer::new(hwnd, w as u32, h as u32) {
-        Ok(r) => {
-            r.set_text_scale(sys_prefs.text_scale);
-            Some(r)
-        }
-        Err(e) => {
-            eprintln!("focus: cannot create the renderer: {e}");
-            None
-        }
-    };
+    text.set_text_scale(sys_prefs.text_scale);
     // Initialize AccessKit before `ShowWindow` so initial `WM_GETOBJECT` never races.
     let a11y_queue = A11yActionQueue::new(hwnd);
     let a11y = Adapter::new(hwnd, false, a11y_queue.handler());
     UI.with(|u| {
         *u.borrow_mut() = Some(Ui {
             hwnd,
-            renderer,
+            text,
+            renderer: None,
             hover: Hover::None,
             prefs: sys_prefs,
             palette,
@@ -648,9 +677,10 @@ unsafe fn create() -> Option<HWND> {
             rich_fields: Vec::new(),
             paint_count: 0,
             screen_capturing: false,
-            tick_timer_on: false,
+            tick_timer_ms: None,
             autoscroll_timer_on: false,
             syncing_rich: false,
+            rich_sync_pending: false,
         })
     });
     CUR_HWND.set(hwnd.0 as isize);
@@ -827,6 +857,7 @@ unsafe fn on_pointer_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
             };
             let mods = current_modifiers();
             let (request_capture, focus_changed, visual_changed) = with_ui(|u| {
+                ensure_rich_synced(u);
                 let hit = active_tree(u).and_then(|t| t.hit_test(x, y));
                 let out = u.pointer.on_down(pid, btn, hit, x, y);
                 let focus_changed = match hit {
@@ -1099,20 +1130,59 @@ unsafe fn on_a11y_action_msg(hwnd: HWND) {
             let target = a11y::widget_id(req.target_node);
             match req.action {
                 Action::Focus => {
-                    focus_changed |= u.focus.focus_keyboard(target);
+                    let virtual_parent = active_tree(u).and_then(|t| {
+                        let (parent, vc) = t.find_virtual_child(target)?;
+                        let pd = t.data(parent)?;
+                        if vc.focusable && !vc.a11y.disabled && pd.focusable && !pd.disabled {
+                            Some(pd.id)
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(parent_id) = virtual_parent {
+                        focus_changed |= u.focus.focus_keyboard(parent_id);
+                        if let Some(h) = u.screen.as_mut() {
+                            if h.on_a11y_focus(target) {
+                                rebuild_screen_if_dirty(u, hwnd);
+                                focus_changed = true;
+                            }
+                        }
+                    } else {
+                        focus_changed |= u.focus.focus_keyboard(target);
+                        if focus_changed {
+                            if let Some(h) = u.screen.as_mut() {
+                                h.sync_focused_scroll(target);
+                            }
+                        }
+                    }
                     visual_changed = true;
                 }
                 Action::Click => {
-                    if active_tree(u)
+                    let direct_focusable = active_tree(u)
                         .and_then(|t| t.node_by_id(target).and_then(|n| t.data(n)))
-                        .is_some_and(|d| d.focusable && !d.disabled)
-                    {
+                        .is_some_and(|d| d.focusable && !d.disabled);
+                    if direct_focusable {
                         focus_changed |= u.focus.focus_keyboard(target);
+                    } else if let Some(parent_id) = active_tree(u).and_then(|t| {
+                        let (parent, vc) = t.find_virtual_child(target)?;
+                        let pd = t.data(parent)?;
+                        if vc.focusable && !vc.a11y.disabled && pd.focusable && !pd.disabled {
+                            Some(pd.id)
+                        } else {
+                            None
+                        }
+                    }) {
+                        focus_changed |= u.focus.focus_keyboard(parent_id);
+                        if let Some(h) = u.screen.as_mut() {
+                            focus_changed |= h.on_a11y_focus(target);
+                        }
                     }
                     if let Some(h) = u.screen.as_mut() {
                         if h.on_click(target) {
                             rebuild_screen_if_dirty(u, hwnd);
                             focus_changed = true;
+                        } else if focus_changed {
+                            rebuild_screen_if_dirty(u, hwnd);
                         }
                     }
                     if focus_changed {
@@ -1135,77 +1205,101 @@ unsafe fn on_a11y_action_msg(hwnd: HWND) {
 
 unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
     let ev = translate_key(wparam);
-    let (handled, focus_changed, changed, release_cap) = with_ui(|u| match ev.key {
-        KeyCode::Tab if !ev.ctrl && !ev.alt => {
-            let prev = u.focus.focused();
-            let prev_vis = u.focus.is_focus_visible();
-            let next = u.focus.tab(ev.shift);
-            let dirty = next != prev || u.focus.is_focus_visible() != prev_vis;
-            if dirty {
-                if let Some(h) = u.screen.as_mut() {
-                    h.mark_dirty();
-                    rebuild_screen_if_dirty(u, hwnd);
-                }
-                sync_rich_focus(u);
-            }
-            (true, next != prev, dirty, false)
-        }
-        KeyCode::Escape => {
-            let mut release_cap = false;
-            if u.screen_capturing {
-                u.screen_capturing = false;
-                release_cap = true;
-            }
-            if let Some(h) = u.screen.as_mut() {
+    let (handled, focus_changed, changed, release_cap) = with_ui(|u| {
+        ensure_rich_synced(u);
+        match ev.key {
+            KeyCode::Tab if !ev.ctrl && !ev.alt => {
                 let prev = u.focus.focused();
-                let (handled, dirty) = h.on_key(ev, &mut u.focus);
+                let prev_vis = u.focus.is_focus_visible();
+                let next = u.focus.tab(ev.shift);
+                let dirty = next != prev || u.focus.is_focus_visible() != prev_vis;
                 if dirty {
-                    rebuild_screen_if_dirty(u, hwnd);
+                    if let Some(h) = u.screen.as_mut() {
+                        h.mark_dirty();
+                        rebuild_screen_if_dirty(u, hwnd);
+                    }
                     sync_rich_focus(u);
-                    sync_timers(u, hwnd, false);
-                    return (handled, u.focus.focused() != prev, true, release_cap);
                 }
+                (true, next != prev, dirty, false)
             }
-            let prev = u.focus.focused();
-            let out = u.focus.on_escape();
-            let changed = out != EscapeOutcome::None;
-            if changed {
-                sync_rich_focus(u);
-            }
-            sync_timers(u, hwnd, false);
-            (changed, u.focus.focused() != prev, changed, release_cap)
-        }
-        _ => {
-            let prev = u.focus.focused();
-            if let Some(h) = u.screen.as_mut() {
-                let (mut handled, mut dirty) = h.on_key(ev, &mut u.focus);
-                if !handled
-                    && !ev.ctrl
-                    && !ev.alt
-                    && !ev.shift
-                    && matches!(ev.key, KeyCode::Enter | KeyCode::Space)
-                {
-                    if let Some(fid) = u.focus.focused() {
-                        let is_rich = u.rich_fields.iter().any(|f| f.slot_id() == fid);
-                        let is_clickable = !is_rich
-                            && h.tree()
-                                .node_by_id(fid)
-                                .and_then(|n| h.tree().data(n))
-                                .is_some_and(|d| !d.disabled && d.a11y.clickable);
-                        if is_clickable && h.on_click(fid) {
-                            handled = true;
-                            dirty = true;
-                        }
+            KeyCode::Escape => {
+                let mut release_cap = false;
+                if u.screen_capturing {
+                    u.screen_capturing = false;
+                    release_cap = true;
+                }
+                if let Some(h) = u.screen.as_mut() {
+                    let prev = u.focus.focused();
+                    let (handled, dirty) = h.on_key(ev, &mut u.focus);
+                    if dirty {
+                        rebuild_screen_if_dirty(u, hwnd);
+                        sync_rich_focus(u);
+                        sync_timers(u, hwnd, false);
+                        return (handled, u.focus.focused() != prev, true, release_cap);
                     }
                 }
-                if dirty {
-                    rebuild_screen_if_dirty(u, hwnd);
+                let prev = u.focus.focused();
+                let out = u.focus.on_escape();
+                let changed = out != EscapeOutcome::None;
+                if changed {
                     sync_rich_focus(u);
-                    sync_timers(u, hwnd, false);
                 }
-                return (handled, u.focus.focused() != prev, dirty, false);
+                sync_timers(u, hwnd, false);
+                (changed, u.focus.focused() != prev, changed, release_cap)
             }
-            (false, false, false, false)
+            _ => {
+                let prev = u.focus.focused();
+                let prev_vf = prev.and_then(|fid| {
+                    u.screen.as_ref().and_then(|h| {
+                        h.tree()
+                            .node_by_id(fid)
+                            .and_then(|n| h.tree().data(n))
+                            .and_then(|d| d.virtual_focus)
+                    })
+                });
+                if let Some(h) = u.screen.as_mut() {
+                    let (mut handled, mut dirty) = h.on_key(ev, &mut u.focus);
+                    if !handled
+                        && !ev.ctrl
+                        && !ev.alt
+                        && !ev.shift
+                        && matches!(ev.key, KeyCode::Enter | KeyCode::Space)
+                    {
+                        if let Some(fid) = u.focus.focused() {
+                            let is_rich = u.rich_fields.iter().any(|f| f.slot_id() == fid);
+                            let is_clickable = !is_rich
+                                && h.tree()
+                                    .node_by_id(fid)
+                                    .and_then(|n| h.tree().data(n))
+                                    .is_some_and(|d| !d.disabled && d.a11y.clickable);
+                            if is_clickable && h.on_click(fid) {
+                                handled = true;
+                                dirty = true;
+                            }
+                        }
+                    }
+                    if dirty {
+                        rebuild_screen_if_dirty(u, hwnd);
+                        sync_rich_focus(u);
+                        sync_timers(u, hwnd, false);
+                    }
+                    let cur_vf = u.focus.focused().and_then(|fid| {
+                        u.screen.as_ref().and_then(|h| {
+                            h.tree()
+                                .node_by_id(fid)
+                                .and_then(|n| h.tree().data(n))
+                                .and_then(|d| d.virtual_focus)
+                        })
+                    });
+                    return (
+                        handled,
+                        u.focus.focused() != prev || cur_vf != prev_vf,
+                        dirty,
+                        false,
+                    );
+                }
+                (false, false, false, false)
+            }
         }
     })
     .unwrap_or((false, false, false, false));
@@ -1231,11 +1325,7 @@ fn sync_rich_fields(ui: &mut Ui) {
 
     // SAFETY: `ui.hwnd` is our thread-owned window handle.
     let dpi = unsafe { GetDpiForWindow(ui.hwnd) };
-    let text_scale = ui
-        .renderer
-        .as_ref()
-        .map(|r| r.text().text_scale())
-        .unwrap_or(1.0);
+    let text_scale = ui.text.text_scale();
     let palette = ui.palette;
 
     for spec in slots {
@@ -1304,16 +1394,24 @@ fn sync_rich_focus(ui: &Ui) {
 }
 
 fn sync_timers(ui: &mut Ui, hwnd: HWND, minimized: bool) {
-    let want_tick = !minimized && ui.screen.as_ref().is_some_and(|h| h.wants_tick());
+    let want_tick = if minimized {
+        None
+    } else {
+        ui.screen.as_ref().and_then(|h| h.wants_tick())
+    };
     let want_auto = !minimized && ui.screen.as_ref().is_some_and(|h| h.wants_autoscroll());
     // SAFETY: `hwnd` is owned by this thread.
     unsafe {
-        if want_tick && !ui.tick_timer_on {
-            let _ = SetTimer(Some(hwnd), TIMER_TICK_ID, 1000, None);
-            ui.tick_timer_on = true;
-        } else if !want_tick && ui.tick_timer_on {
-            let _ = KillTimer(Some(hwnd), TIMER_TICK_ID);
-            ui.tick_timer_on = false;
+        if want_tick != ui.tick_timer_ms {
+            match want_tick {
+                Some(ms) => {
+                    let _ = SetTimer(Some(hwnd), TIMER_TICK_ID, ms.max(100), None);
+                }
+                None => {
+                    let _ = KillTimer(Some(hwnd), TIMER_TICK_ID);
+                }
+            }
+            ui.tick_timer_ms = want_tick;
         }
 
         if want_auto && !ui.autoscroll_timer_on {
@@ -1343,17 +1441,18 @@ unsafe fn on_size(hwnd: HWND, size_type: u32) {
                     }
                 }
             }
-            if let Some(r) = u.renderer.as_ref() {
-                let w_dip = w as f32 / scale;
-                let h_dip = h as f32 / scale;
-                if let Some(host) = u.screen.as_mut() {
-                    host.relayout(w_dip, h_dip, r.text());
-                } else if let Some(tree) = u.tree.as_mut() {
-                    tree.layout(w_dip, h_dip, r.text());
-                }
-                sync_rect_cache(active_tree(u));
+            let text = Rc::clone(&u.text);
+            let w_dip = w as f32 / scale;
+            let h_dip = h as f32 / scale;
+            if let Some(host) = u.screen.as_mut() {
+                host.relayout(w_dip, h_dip, &text);
+            } else if let Some(tree) = u.tree.as_mut() {
+                tree.layout(w_dip, h_dip, &text);
             }
-            sync_rich_fields(u);
+            sync_rect_cache(active_tree(u));
+            if !u.rich_sync_pending {
+                sync_rich_fields(u);
+            }
         }
         sync_timers(u, hwnd, minimized);
     });
@@ -1372,7 +1471,7 @@ unsafe fn on_paint(hwnd: HWND) {
     let dpi = GetDpiForWindow(hwnd);
     let (w, h) = client_size(hwnd);
     let scale = frame::scale(dpi);
-    let retry = with_ui(|u| {
+    let (retry, post_rich) = with_ui(|u| {
         if u.renderer.is_none() {
             u.renderer = Renderer::new(hwnd, w as u32, h as u32).ok();
             if let Some(r) = u.renderer.as_ref() {
@@ -1382,6 +1481,7 @@ unsafe fn on_paint(hwnd: HWND) {
         let hover = u.hover;
         let palette = u.palette;
         let mica = u.mica;
+        let render_rich_slots = u.rich_sync_pending;
         let tree_ref = u.screen.as_ref().map(|h| h.tree()).or(u.tree.as_ref());
         let focus_ring = tree_ref.and_then(|t| u.focus.focus_ring_rect(t));
         let res = match u.renderer.as_mut() {
@@ -1395,26 +1495,30 @@ unsafe fn on_paint(hwnd: HWND) {
                 show_title_bar: true,
                 tree: tree_ref,
                 focus_ring,
+                render_rich_slots,
             }),
-            None => return false,
+            None => return (false, false),
         };
         match res {
             Ok(()) => {
                 u.paint_count += 1;
-                false
+                (false, u.rich_sync_pending && u.paint_count == 1)
             }
             Err(DrawError::DeviceLost) => {
                 u.renderer = None;
                 reset_shared();
-                true
+                (true, false)
             }
             Err(DrawError::Other(e)) => {
                 eprintln!("focus: draw failed: {e}");
-                false
+                (false, false)
             }
         }
     })
-    .unwrap_or(false);
+    .unwrap_or((false, false));
+    if post_rich {
+        let _ = PostMessageW(Some(hwnd), WM_APP_SYNC_RICH, WPARAM(0), LPARAM(0));
+    }
     if retry {
         let _ = InvalidateRect(Some(hwnd), None, false);
     }
@@ -1426,10 +1530,7 @@ unsafe fn on_system_prefs_changed(hwnd: HWND) {
     let changed = with_ui(|u| {
         let mica = prefs::apply_mica(hwnd, new_prefs.high_contrast);
         let palette = Palette::for_system(new_prefs.high_contrast);
-        let text_changed = u
-            .renderer
-            .as_ref()
-            .is_some_and(|r| r.set_text_scale(new_prefs.text_scale));
+        let text_changed = u.text.set_text_scale(new_prefs.text_scale);
         let changed =
             u.prefs != new_prefs || u.mica != mica || u.palette != palette || text_changed;
         u.prefs = new_prefs;
@@ -1508,6 +1609,12 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_DPICHANGED => {
             // lparam points at the rectangle Windows suggests for the new scale.
+            let raw_dpi = (wparam.0 & 0xFFFF) as u32;
+            let dpi = if raw_dpi > 0 {
+                raw_dpi
+            } else {
+                GetDpiForWindow(hwnd)
+            };
             let r = &*(lparam.0 as *const RECT);
             let _ = SetWindowPos(
                 hwnd,
@@ -1518,6 +1625,14 @@ unsafe extern "system" fn wnd_proc(
                 r.bottom - r.top,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
+            with_ui(|u| {
+                let palette = u.palette;
+                let text_scale = u.text.text_scale();
+                for field in &mut u.rich_fields {
+                    field.sync_theme(&palette, dpi, text_scale);
+                }
+            });
+            let _ = InvalidateRect(Some(hwnd), None, false);
             return LRESULT(0);
         }
         WM_ERASEBKGND => return LRESULT(1),
@@ -1575,11 +1690,18 @@ unsafe extern "system" fn wnd_proc(
                     return None;
                 };
                 let ui = g.as_mut()?;
+                if is_focused {
+                    ensure_rich_synced(ui);
+                }
                 ui.a11y.update_window_focus_state(is_focused)
             });
             if let Some(ev) = queued {
                 ev.raise();
             }
+        }
+        m if m == WM_APP_SYNC_RICH => {
+            with_ui(ensure_rich_synced);
+            return LRESULT(0);
         }
         m if m == WM_A11Y_ACTION => {
             on_a11y_action_msg(hwnd);
@@ -1666,8 +1788,11 @@ unsafe extern "system" fn wnd_proc(
                 let mut a11y = false;
                 if id == TIMER_TICK_ID {
                     if let Some(h) = u.screen.as_mut() {
-                        if h.on_tick() {
+                        let reply = h.on_tick();
+                        if reply.rebuild {
                             a11y = rebuild_screen_if_dirty(u, hwnd);
+                            repaint = true;
+                        } else if reply.repaint {
                             repaint = true;
                         }
                     }
@@ -2190,6 +2315,54 @@ mod tests {
         pump();
         let scope_after_esc = with_ui(|u| u.focus.active_scope()).unwrap();
         assert_eq!(scope_after_esc, FocusScope::Main);
+
+        close();
+        pump();
+        reset_shared();
+        assert!(!is_open());
+    }
+
+    #[test]
+    fn wm_dpichanged_updates_richedit_font_for_new_dpi() {
+        super::super::init();
+        assert!(open());
+        assert!(set_screen(Box::new(
+            super::super::screen::WidgetGalleryScreen::new()
+        )));
+        pump_until_painted(1);
+        let hwnd = hwnd().expect("live hwnd");
+
+        let (initial_px, text_scale) = with_ui(|u| {
+            let ts = u
+                .renderer
+                .as_ref()
+                .map(|r| r.text().text_scale())
+                .unwrap_or(u.prefs.text_scale);
+            (u.rich_fields[0].font_height_px(), ts)
+        })
+        .unwrap();
+        assert!(initial_px < 0);
+
+        let suggested = RECT {
+            left: 100,
+            top: 100,
+            right: 900,
+            bottom: 700,
+        };
+        let dpi_192 = ((192usize) << 16) | 192usize;
+        // SAFETY: sends WM_DPICHANGED with a stack RECT to our live test HWND.
+        unsafe {
+            let _ = SendMessageW(
+                hwnd,
+                WM_DPICHANGED,
+                Some(WPARAM(dpi_192)),
+                Some(LPARAM(&suggested as *const RECT as isize)),
+            );
+        }
+        pump();
+        let updated_px = with_ui(|u| u.rich_fields[0].font_height_px()).unwrap();
+        let expected = -((13.0 * 2.0 * text_scale.clamp(0.5, 4.0)).round() as i32);
+        assert_eq!(updated_px, expected);
 
         close();
         pump();

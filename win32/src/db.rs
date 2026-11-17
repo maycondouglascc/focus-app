@@ -581,18 +581,29 @@ impl Db {
         )
     }
 
-    fn max_duration(&self) -> rusqlite::Result<i64> {
-        Ok(self
-            .get_setting(MAX_DURATION_KEY)?
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0))
-    }
-
     fn bump_max_duration(&self, duration: i64) -> rusqlite::Result<()> {
-        if duration > self.max_duration()? {
-            self.set_setting(MAX_DURATION_KEY, &duration.to_string())?;
+        let duration = duration.max(0);
+        let current = self
+            .get_setting(MAX_DURATION_KEY)?
+            .and_then(|v| v.parse::<i64>().ok())
+            .map(|v| v.max(0));
+        match current {
+            Some(cur) if duration <= cur => Ok(()),
+            Some(_) => self.set_setting(MAX_DURATION_KEY, &duration.to_string()),
+            None => {
+                // Electron DBs do not write `maxActivityMs`; seed from existing rows before
+                // persisting a short Rust run so older overnight runs are not pruned.
+                let existing = self
+                    .conn
+                    .query_row(
+                        "SELECT COALESCE(MAX(end - start), 0) FROM activity",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )?
+                    .max(0);
+                self.set_setting(MAX_DURATION_KEY, &existing.max(duration).to_string())
+            }
         }
-        Ok(())
     }
 
     pub fn set_activity_detail(&self, id: i64, detail: &str) -> rusqlite::Result<()> {
@@ -1196,6 +1207,7 @@ pub trait Store {
     fn project_all_time_stats(&self, project_id: &str) -> Result<ProjectAllTimeStats, String>;
 
     fn list_entries(&self, from: i64, to: i64) -> Result<Vec<TimeEntry>, String>;
+    fn get_entry(&self, id: &str) -> Result<TimeEntry, String>;
     fn has_any_entries(&self) -> Result<bool, String>;
     fn earliest_entry_start(
         &self,
@@ -1295,6 +1307,10 @@ impl Store for DbStore {
 
     fn list_entries(&self, from: i64, to: i64) -> Result<Vec<TimeEntry>, String> {
         self.db.list_entries(from, to).map_err(db_err)
+    }
+
+    fn get_entry(&self, id: &str) -> Result<TimeEntry, String> {
+        self.db.get_entry(id).map_err(db_err)
     }
 
     fn has_any_entries(&self) -> Result<bool, String> {
@@ -1586,5 +1602,36 @@ mod tests {
         assert_eq!(db.active_union_ms(0, 100_000).unwrap(), 40_000);
         db.clear_activity().unwrap();
         assert_eq!(db.active_union_ms(0, 100_000).unwrap(), 0);
+    }
+
+    #[test]
+    fn electron_db_without_max_duration_preserves_overnight_activity_after_short_insert() {
+        let db = Db::open_in_memory().unwrap();
+        let midnight = 100_000_000i64;
+        // Pre-existing Electron run spanning 23:30..00:45 (75 min) with no `maxActivityMs` key.
+        db.conn
+            .execute(
+                "INSERT INTO activity (kind, app, bundle_id, detail, context, url, start, end)
+                 VALUES ('app', 'Code', '', '', '', '', ?, ?)",
+                params![midnight - 30 * 60_000, midnight + 45 * 60_000],
+            )
+            .unwrap();
+        assert_eq!(db.get_setting(MAX_DURATION_KEY).unwrap(), None);
+
+        // First Rust write is a short 5s run on the next day.
+        db.insert_activity(&act(
+            "Edge",
+            midnight + 8 * 3_600_000,
+            midnight + 8 * 3_600_000 + 5_000,
+        ))
+        .unwrap();
+
+        let next_day = db.list_activity(midnight, midnight + 86_400_000).unwrap();
+        assert_eq!(next_day.len(), 2);
+        assert_eq!(next_day[0].app, "Code");
+        assert_eq!(
+            db.active_union_ms(midnight, midnight + 86_400_000).unwrap(),
+            45 * 60_000 + 5_000
+        );
     }
 }
