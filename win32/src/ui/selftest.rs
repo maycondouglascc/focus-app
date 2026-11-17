@@ -72,6 +72,12 @@ fn apply_screen_arg(shell: &mut AppShell, screen_name: Option<&str>) -> Result<(
     Err(2)
 }
 
+fn make_demo_shell_from(store: DemoStore, screen_name: Option<&str>) -> Result<Box<AppShell>, i32> {
+    let mut shell = Box::new(AppShell::new(shared_store(Box::new(store))));
+    apply_screen_arg(&mut shell, screen_name)?;
+    Ok(shell)
+}
+
 fn make_demo_shell(fresh: bool, screen_name: Option<&str>) -> Result<Box<AppShell>, i32> {
     let locale = SystemLocale::query();
     let store = if fresh {
@@ -79,6 +85,11 @@ fn make_demo_shell(fresh: bool, screen_name: Option<&str>) -> Result<Box<AppShel
     } else {
         DemoStore::new(locale)
     };
+    make_demo_shell_from(store, screen_name)
+}
+
+fn make_db_shell_from(db: Db, screen_name: Option<&str>) -> Result<Box<AppShell>, i32> {
+    let store = DbStore::new(db, SystemLocale::query());
     let mut shell = Box::new(AppShell::new(shared_store(Box::new(store))));
     apply_screen_arg(&mut shell, screen_name)?;
     Ok(shell)
@@ -95,10 +106,7 @@ fn make_db_shell(path: &Path, screen_name: Option<&str>) -> Result<Box<AppShell>
             return Err(1);
         }
     };
-    let store = DbStore::new(db, SystemLocale::query());
-    let mut shell = Box::new(AppShell::new(shared_store(Box::new(store))));
-    apply_screen_arg(&mut shell, screen_name)?;
-    Ok(shell)
+    make_db_shell_from(db, screen_name)
 }
 
 fn run_loop_until_closed() {
@@ -122,27 +130,106 @@ fn run_loop_until_closed() {
     }
 }
 
+enum BgStore {
+    None,
+    Demo {
+        handle: std::thread::JoinHandle<DemoStore>,
+        fresh: bool,
+    },
+    Db {
+        handle: std::thread::JoinHandle<Result<Db, String>>,
+        path: std::path::PathBuf,
+    },
+}
+
+impl BgStore {
+    fn spawn_demo(fresh: bool) -> Self {
+        let locale = SystemLocale::query();
+        let handle = std::thread::spawn(move || {
+            if fresh {
+                DemoStore::fresh(locale)
+            } else {
+                DemoStore::new(locale)
+            }
+        });
+        Self::Demo { handle, fresh }
+    }
+
+    fn spawn_db(path: &Path) -> Self {
+        let p_owned = path.to_path_buf();
+        let p_disp = path.to_path_buf();
+        let handle = std::thread::spawn(move || {
+            if let Some(dir) = p_owned.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            Db::open(&p_owned).map_err(|e| e.to_string())
+        });
+        Self::Db {
+            handle,
+            path: p_disp,
+        }
+    }
+
+    fn finish_shell(self, screen_name: Option<&str>) -> Result<Option<Box<dyn Screen>>, i32> {
+        match self {
+            Self::None => Ok(None),
+            Self::Demo { handle, fresh } => match handle.join() {
+                Ok(store) => {
+                    make_demo_shell_from(store, screen_name).map(|s| Some(s as Box<dyn Screen>))
+                }
+                Err(_) => make_demo_shell(fresh, screen_name).map(|s| Some(s as Box<dyn Screen>)),
+            },
+            Self::Db { handle, path } => match handle.join() {
+                Ok(Ok(db)) => {
+                    make_db_shell_from(db, screen_name).map(|s| Some(s as Box<dyn Screen>))
+                }
+                Ok(Err(e)) => {
+                    eprintln!("focus: cannot open database at {}: {e}", path.display());
+                    Err(1)
+                }
+                Err(_) => make_db_shell(&path, screen_name).map(|s| Some(s as Box<dyn Screen>)),
+            },
+        }
+    }
+
+    fn abort(self) {
+        match self {
+            Self::None => {}
+            Self::Demo { handle, .. } => {
+                let _ = handle.join();
+            }
+            Self::Db { handle, .. } => {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
 pub fn run_demo(fresh: bool, screen_name: Option<&str>) -> i32 {
-    let shell = match make_demo_shell(fresh, screen_name) {
-        Ok(s) => s,
-        Err(code) => return code,
-    };
-    run_screen(shell)
+    run_bg_screen(BgStore::spawn_demo(fresh), screen_name)
 }
 
 pub fn run_db(path: &Path, screen_name: Option<&str>) -> i32 {
-    let shell = match make_db_shell(path, screen_name) {
-        Ok(s) => s,
-        Err(code) => return code,
-    };
-    run_screen(shell)
+    run_bg_screen(BgStore::spawn_db(path), screen_name)
 }
 
-fn run_screen(screen: Box<dyn Screen>) -> i32 {
+fn run_bg_screen(bg: BgStore, screen_name: Option<&str>) -> i32 {
     super::init();
+    super::render::warmup_d3d();
     if !window::open() {
+        bg.abort();
+        super::render::reset_shared();
         return 1;
     }
+    let screen = match bg.finish_shell(screen_name) {
+        Ok(Some(s)) => s,
+        Ok(None) => return 1,
+        Err(code) => {
+            window::close();
+            super::render::reset_shared();
+            return code;
+        }
+    };
     if !window::set_screen(screen) {
         window::close();
         super::render::reset_shared();
@@ -219,6 +306,12 @@ pub fn cycle(n: u32, all_screens: bool) -> i32 {
     // counts as a leak.
     for _ in 0..WARMUP_CYCLES {
         window::open();
+        if let Some(hwnd) = window::hwnd() {
+            // SAFETY: `hwnd` belongs to this thread.
+            unsafe {
+                let _ = UpdateWindow(hwnd);
+            }
+        }
         window::pump();
         window::close();
         window::pump();
@@ -282,32 +375,36 @@ pub fn show(
 ) -> i32 {
     let t0 = Instant::now();
     super::init();
+    super::render::warmup_d3d();
+    let bg_store = if gallery {
+        BgStore::None
+    } else if let Some(p) = db_path {
+        BgStore::spawn_db(p)
+    } else if demo || screen_name.is_some() {
+        BgStore::spawn_demo(fresh)
+    } else {
+        BgStore::None
+    };
+
     if !window::open() {
+        bg_store.abort();
+        super::render::reset_shared();
         return 1;
     }
-    if gallery {
-        let _ = window::set_screen(Box::new(super::screen::WidgetGalleryScreen::new()));
-    } else if let Some(p) = db_path {
-        match make_db_shell(p, screen_name) {
-            Ok(shell) => {
-                let _ = window::set_screen(shell);
-            }
-            Err(code) => {
-                window::close();
-                super::render::reset_shared();
-                return code;
-            }
+    let shell_res: Result<Option<Box<dyn Screen>>, i32> = if gallery {
+        Ok(Some(Box::new(super::screen::WidgetGalleryScreen::new())))
+    } else {
+        bg_store.finish_shell(screen_name)
+    };
+    match shell_res {
+        Ok(Some(screen)) => {
+            let _ = window::set_screen(screen);
         }
-    } else if demo || screen_name.is_some() {
-        match make_demo_shell(fresh, screen_name) {
-            Ok(shell) => {
-                let _ = window::set_screen(shell);
-            }
-            Err(code) => {
-                window::close();
-                super::render::reset_shared();
-                return code;
-            }
+        Ok(None) => {}
+        Err(code) => {
+            window::close();
+            super::render::reset_shared();
+            return code;
         }
     }
     if let Some(hwnd) = window::hwnd() {

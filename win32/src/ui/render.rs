@@ -19,7 +19,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
     D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_CAP_STYLE_ROUND,
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_ELLIPSE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES,
+    D2D1_FACTORY_TYPE_MULTI_THREADED, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES,
     D2D1_SWEEP_DIRECTION_CLOCKWISE,
 };
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
@@ -40,6 +40,7 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_DEVICE_RESET, DXGI_PRESENT, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
     DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
+use windows::Win32::System::Com::CoIncrementMTAUsage;
 use windows_numerics::Vector2;
 
 use super::chrome::{Chrome, TITLE_SIZE};
@@ -97,7 +98,14 @@ pub struct FrameOpts<'a> {
     pub show_title_bar: bool,
     pub tree: Option<&'a Tree>,
     pub focus_ring: Option<Rect>,
+    /// True while native `RichEdit` children are deferred past frame 1 so `RichTextSlot` draws its placeholder/value.
+    pub render_rich_slots: bool,
 }
+
+struct SendGfx(Gfx);
+
+// SAFETY: `ID3D11Device`, `IDXGIFactory2`, multi-threaded `ID2D1Factory1`/`ID2D1Device`, and `IDCompositionDevice` are MTA/free-threaded COM interfaces transferred exclusively via `JoinHandle::join()`.
+unsafe impl Send for SendGfx {}
 
 /// Device-level objects shared by every window of this process while open.
 struct Gfx {
@@ -114,11 +122,79 @@ thread_local! {
     /// opens grows memory, so this one lives for the whole process.
     static TEXT: RefCell<Option<Rc<TextSystem>>> = const { RefCell::new(None) };
     static GFX: RefCell<Option<Rc<Gfx>>> = const { RefCell::new(None) };
+    static WARMUP_GFX: RefCell<Option<std::thread::JoinHandle<Result<SendGfx>>>> = const { RefCell::new(None) };
+}
+
+fn build_gfx() -> Result<Gfx> {
+    // SAFETY: `CoIncrementMTAUsage` idempotently initializes process MTA; all COM objects are owned by `Gfx`.
+    unsafe {
+        let _ = CoIncrementMTAUsage();
+        let d3d = d3d_device()?;
+        let dxgi: IDXGIDevice = d3d.cast()?;
+        let factory: IDXGIFactory2 = dxgi.GetAdapter()?.GetParent()?;
+        let d2d_factory: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, None)?;
+        let d2d_device = d2d_factory.CreateDevice(&dxgi)?;
+        let dcomp: IDCompositionDevice = DCompositionCreateDevice(&dxgi)?;
+        let props = D2D1_STROKE_STYLE_PROPERTIES {
+            startCap: D2D1_CAP_STYLE_ROUND,
+            endCap: D2D1_CAP_STYLE_ROUND,
+            ..Default::default()
+        };
+        let round_stroke = ID2D1Factory::CreateStrokeStyle(&d2d_factory, &props, None)?;
+        Ok(Gfx {
+            d3d,
+            factory,
+            d2d_factory,
+            d2d_device,
+            dcomp,
+            round_stroke,
+        })
+    }
+}
+
+/// Starts WARP D3D11 + Direct2D + DirectComposition creation on a worker thread so window/layout work overlaps it.
+pub fn warmup_d3d() {
+    let has_gfx = GFX.with(|g| g.borrow().is_some());
+    if has_gfx {
+        return;
+    }
+    WARMUP_GFX.with(|w| {
+        let mut slot = w.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(std::thread::spawn(|| build_gfx().map(SendGfx)));
+        }
+    });
+}
+
+/// Returns whether a background warmup or cached graphics stack is active.
+pub fn is_cold_start() -> bool {
+    GFX.with(|g| g.borrow().is_none()) && TEXT.with(|t| t.borrow().is_none())
 }
 
 /// Forgets the shared device objects; the next window builds new ones.
 pub fn reset_shared() {
+    if let Some(handle) = WARMUP_GFX.with(|w| w.borrow_mut().take()) {
+        let _ = handle.join();
+    }
     GFX.with(|g| g.borrow_mut().take());
+}
+
+pub fn create_text_system_raw() -> Result<SendText> {
+    TextSystem::new().map(SendText)
+}
+
+pub struct SendText(TextSystem);
+
+// SAFETY: `IDWriteFactory` (`DWRITE_FACTORY_TYPE_SHARED`) is free-threaded and transferred uniquely via `join()`.
+unsafe impl Send for SendText {}
+
+pub fn cache_text_system(wrapped: SendText) -> Rc<TextSystem> {
+    if let Some(t) = TEXT.with(|t| t.borrow().clone()) {
+        return t;
+    }
+    let t = Rc::new(wrapped.0);
+    TEXT.with(|c| *c.borrow_mut() = Some(t.clone()));
+    t
 }
 
 pub fn text_system() -> Result<Rc<TextSystem>> {
@@ -134,30 +210,13 @@ fn shared() -> Result<Rc<Gfx>> {
     if let Some(g) = GFX.with(|g| g.borrow().clone()) {
         return Ok(g);
     }
-    // SAFETY: plain COM calls on objects created right here.
-    let gfx = unsafe {
-        let d3d = d3d_device()?;
-        let dxgi: IDXGIDevice = d3d.cast()?;
-        let factory: IDXGIFactory2 = dxgi.GetAdapter()?.GetParent()?;
-        let d2d_factory: ID2D1Factory1 =
-            D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-        let d2d_device = d2d_factory.CreateDevice(&dxgi)?;
-        let dcomp: IDCompositionDevice = DCompositionCreateDevice(&dxgi)?;
-        let props = D2D1_STROKE_STYLE_PROPERTIES {
-            startCap: D2D1_CAP_STYLE_ROUND,
-            endCap: D2D1_CAP_STYLE_ROUND,
-            ..Default::default()
-        };
-        let round_stroke = ID2D1Factory::CreateStrokeStyle(&d2d_factory, &props, None)?;
-        Rc::new(Gfx {
-            d3d,
-            factory,
-            d2d_factory,
-            d2d_device,
-            dcomp,
-            round_stroke,
-        })
-    };
+    let gfx = Rc::new(match WARMUP_GFX.with(|w| w.borrow_mut().take()) {
+        Some(handle) => match handle.join() {
+            Ok(res) => res?.0,
+            Err(_) => build_gfx()?,
+        },
+        None => build_gfx()?,
+    });
     GFX.with(|g| *g.borrow_mut() = Some(gfx.clone()));
     Ok(gfx)
 }
@@ -347,7 +406,7 @@ impl Renderer {
             }
 
             if let Some(tree) = opts.tree {
-                self.draw_tree(tree, palette);
+                self.draw_tree(tree, palette, opts.render_rich_slots);
             }
 
             if let Some(ring) = opts.focus_ring {
@@ -395,7 +454,7 @@ impl Renderer {
         Ok(())
     }
 
-    unsafe fn draw_tree(&self, tree: &Tree, palette: &Palette) {
+    unsafe fn draw_tree(&self, tree: &Tree, palette: &Palette, render_rich_slots: bool) {
         tree.visit_paint(&mut |data, rect, step| match step {
             PaintStep::Enter => {
                 if data.paint.clip {
@@ -411,7 +470,7 @@ impl Renderer {
                     }
                 }
                 if let Some(leaf) = data.leaf.as_ref() {
-                    self.draw_leaf(leaf, rect, palette);
+                    self.draw_leaf(leaf, rect, palette, data.disabled, render_rich_slots);
                 }
             }
             PaintStep::Leave => {
@@ -422,7 +481,14 @@ impl Renderer {
         });
     }
 
-    unsafe fn draw_leaf(&self, leaf: &Leaf, rect: Rect, palette: &Palette) {
+    unsafe fn draw_leaf(
+        &self,
+        leaf: &Leaf,
+        rect: Rect,
+        palette: &Palette,
+        disabled: bool,
+        render_rich_slots: bool,
+    ) {
         match leaf {
             Leaf::Text { text, size, weight } => {
                 self.draw_text(
@@ -472,6 +538,37 @@ impl Renderer {
             Leaf::Canvas(cmds) => {
                 for cmd in cmds {
                     self.draw_cmd(cmd, rect.x, rect.y);
+                }
+            }
+            Leaf::RichTextSlot {
+                value,
+                placeholder,
+                multiline,
+                ..
+            } if render_rich_slots => {
+                let (txt, col) = if !value.is_empty() {
+                    (
+                        value.as_str(),
+                        if disabled {
+                            palette.faint
+                        } else {
+                            palette.text
+                        },
+                    )
+                } else {
+                    (placeholder.as_str(), palette.faint)
+                };
+                if !txt.is_empty() {
+                    self.draw_text(
+                        TextFont::Ui,
+                        txt,
+                        13.0,
+                        Weight::Regular,
+                        Align::Left,
+                        if *multiline { Wrap::Word } else { Wrap::NoWrap },
+                        col,
+                        d2d_rect(rect),
+                    );
                 }
             }
             Leaf::RichTextSlot { .. } | Leaf::Box => {}

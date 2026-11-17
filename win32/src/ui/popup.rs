@@ -829,6 +829,7 @@ unsafe fn on_paint(hwnd: HWND) {
             show_title_bar: false,
             tree: Some(&p.tree),
             focus_ring,
+            render_rich_slots: false,
         });
         match res {
             Ok(()) => false,
