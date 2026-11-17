@@ -223,6 +223,11 @@ pub fn is_open() -> bool {
     hwnd.is_some_and(|h| unsafe { IsWindow(Some(h)).as_bool() })
 }
 
+#[cfg(test)]
+pub fn active_hwnd() -> Option<HWND> {
+    POPUP.with(|p| p.try_borrow().ok().and_then(|g| g.as_ref().map(|a| a.hwnd)))
+}
+
 /// Opens a new `WS_POPUP` window, closing any previous popup first.
 #[allow(dead_code)] // used by Select and Popover in commits 6-7
 pub fn open(
@@ -680,39 +685,71 @@ unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
         close();
         return true;
     }
-    let (handled, focus_changed, dirty, should_close, notify_owner, resize_h, owner) =
-        with_popup(|p| match ev.key {
-            KeyCode::Tab if !ev.ctrl && !ev.alt => {
-                let prev = p.focus.focused();
-                let prev_vis = p.focus.is_focus_visible();
-                let next = p.focus.tab(ev.shift);
-                (
-                    true,
-                    next != prev,
-                    next != prev || p.focus.is_focus_visible() != prev_vis,
-                    false,
-                    false,
-                    None,
-                    p.owner,
-                )
+    let (
+        handled,
+        focus_changed,
+        dirty,
+        activated_click,
+        should_close,
+        notify_owner,
+        resize_h,
+        owner,
+    ) = with_popup(|p| match ev.key {
+        KeyCode::Tab if !ev.ctrl && !ev.alt => {
+            let prev = p.focus.focused();
+            let prev_vis = p.focus.is_focus_visible();
+            let next = p.focus.tab(ev.shift);
+            (
+                true,
+                next != prev,
+                next != prev || p.focus.is_focus_visible() != prev_vis,
+                false,
+                false,
+                false,
+                None,
+                p.owner,
+            )
+        }
+        _ => {
+            let prev = p.focus.focused();
+            let mut out = p
+                .delegate
+                .on_event(PopupEvent::Key(ev), &mut p.tree, &mut p.focus);
+            let mut activated_click = false;
+            if !out.handled
+                && !ev.ctrl
+                && !ev.alt
+                && !ev.shift
+                && matches!(ev.key, KeyCode::Enter | KeyCode::Space)
+            {
+                if let Some(fid) = p.focus.focused() {
+                    let is_clickable = p
+                        .tree
+                        .node_by_id(fid)
+                        .and_then(|n| p.tree.data(n))
+                        .is_some_and(|d| !d.disabled && d.a11y.clickable);
+                    if is_clickable {
+                        out =
+                            p.delegate
+                                .on_event(PopupEvent::Click(fid), &mut p.tree, &mut p.focus);
+                        out.handled = true;
+                        activated_click = true;
+                    }
+                }
             }
-            _ => {
-                let prev = p.focus.focused();
-                let out = p
-                    .delegate
-                    .on_event(PopupEvent::Key(ev), &mut p.tree, &mut p.focus);
-                (
-                    out.handled,
-                    p.focus.focused() != prev,
-                    out.dirty,
-                    out.close,
-                    out.notify_owner,
-                    out.resize_h_dip,
-                    p.owner,
-                )
-            }
-        })
-        .unwrap_or((false, false, false, false, false, None, None));
+            (
+                out.handled,
+                p.focus.focused() != prev,
+                out.dirty,
+                activated_click,
+                out.close,
+                out.notify_owner,
+                out.resize_h_dip,
+                p.owner,
+            )
+        }
+    })
+    .unwrap_or((false, false, false, false, false, false, None, None));
 
     if should_close {
         close();
@@ -723,7 +760,7 @@ unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
             let _ = PostMessageW(Some(ow), WM_POPUP_NOTIFY, WPARAM(0), LPARAM(0));
         }
     }
-    if resize_h.is_some() {
+    if resize_h.is_some() || (activated_click && dirty) {
         refresh_layout_with_height(resize_h);
         return handled;
     }

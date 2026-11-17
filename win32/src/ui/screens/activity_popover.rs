@@ -551,4 +551,98 @@ mod tests {
             "week_grid.rs"
         );
     }
+
+    #[test]
+    fn keyboard_tab_space_and_enter_operate_activity_popover_window() {
+        use crate::ui::popup;
+        use crate::ui::render::reset_shared;
+        use crate::ui::window;
+        use windows::Win32::Foundation::{LPARAM, RECT, WPARAM};
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_RETURN, VK_SPACE, VK_TAB};
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, SendMessageW, WM_KEYDOWN};
+
+        crate::ui::init();
+        assert!(window::open());
+        window::pump();
+        let owner = window::hwnd().expect("owner hwnd");
+
+        let day = from_local(2026, 11, 18, 9, 0, 0, 0);
+        let session = ActivitySession {
+            key: "s_kb".into(),
+            start: day,
+            end: day + 45 * MIN,
+            active_ms: 42 * MIN,
+            apps: vec![SessionApp {
+                name: "Visual Studio Code".into(),
+                ms: 42 * MIN,
+                details: vec![SessionDetail {
+                    label: "week_grid.rs".into(),
+                    sub: "trackerApp".into(),
+                    ms: 30 * MIN,
+                }],
+            }],
+        };
+        let log_slot = open_activity_popover(
+            owner,
+            Rect {
+                x: 80.0,
+                y: 80.0,
+                w: 80.0,
+                h: 40.0,
+            },
+            session,
+            true,
+            &Palette::LIGHT,
+        )
+        .expect("open activity popover");
+        assert!(popup::is_open());
+
+        // SAFETY: `pop_hwnd` is our thread-owned active popup window.
+        unsafe {
+            let pop_hwnd = popup::active_hwnd().expect("active popup hwnd");
+            assert_ne!(pop_hwnd, owner);
+            let mut rc_before = RECT::default();
+            assert!(GetWindowRect(pop_hwnd, &mut rc_before).is_ok());
+
+            // Focus starts on the expandable app row; Space expands it, Tab moves to
+            // "Log as time entry", and Enter activates it.
+            let _ = SendMessageW(
+                pop_hwnd,
+                WM_KEYDOWN,
+                Some(WPARAM(VK_SPACE.0 as usize)),
+                Some(LPARAM(0)),
+            );
+            let mut rc_expanded = RECT::default();
+            assert!(GetWindowRect(pop_hwnd, &mut rc_expanded).is_ok());
+            assert!(
+                rc_expanded.bottom - rc_expanded.top > rc_before.bottom - rc_before.top,
+                "Space should expand app details and grow popup height"
+            );
+            let _ = SendMessageW(
+                pop_hwnd,
+                WM_KEYDOWN,
+                Some(WPARAM(VK_TAB.0 as usize)),
+                Some(LPARAM(0)),
+            );
+            let _ = SendMessageW(
+                pop_hwnd,
+                WM_KEYDOWN,
+                Some(WPARAM(VK_RETURN.0 as usize)),
+                Some(LPARAM(0)),
+            );
+        }
+        window::pump();
+        assert!(
+            !popup::is_open(),
+            "Enter on Log button should close popover"
+        );
+        assert_eq!(
+            log_slot.borrow().as_ref().map(|r| r.description.as_str()),
+            Some("week_grid.rs")
+        );
+
+        window::close();
+        window::pump();
+        reset_shared();
+    }
 }
