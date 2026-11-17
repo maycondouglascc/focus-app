@@ -26,9 +26,9 @@ use windows::Win32::UI::Input::Pointer::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, IsWindow, LoadCursorW,
     PostMessageW, RegisterClassW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, IDC_ARROW,
-    PT_PEN, PT_TOUCH, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, WA_INACTIVE,
-    WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_GETOBJECT, WM_KEYDOWN, WM_KILLFOCUS, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_PAINT,
+    PT_PEN, PT_TOUCH, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WA_INACTIVE, WINDOW_EX_STYLE,
+    WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
+    WM_GETOBJECT, WM_KEYDOWN, WM_KILLFOCUS, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_PAINT,
     WM_POINTERCAPTURECHANGED, WM_POINTERDOWN, WM_POINTERENTER, WM_POINTERHWHEEL, WM_POINTERLEAVE,
     WM_POINTERUP, WM_POINTERUPDATE, WM_POINTERWHEEL, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE,
     WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED, WNDCLASSW, WS_CLIPCHILDREN,
@@ -865,7 +865,12 @@ unsafe extern "system" fn popup_wnd_proc(
             return LRESULT(0);
         }
         WM_DPICHANGED => {
-            let dpi = (wparam.0 & 0xFFFF) as u32;
+            let raw_dpi = (wparam.0 & 0xFFFF) as u32;
+            let dpi = if raw_dpi > 0 {
+                raw_dpi
+            } else {
+                GetDpiForWindow(hwnd)
+            };
             let scale = frame::scale(dpi);
             let r = &*(lparam.0 as *const RECT);
             let target_w =
@@ -879,7 +884,7 @@ unsafe extern "system" fn popup_wnd_proc(
                 r.top,
                 target_w,
                 target_h,
-                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE,
+                SWP_NOZORDER | SWP_NOACTIVATE,
             );
             return LRESULT(0);
         }
@@ -1198,8 +1203,27 @@ mod tests {
         )
         .expect("open second popup");
         assert!(is_open());
-        // SAFETY: `hwnd2` is our active popup HWND.
+
+        // WM_DPICHANGED must actually resize the popup to the scaled DIP size (no SWP_NOSIZE).
+        let dpi_192 = ((192usize) << 16) | 192usize;
+        let suggested = RECT {
+            left: work.left + 40,
+            top: work.top + 40,
+            right: work.left + 440,
+            bottom: work.top + 280,
+        };
+        // SAFETY: `hwnd2` is our live popup HWND and `suggested` is a valid stack RECT.
         unsafe {
+            let _ = SendMessageW(
+                hwnd2,
+                WM_DPICHANGED,
+                Some(WPARAM(dpi_192)),
+                Some(LPARAM(&suggested as *const RECT as isize)),
+            );
+            let mut scaled_rc = RECT::default();
+            assert!(GetWindowRect(hwnd2, &mut scaled_rc).is_ok());
+            assert_eq!(scaled_rc.right - scaled_rc.left, 400);
+            assert_eq!(scaled_rc.bottom - scaled_rc.top, 240);
             let _ = SendMessageW(
                 hwnd2,
                 WM_ACTIVATE,

@@ -296,6 +296,8 @@ pub struct RichEditField {
     sync_rev: u64,
     disabled: bool,
     font: HFONT,
+    #[allow(dead_code)] // verified by M8 DPI unit tests
+    font_height_px: i32,
     subclass_ptr: *mut SubclassData,
 }
 
@@ -376,6 +378,7 @@ impl RichEditField {
                 sync_rev,
                 disabled: false,
                 font: HFONT::default(),
+                font_height_px: 0,
                 subclass_ptr,
             };
             field.sync_theme(palette, dpi, text_scale);
@@ -385,6 +388,11 @@ impl RichEditField {
 
     pub fn hwnd(&self) -> HWND {
         self.hwnd
+    }
+
+    #[cfg(test)]
+    pub fn font_height_px(&self) -> i32 {
+        self.font_height_px
     }
 
     pub fn slot_id(&self) -> WidgetId {
@@ -505,6 +513,7 @@ impl RichEditField {
                     let _ = DeleteObject(HGDIOBJ(self.font.0));
                 }
                 self.font = new_font;
+                self.font_height_px = height;
             }
 
             let _ = SendMessageW(

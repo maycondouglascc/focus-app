@@ -1571,6 +1571,12 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_DPICHANGED => {
             // lparam points at the rectangle Windows suggests for the new scale.
+            let raw_dpi = (wparam.0 & 0xFFFF) as u32;
+            let dpi = if raw_dpi > 0 {
+                raw_dpi
+            } else {
+                GetDpiForWindow(hwnd)
+            };
             let r = &*(lparam.0 as *const RECT);
             let _ = SetWindowPos(
                 hwnd,
@@ -1581,6 +1587,18 @@ unsafe extern "system" fn wnd_proc(
                 r.bottom - r.top,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
+            with_ui(|u| {
+                let palette = u.palette;
+                let text_scale = u
+                    .renderer
+                    .as_ref()
+                    .map(|ren| ren.text().text_scale())
+                    .unwrap_or(u.prefs.text_scale);
+                for field in &mut u.rich_fields {
+                    field.sync_theme(&palette, dpi, text_scale);
+                }
+            });
+            let _ = InvalidateRect(Some(hwnd), None, false);
             return LRESULT(0);
         }
         WM_ERASEBKGND => return LRESULT(1),
@@ -2256,6 +2274,54 @@ mod tests {
         pump();
         let scope_after_esc = with_ui(|u| u.focus.active_scope()).unwrap();
         assert_eq!(scope_after_esc, FocusScope::Main);
+
+        close();
+        pump();
+        reset_shared();
+        assert!(!is_open());
+    }
+
+    #[test]
+    fn wm_dpichanged_updates_richedit_font_for_new_dpi() {
+        super::super::init();
+        assert!(open());
+        assert!(set_screen(Box::new(
+            super::super::screen::WidgetGalleryScreen::new()
+        )));
+        pump_until_painted(1);
+        let hwnd = hwnd().expect("live hwnd");
+
+        let (initial_px, text_scale) = with_ui(|u| {
+            let ts = u
+                .renderer
+                .as_ref()
+                .map(|r| r.text().text_scale())
+                .unwrap_or(u.prefs.text_scale);
+            (u.rich_fields[0].font_height_px(), ts)
+        })
+        .unwrap();
+        assert!(initial_px < 0);
+
+        let suggested = RECT {
+            left: 100,
+            top: 100,
+            right: 900,
+            bottom: 700,
+        };
+        let dpi_192 = ((192usize) << 16) | 192usize;
+        // SAFETY: sends WM_DPICHANGED with a stack RECT to our live test HWND.
+        unsafe {
+            let _ = SendMessageW(
+                hwnd,
+                WM_DPICHANGED,
+                Some(WPARAM(dpi_192)),
+                Some(LPARAM(&suggested as *const RECT as isize)),
+            );
+        }
+        pump();
+        let updated_px = with_ui(|u| u.rich_fields[0].font_height_px()).unwrap();
+        let expected = -((13.0 * 2.0 * text_scale.clamp(0.5, 4.0)).round() as i32);
+        assert_eq!(updated_px, expected);
 
         close();
         pump();
