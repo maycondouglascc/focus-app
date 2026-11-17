@@ -178,6 +178,7 @@ impl AppShell {
     fn build_nav_row(
         tree: &mut Tree,
         parent: Node,
+        key: &str,
         icon: char,
         label: &str,
         selected: bool,
@@ -202,7 +203,7 @@ impl AppShell {
                 ..Default::default()
             },
         );
-        let id = tree.id(row);
+        let id = tree.set_key(row, key);
         let interact = Interact::from_state(prev_id, env.hover, env.pressed, false);
         let bg = if selected {
             Some(p.accent_bg)
@@ -411,6 +412,7 @@ impl AppShell {
         self.id_nav_calendar = Some(Self::build_nav_row(
             tree,
             nav_box,
+            "nav.calendar",
             glyph::CALENDAR,
             strings::NAV_CALENDAR,
             self.section == Section::Calendar,
@@ -421,6 +423,7 @@ impl AppShell {
         self.id_nav_activity = Some(Self::build_nav_row(
             tree,
             nav_box,
+            "nav.activity",
             glyph::ACTIVITY,
             strings::NAV_ACTIVITY,
             self.section == Section::Activity,
@@ -431,6 +434,7 @@ impl AppShell {
         self.id_nav_reports = Some(Self::build_nav_row(
             tree,
             nav_box,
+            "nav.reports",
             glyph::REPORTS,
             strings::NAV_REPORTS,
             self.section == Section::Reports,
@@ -441,6 +445,7 @@ impl AppShell {
         self.id_nav_projects = Some(Self::build_nav_row(
             tree,
             nav_box,
+            "nav.projects",
             glyph::PROJECTS,
             strings::NAV_PROJECTS,
             self.section == Section::Projects,
@@ -516,7 +521,7 @@ impl AppShell {
                 Align::Left,
                 p.muted,
             );
-            self.id_side_empty_proj = Some(tree.id(empty_row));
+            self.id_side_empty_proj = Some(tree.set_key(empty_row, "nav.empty_project"));
         } else {
             for pr in active_projects.iter().take(12) {
                 let is_sel = matches!(&self.section, Section::Project(cur) if cur == &pr.id);
@@ -541,7 +546,7 @@ impl AppShell {
                         ..Default::default()
                     },
                 );
-                let rid = tree.id(row);
+                let rid = tree.set_key(row, &format!("nav.proj.{}", pr.id));
                 let interact = Interact::from_state(prev_id, env.hover, env.pressed, false);
                 let bg = if is_sel {
                     Some(p.accent_bg)
@@ -626,6 +631,7 @@ impl AppShell {
         self.id_nav_settings = Some(Self::build_nav_row(
             tree,
             side,
+            "nav.settings",
             glyph::SETTINGS,
             strings::NAV_SETTINGS,
             self.section == Section::Settings,

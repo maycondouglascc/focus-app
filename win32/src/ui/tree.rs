@@ -14,6 +14,17 @@ use super::theme::Color;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct WidgetId(pub u64);
 
+/// Derives a deterministic non-zero `WidgetId` outside the sequential range
+/// (`bit 62` set so it stays positive as `i64` and never collides with `1..`).
+pub fn keyed_widget_id(key: &str) -> WidgetId {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in key.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    WidgetId(0x4000_0000_0000_0000 | (hash & 0x3FFF_FFFF_FFFF_FFFF))
+}
+
 /// Drawing primitives emitted in a leaf's local `(0, 0, w, h)` DIP coordinate space.
 #[allow(dead_code)] // variants used progressively by widgets and chart primitives
 #[derive(Clone, Debug)]
@@ -343,6 +354,28 @@ impl Tree {
             .get_node_context(node.0)
             .expect("node context")
             .id
+    }
+
+    /// Assigns a deterministic key-derived `WidgetId` to `node` so focus and hover
+    /// survive conditional siblings appearing or disappearing on rebuild.
+    pub fn set_key(&mut self, node: Node, key: &str) -> WidgetId {
+        let new_id = keyed_widget_id(key);
+        let Some(old_id) = self.data(node).map(|d| d.id) else {
+            return new_id;
+        };
+        if old_id == new_id {
+            return new_id;
+        }
+        debug_assert!(
+            !self.by_id.contains_key(&new_id),
+            "duplicate stable widget key: {key}"
+        );
+        self.by_id.remove(&old_id);
+        if let Some(d) = self.data_mut(node) {
+            d.id = new_id;
+        }
+        self.by_id.insert(new_id, node.0);
+        new_id
     }
 
     pub fn node_by_id(&self, id: WidgetId) -> Option<Node> {

@@ -258,8 +258,8 @@ impl CalendarScreen {
         prev_p.variant = ButtonVariant::Ghost;
         prev_p.size = ButtonSize::Small;
         prev_p.interact = Interact::from_state(self.id_prev_week, env.hover, env.pressed, false);
-        let (_, pid) = button::build(tree, nav_left, &prev_p, p);
-        self.id_prev_week = Some(pid);
+        let (pnode, _) = button::build(tree, nav_left, &prev_p, p);
+        self.id_prev_week = Some(tree.set_key(pnode, "cal.prev"));
 
         let cur_week_start = start_of_week_with_first(now_ms, first_day_mon0);
         let this_week = week_start == cur_week_start;
@@ -267,8 +267,8 @@ impl CalendarScreen {
         today_p.size = ButtonSize::Small;
         today_p.disabled = this_week;
         today_p.interact = Interact::from_state(self.id_today, env.hover, env.pressed, this_week);
-        let (_, tid) = button::build(tree, nav_left, &today_p, p);
-        self.id_today = Some(tid);
+        let (tnode, _) = button::build(tree, nav_left, &today_p, p);
+        self.id_today = Some(tree.set_key(tnode, "cal.today"));
 
         let mut next_p = ButtonProps::new("");
         next_p.aria_label = Some(strings::CAL_NEXT_WEEK);
@@ -276,8 +276,8 @@ impl CalendarScreen {
         next_p.variant = ButtonVariant::Ghost;
         next_p.size = ButtonSize::Small;
         next_p.interact = Interact::from_state(self.id_next_week, env.hover, env.pressed, false);
-        let (_, nid) = button::build(tree, nav_left, &next_p, p);
-        self.id_next_week = Some(nid);
+        let (nnode, _) = button::build(tree, nav_left, &next_p, p);
+        self.id_next_week = Some(tree.set_key(nnode, "cal.next"));
 
         let week_title = if this_week {
             format!("{} · W{}", strings::CAL_THIS_WEEK, iso_week(week_start))
@@ -356,7 +356,7 @@ impl CalendarScreen {
             strings::CAL_MODE_TIME,
             strings::CAL_MODE_ACTIVITY,
         ];
-        let (_, mids) = segmented::build(
+        let (_, mids) = segmented::build_keyed(
             tree,
             nav_right,
             &SegmentedProps {
@@ -366,6 +366,7 @@ impl CalendarScreen {
                 hover: env.hover,
                 disabled: false,
             },
+            Some("cal.mode"),
             p,
         );
         self.id_mode_ids = mids;
@@ -417,8 +418,10 @@ impl CalendarScreen {
                 let mut np = ButtonProps::new("Create a project");
                 np.icon = Some(glyph::ADD);
                 np.size = ButtonSize::Small;
-                let (_, bid) = button::build(tree, hint_bar, &np, p);
-                self.id_empty_new_proj = Some(bid);
+                np.interact =
+                    Interact::from_state(self.id_empty_new_proj, env.hover, env.pressed, false);
+                let (bnode, _) = button::build(tree, hint_bar, &np, p);
+                self.id_empty_new_proj = Some(tree.set_key(bnode, "cal.empty_new_project"));
             }
         }
 
@@ -780,5 +783,96 @@ mod tests {
         assert!(host.rebuild_if_dirty(&env_focused, &mut focus));
         assert_eq!(a11y::validate_tree_names(host.tree()), Ok(()));
         assert!(matches!(focus.active_scope(), FocusScope::Modal(_)));
+    }
+
+    #[test]
+    fn focus_stays_on_same_widget_when_conditional_nodes_appear_or_disappear() {
+        let text = TextSystem::new().expect("dwrite");
+        let palette = Palette::LIGHT;
+        let env = ScreenEnv {
+            width_dip: 1200.0,
+            height_dip: 800.0,
+            hover: None,
+            pressed: None,
+            focused: None,
+            palette: &palette,
+            text: &text,
+        };
+        // Start with an empty store (no entries -> hint_bar visible, no project dot).
+        let store = shared_store(Box::new(DemoStore::fresh(SystemLocale::en_us())));
+        let _proj = store
+            .borrow_mut()
+            .create_project(crate::db::ProjectInput {
+                name: "Alpha".into(),
+                client: String::new(),
+                color: "#2266dd".into(),
+                rate: 100.0,
+                currency: "USD".into(),
+                billable_default: true,
+                archived: false,
+            })
+            .unwrap();
+
+        let screen = CalendarScreen::new(Rc::clone(&store));
+        let mut focus = FocusModel::new();
+        let mut host = ScreenHost::mount(Box::new(screen), &env, &mut focus);
+
+        // 1. Focus "Time" mode button while tracked/earned labels are present, then switch to Activity
+        //    mode (which removes tracked/earned labels before the segmented control).
+        let mode_time_id = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == strings::CAL_MODE_TIME)
+            .unwrap()
+            .id;
+        assert!(focus.focus_keyboard(mode_time_id));
+        let mode_act_id = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == strings::CAL_MODE_ACTIVITY)
+            .unwrap()
+            .id;
+        assert!(host.on_click(mode_act_id));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        let focused_after_mode = focus.focused().expect("focus should stay on Time button");
+        let mode_name = host
+            .tree()
+            .node_by_id(focused_after_mode)
+            .and_then(|n| host.tree().data(n))
+            .map(|d| d.a11y.name.as_str());
+        assert_eq!(mode_name, Some(strings::CAL_MODE_TIME));
+
+        // 2. Focus WeekGrid while empty hint_bar is absent (Activity mode), then switch back to Mix
+        //    (hint_bar appears before WeekGrid!). Focus must stay on WeekGrid.
+        let grid_id = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == strings::CAL_GRID_LABEL)
+            .unwrap()
+            .id;
+        assert!(focus.focus_keyboard(grid_id));
+        let mode_mix_id = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == strings::CAL_MODE_MIX)
+            .unwrap()
+            .id;
+        assert!(host.on_click(mode_mix_id));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        let focused_after_hint = focus.focused().expect("focus should stay on WeekGrid");
+        let grid_name = host
+            .tree()
+            .node_by_id(focused_after_hint)
+            .and_then(|n| host.tree().data(n))
+            .map(|d| d.a11y.name.as_str());
+        assert_eq!(grid_name, Some(strings::CAL_GRID_LABEL));
     }
 }

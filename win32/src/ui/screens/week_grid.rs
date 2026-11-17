@@ -918,8 +918,8 @@ impl WeekGridState {
 
         self.viewport_node = Some(viewport);
         self.canvas_node = Some(canvas);
-        self.viewport_id = Some(tree.id(viewport));
-        self.canvas_id = Some(tree.id(canvas));
+        self.viewport_id = Some(tree.set_key(viewport, "cal.grid_viewport"));
+        self.canvas_id = Some(tree.set_key(canvas, "cal.grid"));
     }
 
     pub fn on_pointer_down(

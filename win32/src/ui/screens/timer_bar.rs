@@ -243,7 +243,7 @@ impl TimerBarState {
         }
         let sel_int =
             Interact::from_state(self.sel_project.trigger_id, env.hover, env.pressed, false);
-        let (_, proj_id) = select::build(
+        let (proj_node, _) = select::build(
             tree,
             proj_box,
             &SelectProps {
@@ -258,7 +258,7 @@ impl TimerBarState {
             },
             p,
         );
-        self.sel_project.trigger_id = Some(proj_id);
+        self.sel_project.trigger_id = Some(tree.set_key(proj_node, "timer.project"));
 
         // Billable toggle button ($)
         let mut bill_props = ButtonProps::new("$");
@@ -270,7 +270,8 @@ impl TimerBarState {
         };
         bill_props.size = ButtonSize::Small;
         bill_props.interact = Interact::from_state(self.id_bill_btn, env.hover, env.pressed, false);
-        let (bill_node, bill_id) = button::build(tree, bar, &bill_props, p);
+        let (bill_node, _) = button::build(tree, bar, &bill_props, p);
+        let bill_id = tree.set_key(bill_node, "timer.billable");
         if let Some(d) = tree.data_mut(bill_node) {
             d.a11y.toggled = Some(self.billable);
         }
@@ -320,8 +321,8 @@ impl TimerBarState {
         act_props.size = ButtonSize::Icon;
         act_props.interact =
             Interact::from_state(self.id_toggle_btn, env.hover, env.pressed, false);
-        let (_, act_id) = button::build(tree, bar, &act_props, p);
-        self.id_toggle_btn = Some(act_id);
+        let (act_node, _) = button::build(tree, bar, &act_props, p);
+        self.id_toggle_btn = Some(tree.set_key(act_node, "timer.toggle"));
     }
 
     pub fn on_click(
@@ -478,5 +479,27 @@ mod tests {
             store.borrow().running_entry().unwrap().unwrap().description,
             "Review PR"
         );
+
+        // Project dot appearing/disappearing must not shift Project/Billable/Toggle widget IDs.
+        let mut t1 = Tree::new(style::column());
+        let r1 = t1.root();
+        bar.project_id = None;
+        bar.build(&mut t1, r1, &store, &projects, &env);
+        let ids_without_dot = (
+            bar.sel_project.trigger_id,
+            bar.id_bill_btn,
+            bar.id_toggle_btn,
+        );
+
+        let mut t2 = Tree::new(style::column());
+        let r2 = t2.root();
+        bar.project_id = Some(projects[0].id.clone());
+        bar.build(&mut t2, r2, &store, &projects, &env);
+        let ids_with_dot = (
+            bar.sel_project.trigger_id,
+            bar.id_bill_btn,
+            bar.id_toggle_btn,
+        );
+        assert_eq!(ids_without_dot, ids_with_dot);
     }
 }

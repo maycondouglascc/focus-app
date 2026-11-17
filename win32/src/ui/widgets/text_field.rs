@@ -280,7 +280,12 @@ pub fn build_tree_node(
     info.value = Some(props.value.into());
     tree.set_a11y(slot, info);
 
-    (container, tree.id(slot))
+    let slot_id = if props.key.is_empty() {
+        tree.id(slot)
+    } else {
+        tree.set_key(slot, props.key)
+    };
+    (container, slot_id)
 }
 
 /// Live native `RICHEDIT50W` child window synchronized with a `Leaf::RichTextSlot`.
