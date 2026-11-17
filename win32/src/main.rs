@@ -9,8 +9,12 @@
 mod appinfo;
 mod claude;
 mod db;
+mod format;
+mod locale;
 mod presence;
 mod recorder;
+mod stats;
+mod time;
 mod ui;
 
 use std::cell::{Cell, RefCell};
