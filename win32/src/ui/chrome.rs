@@ -15,7 +15,7 @@ const TITLE_INSET: f32 = 12.0;
 pub struct Chrome {
     tree: Tree,
     title: Node,
-    laid_out_for: Option<f32>,
+    laid_out_for: Option<(f32, u32)>,
 }
 
 impl Chrome {
@@ -55,11 +55,12 @@ impl Chrome {
 
     /// Lays out for a window `w` DIPs wide; a no-op if nothing changed.
     pub fn layout(&mut self, w: f32, text: &TextSystem) {
-        if self.laid_out_for == Some(w) {
+        let scale_key = (text.text_scale() * 1000.0).round() as u32;
+        if self.laid_out_for == Some((w, scale_key)) {
             return;
         }
         self.tree.layout(w, TITLE_BAR_DIP, text);
-        self.laid_out_for = Some(w);
+        self.laid_out_for = Some((w, scale_key));
     }
 
     pub fn title_rect(&self) -> Rect {

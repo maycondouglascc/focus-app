@@ -39,7 +39,7 @@ use super::chrome::{Chrome, TITLE_SIZE};
 use super::frame::{BUTTON_DIP, TITLE_BAR_DIP};
 use super::strings;
 use super::text::{TextSystem, Weight};
-use super::theme::{self, Color};
+use super::theme::{Color, Palette};
 
 /// `D2DERR_RECREATE_TARGET`
 const D2DERR_RECREATE_TARGET: i32 = 0x8899000Cu32 as i32;
@@ -195,9 +195,11 @@ impl Renderer {
             let ctx = gfx
                 .d2d_device
                 .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
-            let brush = ctx.CreateSolidColorBrush(&color(theme::TEXT), None)?;
+            let brush = ctx.CreateSolidColorBrush(&color(Palette::LIGHT.text), None)?;
 
-            let target = gfx.dcomp.CreateTargetForHwnd(hwnd, true)?;
+            // `topmost = false` keeps the DirectComposition tree behind child
+            // HWNDs (such as RichEdit fields) so native child controls stay visible.
+            let target = gfx.dcomp.CreateTargetForHwnd(hwnd, false)?;
             let visual = gfx.dcomp.CreateVisual()?;
             visual.SetContent(&swap)?;
             target.SetRoot(&visual)?;
@@ -215,6 +217,10 @@ impl Renderer {
         }
     }
 
+    pub fn set_text_scale(&self, scale: f32) -> bool {
+        self.text.set_text_scale(scale)
+    }
+
     pub fn resize(&mut self, w: u32, h: u32) -> std::result::Result<(), DrawError> {
         // SAFETY: the target bitmap is released first, as ResizeBuffers requires.
         unsafe {
@@ -230,8 +236,16 @@ impl Renderer {
         Ok(())
     }
 
-    /// Draws one frame. `w` is the client width in DIPs.
-    pub fn draw(&mut self, dpi: u32, w: f32, hover: Hover) -> std::result::Result<(), DrawError> {
+    /// Draws one frame. `w` and `h` are client dimensions in DIPs.
+    pub fn draw(
+        &mut self,
+        dpi: u32,
+        w: f32,
+        h: f32,
+        hover: Hover,
+        palette: &Palette,
+        mica: bool,
+    ) -> std::result::Result<(), DrawError> {
         // SAFETY: all objects are owned by `self`; BeginDraw/EndDraw are paired.
         unsafe {
             let surface: IDXGISurface = self.swap.GetBuffer(0)?;
@@ -251,16 +265,29 @@ impl Renderer {
             self.ctx.SetTarget(&bitmap);
             self.ctx.SetDpi(dpi as f32, dpi as f32);
             self.ctx.BeginDraw();
-            self.ctx.Clear(Some(&color(theme::SURFACE)));
-            self.fill(0.0, 0.0, w, TITLE_BAR_DIP, theme::TITLE_BAR);
-            self.caption_buttons(w, hover);
+            if mica {
+                // Transparent clear lets Windows 11 Mica shine through the title bar
+                // and frame; the content body below sits on an opaque surface.
+                let clear = D2D1_COLOR_F {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.0,
+                };
+                self.ctx.Clear(Some(&clear));
+                self.fill(0.0, TITLE_BAR_DIP, w, h, palette.surface);
+            } else {
+                self.ctx.Clear(Some(&color(palette.surface)));
+                self.fill(0.0, 0.0, w, TITLE_BAR_DIP, palette.title_bar);
+            }
+            self.caption_buttons(w, hover, palette);
             self.chrome.layout(w, &self.text);
             let t = self.chrome.title_rect();
             self.draw_text(
                 strings::APP_NAME,
                 TITLE_SIZE,
                 Weight::SemiBold,
-                theme::TEXT,
+                palette.text,
                 D2D_RECT_F {
                     left: t.x,
                     top: t.y,
@@ -317,19 +344,19 @@ impl Renderer {
         );
     }
 
-    unsafe fn caption_buttons(&self, w: f32, hover: Hover) {
+    unsafe fn caption_buttons(&self, w: f32, hover: Hover, palette: &Palette) {
         let h = TITLE_BAR_DIP;
         let kinds = [Hover::Minimize, Hover::Maximize, Hover::Close];
         for (i, kind) in kinds.into_iter().enumerate() {
             let left = w - BUTTON_DIP * (3 - i) as f32;
             let right = left + BUTTON_DIP;
-            let mut ink = theme::TEXT;
+            let mut ink = palette.text;
             if hover == kind {
                 if kind == Hover::Close {
-                    self.fill(left, 0.0, right, h, theme::CLOSE_HOVER);
-                    ink = theme::ON_CLOSE_HOVER;
+                    self.fill(left, 0.0, right, h, palette.close_hover);
+                    ink = palette.on_close_hover;
                 } else {
-                    self.fill(left, 0.0, right, h, theme::BUTTON_HOVER);
+                    self.fill(left, 0.0, right, h, palette.button_hover);
                 }
             }
             let (cx, cy) = (left + BUTTON_DIP / 2.0, h / 2.0);

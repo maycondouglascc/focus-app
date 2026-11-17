@@ -3,6 +3,7 @@
 
 pub mod chrome;
 pub mod frame;
+pub mod prefs;
 pub mod render;
 pub mod selftest;
 pub mod strings;

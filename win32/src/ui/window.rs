@@ -6,12 +6,10 @@ use std::cell::RefCell;
 
 use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, InvalidateRect, ScreenToClient, PAINTSTRUCT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     TrackMouseEvent, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
@@ -25,11 +23,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SM_CXSIZEFRAME, SM_CYSIZEFRAME, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, WINDOW_EX_STYLE, WM_DESTROY,
     WM_DPICHANGED, WM_ERASEBKGND, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
-    WM_NCMOUSEMOVE, WM_PAINT, WM_SIZE, WNDCLASSW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
+    WM_NCMOUSEMOVE, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
+    WNDCLASSW, WS_CLIPCHILDREN, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
 
 use super::frame::{self, Hit};
+use super::prefs::{self, SystemPrefs};
 use super::render::{reset_shared, DrawError, Hover, Renderer};
+use super::theme::Palette;
 
 /// `WM_NCMOUSELEAVE`
 const WM_NCMOUSELEAVE: u32 = 0x02A2;
@@ -39,6 +40,9 @@ struct Ui {
     /// `None` after a device loss or a failed creation; rebuilt on the next paint.
     renderer: Option<Renderer>,
     hover: Hover,
+    prefs: SystemPrefs,
+    palette: Palette,
+    mica: bool,
 }
 
 thread_local! {
@@ -126,7 +130,7 @@ unsafe fn create() -> Option<HWND> {
         WINDOW_EX_STYLE(WS_EX_NOREDIRECTIONBITMAP.0),
         class,
         w!("Focus"),
-        WS_OVERLAPPEDWINDOW,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         1100,
@@ -137,12 +141,9 @@ unsafe fn create() -> Option<HWND> {
         None,
     )
     .ok()?;
-    // Keep the drop shadow of a frameless window.
-    let margins = MARGINS {
-        cyTopHeight: 1,
-        ..Default::default()
-    };
-    let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+    let sys_prefs = SystemPrefs::query();
+    let mica = prefs::apply_mica(hwnd, sys_prefs.high_contrast);
+    let palette = Palette::for_system(sys_prefs.high_contrast);
     let _ = SetWindowPos(
         hwnd,
         None,
@@ -154,7 +155,10 @@ unsafe fn create() -> Option<HWND> {
     );
     let (w, h) = client_size(hwnd);
     let renderer = match Renderer::new(hwnd, w as u32, h as u32) {
-        Ok(r) => Some(r),
+        Ok(r) => {
+            r.set_text_scale(sys_prefs.text_scale);
+            Some(r)
+        }
         Err(e) => {
             eprintln!("focus: cannot create the renderer: {e}");
             None
@@ -165,6 +169,9 @@ unsafe fn create() -> Option<HWND> {
             hwnd,
             renderer,
             hover: Hover::None,
+            prefs: sys_prefs,
+            palette,
+            mica,
         })
     });
     let _ = ShowWindow(hwnd, SW_SHOW);
@@ -265,15 +272,28 @@ unsafe fn on_paint(hwnd: HWND) {
 
     let dpi = GetDpiForWindow(hwnd);
     let (w, h) = client_size(hwnd);
+    let scale = frame::scale(dpi);
     let retry = with_ui(|u| {
         if u.renderer.is_none() {
             u.renderer = Renderer::new(hwnd, w as u32, h as u32).ok();
+            if let Some(r) = u.renderer.as_ref() {
+                r.set_text_scale(u.prefs.text_scale);
+            }
         }
         let hover = u.hover;
+        let palette = u.palette;
+        let mica = u.mica;
         let Some(r) = u.renderer.as_mut() else {
             return false;
         };
-        match r.draw(dpi, w as f32 * 96.0 / dpi as f32, hover) {
+        match r.draw(
+            dpi,
+            w as f32 / scale,
+            h as f32 / scale,
+            hover,
+            &palette,
+            mica,
+        ) {
             Ok(()) => false,
             Err(DrawError::DeviceLost) => {
                 u.renderer = None;
@@ -288,6 +308,28 @@ unsafe fn on_paint(hwnd: HWND) {
     })
     .unwrap_or(false);
     if retry {
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+}
+
+unsafe fn on_system_prefs_changed(hwnd: HWND) {
+    let new_prefs = SystemPrefs::query();
+    let changed = with_ui(|u| {
+        let mica = prefs::apply_mica(hwnd, new_prefs.high_contrast);
+        let palette = Palette::for_system(new_prefs.high_contrast);
+        let text_changed = u
+            .renderer
+            .as_ref()
+            .is_some_and(|r| r.set_text_scale(new_prefs.text_scale));
+        let changed =
+            u.prefs != new_prefs || u.mica != mica || u.palette != palette || text_changed;
+        u.prefs = new_prefs;
+        u.mica = mica;
+        u.palette = palette;
+        changed
+    })
+    .unwrap_or(false);
+    if changed {
         let _ = InvalidateRect(Some(hwnd), None, false);
     }
 }
@@ -342,6 +384,9 @@ unsafe extern "system" fn wnd_proc(
             _ => {}
         },
         WM_SIZE => on_size(hwnd),
+        WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE => {
+            on_system_prefs_changed(hwnd);
+        }
         WM_DPICHANGED => {
             // lparam points at the rectangle Windows suggests for the new scale.
             let r = &*(lparam.0 as *const RECT);
