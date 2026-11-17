@@ -867,6 +867,14 @@ impl Store for DemoStore {
         Ok(out)
     }
 
+    fn get_entry(&self, id: &str) -> Result<TimeEntry, String> {
+        self.entries
+            .iter()
+            .find(|e| e.id == id)
+            .cloned()
+            .ok_or_else(|| "Entry not found".to_string())
+    }
+
     fn has_any_entries(&self) -> Result<bool, String> {
         Ok(!self.entries.is_empty())
     }

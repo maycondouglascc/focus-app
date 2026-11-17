@@ -1207,6 +1207,7 @@ pub trait Store {
     fn project_all_time_stats(&self, project_id: &str) -> Result<ProjectAllTimeStats, String>;
 
     fn list_entries(&self, from: i64, to: i64) -> Result<Vec<TimeEntry>, String>;
+    fn get_entry(&self, id: &str) -> Result<TimeEntry, String>;
     fn has_any_entries(&self) -> Result<bool, String>;
     fn earliest_entry_start(
         &self,
@@ -1306,6 +1307,10 @@ impl Store for DbStore {
 
     fn list_entries(&self, from: i64, to: i64) -> Result<Vec<TimeEntry>, String> {
         self.db.list_entries(from, to).map_err(db_err)
+    }
+
+    fn get_entry(&self, id: &str) -> Result<TimeEntry, String> {
+        self.db.get_entry(id).map_err(db_err)
     }
 
     fn has_any_entries(&self) -> Result<bool, String> {
