@@ -1,6 +1,7 @@
 //! Native UI. Everything here exists only while the window is open: the window
 //! is created on open and destroyed on close, with all of its resources.
 
+pub mod a11y;
 pub mod chrome;
 pub mod focus;
 pub mod frame;

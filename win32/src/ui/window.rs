@@ -28,20 +28,26 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SM_CYSIZEFRAME, SWP_FRAMECHANGED, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
     WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_KEYDOWN, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN,
-    WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_PAINT, WM_POINTERCAPTURECHANGED, WM_POINTERDOWN,
-    WM_POINTERENTER, WM_POINTERHWHEEL, WM_POINTERLEAVE, WM_POINTERUP, WM_POINTERUPDATE,
-    WM_POINTERWHEEL, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED,
-    WNDCLASSW, WS_CLIPCHILDREN, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
+    WM_GETOBJECT, WM_KEYDOWN, WM_KILLFOCUS, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_NCCALCSIZE,
+    WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_PAINT,
+    WM_POINTERCAPTURECHANGED, WM_POINTERDOWN, WM_POINTERENTER, WM_POINTERHWHEEL, WM_POINTERLEAVE,
+    WM_POINTERUP, WM_POINTERUPDATE, WM_POINTERWHEEL, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE,
+    WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED, WNDCLASSW, WS_CLIPCHILDREN,
+    WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
 
+use super::a11y::{self, A11yActionQueue, StaticActivation, WM_A11Y_ACTION};
 use super::focus::{EscapeOutcome, FocusModel};
 use super::frame::{self, Hit};
 use super::input::{KeyCode, KeyEvent, PointerButton, PointerKind, PointerState};
 use super::prefs::{self, SystemPrefs};
 use super::render::{reset_shared, DrawError, FrameOpts, Hover, Renderer};
+use super::strings;
 use super::theme::Palette;
 use super::tree::Tree;
+
+use accesskit::Action;
+use accesskit_windows::Adapter;
 
 /// `WM_NCMOUSELEAVE`
 const WM_NCMOUSELEAVE: u32 = 0x02A2;
@@ -59,6 +65,8 @@ struct Ui {
     tree: Option<Tree>,
     focus: FocusModel,
     pointer: PointerState,
+    a11y_queue: A11yActionQueue,
+    a11y: Adapter,
     paint_count: u64,
 }
 
@@ -181,6 +189,9 @@ unsafe fn create() -> Option<HWND> {
             None
         }
     };
+    // Initialize AccessKit before `ShowWindow` so initial `WM_GETOBJECT` never races.
+    let a11y_queue = A11yActionQueue::new(hwnd);
+    let a11y = Adapter::new(hwnd, false, a11y_queue.handler());
     UI.with(|u| {
         *u.borrow_mut() = Some(Ui {
             hwnd,
@@ -192,6 +203,8 @@ unsafe fn create() -> Option<HWND> {
             tree: None,
             focus: FocusModel::new(),
             pointer: PointerState::default(),
+            a11y_queue,
+            a11y,
             paint_count: 0,
         })
     });
@@ -332,21 +345,27 @@ unsafe fn on_pointer_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
             let Some((pid, kind, btn, x, y)) = query_pointer(hwnd, wparam) else {
                 return false;
             };
-            let outcome = with_ui(|u| {
+            let (request_capture, focus_changed, visual_changed) = with_ui(|u| {
                 let hit = u.tree.as_ref().and_then(|t| t.hit_test(x, y));
-                let mut out = u.pointer.on_down(pid, btn, hit, x, y);
+                let out = u.pointer.on_down(pid, btn, hit, x, y);
                 let focus_changed = match hit {
                     Some(id) => u.focus.focus_pointer(id),
                     None => u.focus.clear_focus(),
                 };
-                out.visual_changed |= focus_changed;
-                out
+                (
+                    out.request_capture,
+                    focus_changed,
+                    out.visual_changed || focus_changed,
+                )
             })
-            .unwrap_or_default();
-            if outcome.request_capture && kind == PointerKind::Mouse {
+            .unwrap_or((false, false, false));
+            if request_capture && kind == PointerKind::Mouse {
                 SetCapture(hwnd);
             }
-            if outcome.visual_changed {
+            if focus_changed {
+                sync_a11y(hwnd);
+            }
+            if visual_changed {
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             true
@@ -439,22 +458,95 @@ fn translate_key(wparam: WPARAM) -> KeyEvent {
     }
 }
 
+unsafe fn sync_a11y(hwnd: HWND) {
+    let dpi = GetDpiForWindow(hwnd);
+    let client_px = client_size(hwnd);
+    let scale = frame::scale(dpi);
+    let queued = UI.with(|u| {
+        let Ok(mut g) = u.try_borrow_mut() else {
+            return None;
+        };
+        let ui = g.as_mut()?;
+        let tree = ui.tree.as_ref();
+        let focused = ui.focus.focused();
+        ui.a11y.update_if_active(|| {
+            a11y::build_tree_update(tree, focused, scale, client_px, strings::APP_NAME)
+        })
+    });
+    // Raise outside any borrow of `UI` because UIA may synchronously send `WM_GETOBJECT`.
+    if let Some(ev) = queued {
+        ev.raise();
+    }
+}
+
+unsafe fn on_a11y_action_msg(hwnd: HWND) {
+    let requests = UI
+        .with(|u| {
+            u.try_borrow()
+                .ok()
+                .and_then(|g| g.as_ref().map(|ui| ui.a11y_queue.drain()))
+        })
+        .unwrap_or_default();
+    if requests.is_empty() {
+        return;
+    }
+    let mut focus_changed = false;
+    let mut visual_changed = false;
+    with_ui(|u| {
+        for req in requests {
+            let target = a11y::widget_id(req.target_node);
+            match req.action {
+                Action::Focus => {
+                    focus_changed |= u.focus.focus_keyboard(target);
+                    visual_changed = true;
+                }
+                Action::Click => {
+                    if u.tree
+                        .as_ref()
+                        .and_then(|t| t.node_by_id(target).and_then(|n| t.data(n)))
+                        .is_some_and(|d| d.focusable && !d.disabled)
+                    {
+                        focus_changed |= u.focus.focus_keyboard(target);
+                    }
+                    visual_changed = true;
+                }
+                _ => {}
+            }
+        }
+    });
+    if focus_changed {
+        sync_a11y(hwnd);
+    }
+    if visual_changed {
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+}
+
 unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
     let ev = translate_key(wparam);
-    let (handled, changed) = with_ui(|u| match ev.key {
+    let (handled, focus_changed, changed) = with_ui(|u| match ev.key {
         KeyCode::Tab if !ev.ctrl && !ev.alt => {
             let prev = u.focus.focused();
             let prev_vis = u.focus.is_focus_visible();
             let next = u.focus.tab(ev.shift);
-            (true, next != prev || u.focus.is_focus_visible() != prev_vis)
+            (
+                true,
+                next != prev,
+                next != prev || u.focus.is_focus_visible() != prev_vis,
+            )
         }
         KeyCode::Escape => {
+            let prev = u.focus.focused();
             let out = u.focus.on_escape();
-            (out != EscapeOutcome::None, out != EscapeOutcome::None)
+            let changed = out != EscapeOutcome::None;
+            (changed, u.focus.focused() != prev, changed)
         }
-        _ => (false, false),
+        _ => (false, false, false),
     })
-    .unwrap_or((false, false));
+    .unwrap_or((false, false, false));
+    if focus_changed {
+        sync_a11y(hwnd);
+    }
     if changed {
         let _ = InvalidateRect(Some(hwnd), None, false);
     }
@@ -475,6 +567,7 @@ unsafe fn on_size(hwnd: HWND) {
             }
         }
     });
+    sync_a11y(hwnd);
     let _ = InvalidateRect(Some(hwnd), None, false);
 }
 
@@ -649,6 +742,47 @@ unsafe extern "system" fn wnd_proc(
             }
         }
         WM_CHAR => {}
+        WM_GETOBJECT => {
+            let dpi = GetDpiForWindow(hwnd);
+            let client_px = client_size(hwnd);
+            let scale = frame::scale(dpi);
+            let result = UI.with(|u| {
+                let Ok(mut g) = u.try_borrow_mut() else {
+                    return None;
+                };
+                let ui = g.as_mut()?;
+                let update = a11y::build_tree_update(
+                    ui.tree.as_ref(),
+                    ui.focus.focused(),
+                    scale,
+                    client_px,
+                    strings::APP_NAME,
+                );
+                let mut activation = StaticActivation(Some(update));
+                ui.a11y.handle_wm_getobject(wparam, lparam, &mut activation)
+            });
+            if let Some(res) = result {
+                // Convert outside `UI` borrow because `UiaReturnRawElementProvider` can trigger nested `WM_GETOBJECT`.
+                return res.into();
+            }
+        }
+        WM_SETFOCUS | WM_KILLFOCUS => {
+            let is_focused = msg == WM_SETFOCUS;
+            let queued = UI.with(|u| {
+                let Ok(mut g) = u.try_borrow_mut() else {
+                    return None;
+                };
+                let ui = g.as_mut()?;
+                ui.a11y.update_window_focus_state(is_focused)
+            });
+            if let Some(ev) = queued {
+                ev.raise();
+            }
+        }
+        m if m == WM_A11Y_ACTION => {
+            on_a11y_action_msg(hwnd);
+            return LRESULT(0);
+        }
         WM_PAINT => {
             on_paint(hwnd);
             return LRESULT(0);
@@ -674,9 +808,14 @@ unsafe extern "system" fn wnd_proc(
 
 #[cfg(test)]
 mod tests {
+    use super::super::focus::FocusScope;
     use super::super::render::D2DERR_RECREATE_TARGET;
+    use super::super::text::TextSystem;
+    use super::super::tree::{style, A11yInfo, A11yRole, HitMode, Leaf};
     use super::*;
     use windows::Win32::Graphics::Dxgi::DXGI_ERROR_DEVICE_REMOVED;
+    use windows::Win32::UI::Accessibility::UiaRootObjectId;
+    use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 
     fn snapshot() -> Option<(HWND, u64, u64)> {
         with_ui(|u| {
@@ -726,6 +865,70 @@ mod tests {
                 "expected redraw after recovery from {hr:?}"
             );
         }
+
+        close();
+        pump();
+        reset_shared();
+        assert!(!is_open());
+    }
+
+    #[test]
+    fn wm_getobject_and_tree_updates_expose_valid_uia_tree() {
+        super::super::init();
+        assert!(open());
+        pump_until_painted(1);
+
+        let text = TextSystem::new().expect("dwrite");
+        let mut tree = Tree::new(style::column());
+        let btn = tree.add_leaf(
+            tree.root(),
+            taffy::Style {
+                size: style::size(100.0, 32.0),
+                ..Default::default()
+            },
+            Leaf::Box,
+        );
+        tree.set_hit(btn, HitMode::Interactive);
+        tree.set_focusable(btn, true);
+        tree.set_a11y(
+            btn,
+            A11yInfo {
+                role: A11yRole::Button,
+                name: "Play".into(),
+                clickable: true,
+                requires_name: true,
+                ..Default::default()
+            },
+        );
+        tree.layout(400.0, 300.0, &text);
+        let btn_id = tree.id(btn);
+        assert_eq!(a11y::validate_tree_names(&tree), Ok(()));
+
+        let hwnd = with_ui(|u| {
+            u.focus.sync_from_tree(&tree, |_, _| FocusScope::Main);
+            u.tree = Some(tree);
+            u.hwnd
+        })
+        .expect("ui open");
+
+        // SAFETY: `hwnd` is our test window on the UI thread; `UiaRootObjectId` requests the UIA root provider.
+        let lres = unsafe {
+            SendMessageW(
+                hwnd,
+                WM_GETOBJECT,
+                Some(WPARAM(0)),
+                Some(LPARAM(UiaRootObjectId as isize)),
+            )
+        };
+        assert_ne!(lres.0, 0, "WM_GETOBJECT must return non-null UIA provider");
+
+        // Trigger focus + tree sync after adapter activation.
+        with_ui(|u| {
+            assert!(u.focus.focus_keyboard(btn_id));
+        });
+        // SAFETY: `hwnd` is live on this thread.
+        unsafe { sync_a11y(hwnd) };
+        pump();
 
         close();
         pump();

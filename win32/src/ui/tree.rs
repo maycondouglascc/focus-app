@@ -411,6 +411,10 @@ impl Tree {
             .unwrap_or_default()
     }
 
+    pub fn parent(&self, node: Node) -> Option<Node> {
+        self.taffy.parent(node.0).map(Node)
+    }
+
     /// Lays the tree out for a `w` x `h` DIP viewport.
     pub fn layout(&mut self, w: f32, h: f32, text: &TextSystem) {
         let space = Size {
