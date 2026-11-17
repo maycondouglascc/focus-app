@@ -69,9 +69,8 @@ enum GridDrag {
         entry: TimeEntry,
         grab_min: f64,
         grab_day: usize,
-        day_idx: usize,
-        orig_start_min: f64,
-        cur_start_min: f64,
+        cur_day: usize,
+        cur_min: f64,
         duration_ms: i64,
         moved: bool,
         alt: bool,
@@ -283,22 +282,48 @@ impl WeekGridState {
         Rect { x, y, w, h }
     }
 
+    fn moved_start(
+        entry: &TimeEntry,
+        grab_day: usize,
+        grab_min: f64,
+        cur_day: usize,
+        cur_min: f64,
+        alt: bool,
+    ) -> i64 {
+        let delta_days = (cur_day as i32) - (grab_day as i32);
+        let delta_min = if alt {
+            (cur_min - grab_min).round()
+        } else {
+            ((cur_min - grab_min) / f64::from(SNAP_MIN)).round() * f64::from(SNAP_MIN)
+        };
+        let base_min = if alt {
+            minutes_of_day(entry.start).round()
+        } else {
+            Self::snap_min(minutes_of_day(entry.start), false)
+        };
+        let shifted_day = add_days_start(start_of_day(entry.start), delta_days);
+        at_minutes(shifted_day, (base_min + delta_min).round() as i32)
+    }
+
     fn preview_entries(&self) -> Vec<TimeEntry> {
         self.entries
             .iter()
             .map(|e| {
                 if let Some(GridDrag::Move {
                     entry: ref dragged,
-                    day_idx,
-                    cur_start_min,
+                    grab_day,
+                    grab_min,
+                    cur_day,
+                    cur_min,
                     duration_ms,
                     moved: true,
+                    alt,
                     ..
                 }) = self.drag
                 {
                     if dragged.id == e.id {
                         let start =
-                            at_minutes(self.week_days[day_idx], cur_start_min.round() as i32);
+                            Self::moved_start(dragged, grab_day, grab_min, cur_day, cur_min, alt);
                         let mut cloned = e.clone();
                         cloned.start = start;
                         cloned.end = Some(start + duration_ms);
@@ -972,12 +997,11 @@ impl WeekGridState {
                         h: ebox.h,
                     };
                     self.drag = Some(GridDrag::Move {
-                        orig_start_min: minutes_of_day(seg.entry.start),
-                        cur_start_min: minutes_of_day(seg.entry.start),
                         entry: seg.entry,
                         grab_min: min,
                         grab_day: day_idx,
-                        day_idx,
+                        cur_day: day_idx,
+                        cur_min: min,
                         duration_ms,
                         moved: false,
                         alt: mods.alt,
@@ -1038,27 +1062,16 @@ impl WeekGridState {
                 entry,
                 grab_min,
                 grab_day,
-                day_idx: ref mut d_idx,
-                orig_start_min,
-                cur_start_min,
+                cur_day,
+                cur_min,
                 moved,
                 alt,
                 ..
             } => {
                 *alt = mods.alt;
                 if entry.end.is_some() {
-                    let delta = if mods.alt {
-                        (min - *grab_min).round()
-                    } else {
-                        ((min - *grab_min) / f64::from(SNAP_MIN)).round() * f64::from(SNAP_MIN)
-                    };
-                    let base = if mods.alt {
-                        *orig_start_min
-                    } else {
-                        Self::snap_min(*orig_start_min, false)
-                    };
-                    *cur_start_min = (base + delta).clamp(0.0, DAY_MIN_MAX - 15.0);
-                    *d_idx = day_idx;
+                    *cur_min = min;
+                    *cur_day = day_idx;
                     *moved = *moved || (min - *grab_min).abs() > 4.0 || day_idx != *grab_day;
                 }
             }
@@ -1153,12 +1166,14 @@ impl WeekGridState {
             }
             GridDrag::Move {
                 entry,
-                day_idx,
-                cur_start_min,
+                grab_day,
+                grab_min,
+                cur_day,
+                cur_min,
                 duration_ms,
                 moved,
+                alt,
                 anchor_rect,
-                ..
             } => {
                 if !moved {
                     self.pending_action = Some(GridAction::OpenEntry(
@@ -1166,7 +1181,8 @@ impl WeekGridState {
                         anchor_rect,
                     ));
                 } else {
-                    let start = at_minutes(self.week_days[day_idx], cur_start_min.round() as i32);
+                    let start =
+                        Self::moved_start(&entry, grab_day, grab_min, cur_day, cur_min, alt);
                     if start != entry.start {
                         self.pending_action = Some(GridAction::UpdateEntry {
                             id: entry.id,
@@ -1449,6 +1465,102 @@ mod tests {
                 assert_eq!(draft.end.unwrap() - draft.start, 60 * MIN);
             }
             other => panic!("expected OpenEntry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn moving_either_segment_of_overnight_entry_shifts_from_original_start() {
+        let text = TextSystem::new().expect("dwrite");
+        let palette = Palette::LIGHT;
+        let now = crate::time::from_local(2026, 11, 18, 12, 0, 0, 0);
+        let week_start = crate::time::start_of_week(now);
+        let tue = add_days_start(week_start, 1);
+        let wed = add_days_start(week_start, 2);
+        let thu = add_days_start(week_start, 3);
+        let overnight = TimeEntry {
+            id: "ov1".into(),
+            project_id: None,
+            description: "Night deploy".into(),
+            start: at_minutes(tue, 23 * 60),
+            end: Some(at_minutes(wed, 60)),
+            billable: false,
+            source: "calendar".into(),
+        };
+
+        let env = ScreenEnv {
+            width_dip: 1200.0,
+            height_dip: 800.0,
+            hover: None,
+            pressed: None,
+            focused: None,
+            palette: &palette,
+            text: &text,
+        };
+        let mut grid = WeekGridState::new();
+        grid.scroll_y = 0.0;
+        let mut tree = Tree::new(style::column());
+        let root = tree.root();
+        let entries = vec![overnight.clone()];
+        grid.build(
+            &mut tree,
+            root,
+            week_start,
+            &entries,
+            &[],
+            &HashMap::new(),
+            now,
+            0,
+            true,
+            &env,
+        );
+        tree.layout(1200.0, 800.0, &text);
+        let cid = grid.canvas_id.unwrap();
+        let col_w = (env.width_dip - 48.0 - GUTTER_W) / 7.0;
+        let vp_x = grid.last_viewport_rect.x;
+        let vp_y = grid.last_viewport_rect.y;
+        let scroll_y = grid.scroll_y;
+        let x_col = |di: usize| vp_x + GUTTER_W + (di as f32 + 0.3) * col_w;
+        let y_at = |min: f32| vp_y + min * DIP_PER_MIN - scroll_y;
+
+        // 1. Grab Tuesday segment (23:30) and move down 15 min -> Tue 23:15..Wed 01:15.
+        grid.on_pointer_down(
+            cid,
+            x_col(1),
+            y_at(23.0 * 60.0 + 30.0),
+            KeyModifiers::default(),
+        );
+        grid.on_pointer_move(x_col(1), y_at(23.0 * 60.0 + 45.0), KeyModifiers::default());
+        grid.on_pointer_up(x_col(1), y_at(23.0 * 60.0 + 45.0), KeyModifiers::default());
+        match grid.pending_action.take().unwrap() {
+            GridAction::UpdateEntry { patch, .. } => {
+                assert_eq!(patch.start, Some(at_minutes(tue, 23 * 60 + 15)));
+                assert_eq!(patch.end, Some(Some(at_minutes(wed, 75))));
+            }
+            other => panic!("expected UpdateEntry, got {other:?}"),
+        }
+
+        // 2. Grab Wednesday segment (00:30) and move down 15 min -> still Tue 23:15..Wed 01:15 (not Wed 23:15!).
+        grid.on_pointer_down(cid, x_col(2), y_at(30.0), KeyModifiers::default());
+        grid.on_pointer_move(x_col(2), y_at(45.0), KeyModifiers::default());
+        grid.on_pointer_up(x_col(2), y_at(45.0), KeyModifiers::default());
+        match grid.pending_action.take().unwrap() {
+            GridAction::UpdateEntry { patch, .. } => {
+                assert_eq!(patch.start, Some(at_minutes(tue, 23 * 60 + 15)));
+                assert_eq!(patch.end, Some(Some(at_minutes(wed, 75))));
+            }
+            other => panic!("expected UpdateEntry, got {other:?}"),
+        }
+
+        // 3. Grab Wednesday segment (00:30) and drag horizontally to Thursday (00:30) -> Wed 23:00..Thu 01:00.
+        grid.on_pointer_down(cid, x_col(2), y_at(30.0), KeyModifiers::default());
+        grid.on_pointer_move(x_col(3), y_at(30.0), KeyModifiers::default());
+        grid.on_pointer_up(x_col(3), y_at(30.0), KeyModifiers::default());
+        match grid.pending_action.take().unwrap() {
+            GridAction::UpdateEntry { patch, .. } => {
+                assert_eq!(patch.start, Some(at_minutes(wed, 23 * 60)));
+                assert_eq!(patch.end, Some(Some(at_minutes(thu, 60))));
+            }
+            other => panic!("expected UpdateEntry, got {other:?}"),
         }
     }
 }
