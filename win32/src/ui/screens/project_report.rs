@@ -23,6 +23,7 @@ use crate::ui::widgets::segmented::{self, SegmentedProps};
 use crate::ui::widgets::{add_label, glyph, Interact};
 use crate::ui::window;
 
+use super::entry_editor::{EntryDraft, EntryEditorOutcome, EntryEditorState};
 use super::entry_tree::EntryTreeState;
 use super::projects::{ProjectDialogOutcome, ProjectDialogState};
 use super::{
@@ -79,6 +80,8 @@ pub struct ProjectReportScreen {
     viewport_h: f32,
     entry_tree: EntryTreeState,
     edit_dialog: Option<ProjectDialogState>,
+    entry_editor: Option<EntryEditorState>,
+    cached_projects: Vec<Project>,
 
     id_back: Option<WidgetId>,
     id_edit_btn: Option<WidgetId>,
@@ -106,6 +109,8 @@ impl ProjectReportScreen {
             viewport_h: 720.0,
             entry_tree: EntryTreeState::new(),
             edit_dialog: None,
+            entry_editor: None,
+            cached_projects: Vec::new(),
             id_back: None,
             id_edit_btn: None,
             id_metric_ids: Vec::new(),
@@ -827,12 +832,31 @@ impl ProjectReportScreen {
             );
         }
 
-        self.edit_dialog
-            .as_mut()
-            .map(|dlg| dlg.build(tree, overlay_root, env))
+        self.cached_projects = self.store.borrow().list_projects().unwrap_or_default();
+        if let Some(ref mut dlg) = self.edit_dialog {
+            return Some(dlg.build(tree, overlay_root, env));
+        }
+        if let Some(ref mut ed) = self.entry_editor {
+            return Some(ed.build(tree, overlay_root, &self.store, &self.cached_projects, env));
+        }
+        None
     }
 
     pub fn handle_click(&mut self, id: WidgetId, palette: &Palette) -> bool {
+        if let Some(ref mut ed) = self.entry_editor {
+            let (handled, out) = ed.on_click(id, &self.store, &self.cached_projects, palette);
+            if matches!(
+                out,
+                EntryEditorOutcome::Closed
+                    | EntryEditorOutcome::Saved
+                    | EntryEditorOutcome::Deleted
+            ) {
+                self.entry_editor = None;
+            }
+            if handled {
+                return true;
+            }
+        }
         if let Some(ref mut dlg) = self.edit_dialog {
             let (handled, out) = dlg.on_click(id, &self.store, palette);
             match out {
@@ -896,6 +920,7 @@ impl ProjectReportScreen {
         let et = self.entry_tree.handle_click(id);
         if let Some(entry) = et.open_entry {
             self.opened_entry = Some(entry.clone());
+            self.entry_editor = Some(EntryEditorState::new(EntryDraft::from_entry(&entry)));
             if let Some(cb) = self.on_open_entry.as_mut() {
                 cb(entry);
             }
@@ -905,6 +930,9 @@ impl ProjectReportScreen {
     }
 
     pub fn handle_key(&mut self, key: KeyCode) -> bool {
+        if self.entry_editor.is_some() {
+            return false;
+        }
         if let Some(ref mut dlg) = self.edit_dialog {
             return dlg.on_key(key);
         }
@@ -912,6 +940,10 @@ impl ProjectReportScreen {
     }
 
     pub fn handle_escape(&mut self) -> bool {
+        if self.entry_editor.is_some() {
+            self.entry_editor = None;
+            return true;
+        }
         if self.edit_dialog.is_some() {
             self.edit_dialog = None;
             return true;
@@ -924,7 +956,7 @@ impl ProjectReportScreen {
     }
 
     pub fn handle_wheel_at(&mut self, x_dip: f32, y_dip: f32, delta_dip: f32) -> bool {
-        if self.edit_dialog.is_some() {
+        if self.edit_dialog.is_some() || self.entry_editor.is_some() {
             return false;
         }
         if let Some(vp_id) = self.entry_tree.viewport_id {
@@ -952,12 +984,22 @@ impl Screen for ProjectReportScreen {
     }
 
     fn on_text_change(&mut self, key: &str, value: &str) -> bool {
+        if let Some(ref mut ed) = self.entry_editor {
+            return ed.on_text_change(key, value);
+        }
         self.edit_dialog
             .as_mut()
             .is_some_and(|d| d.on_text_change(key, value))
     }
 
     fn on_text_submit(&mut self, key: &str, value: &str) -> bool {
+        if let Some(ref mut ed) = self.entry_editor {
+            let out = ed.on_text_submit(key, value, &self.store);
+            if matches!(out, EntryEditorOutcome::Saved | EntryEditorOutcome::Closed) {
+                self.entry_editor = None;
+            }
+            return true;
+        }
         if let Some(ref mut dlg) = self.edit_dialog {
             let out = dlg.on_text_submit(key, value, &self.store);
             if matches!(
@@ -995,6 +1037,9 @@ impl Screen for ProjectReportScreen {
         let mut changed = self.period_nav.poll_popup();
         if let Some(ref mut dlg) = self.edit_dialog {
             changed |= dlg.poll_popup();
+        }
+        if let Some(ref mut ed) = self.entry_editor {
+            changed |= ed.poll_popup(&self.cached_projects);
         }
         changed
     }

@@ -1,10 +1,16 @@
 //! Application screens mounted inside `AppShell` or standalone for tests.
 #![allow(dead_code)] // screens wired progressively across commits 4-7
 
+pub mod activity_popover;
+pub mod calendar;
+pub mod calendar_layout;
+pub mod entry_editor;
 pub mod entry_tree;
 pub mod project_report;
 pub mod projects;
 pub mod settings;
+pub mod timer_bar;
+pub mod week_grid;
 pub mod welcome;
 
 use std::cell::RefCell;
