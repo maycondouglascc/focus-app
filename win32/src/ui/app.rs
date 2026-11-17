@@ -1033,12 +1033,20 @@ impl Screen for AppShell {
         }
     }
 
-    fn wants_tick(&self) -> bool {
-        self.is_onboarded() && self.section == Section::Calendar && self.calendar.wants_tick()
+    fn wants_tick(&self) -> Option<u32> {
+        if self.is_onboarded() && self.section == Section::Calendar {
+            self.calendar.wants_tick()
+        } else {
+            None
+        }
     }
 
-    fn on_tick(&mut self) -> bool {
-        self.is_onboarded() && self.section == Section::Calendar && self.calendar.handle_tick()
+    fn on_tick(&mut self, tree: &mut Tree) -> crate::ui::screen::TickReply {
+        if self.is_onboarded() && self.section == Section::Calendar {
+            self.calendar.handle_tick(tree)
+        } else {
+            crate::ui::screen::TickReply::default()
+        }
     }
 
     fn wants_autoscroll(&self) -> bool {

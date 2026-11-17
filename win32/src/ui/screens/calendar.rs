@@ -13,7 +13,7 @@ use crate::format::{hm, money, range_label};
 use crate::stats::{earnings_by_currency, entry_ms};
 use crate::time::{add_days, add_days_start, iso_week, start_of_week_with_first};
 use crate::ui::input::KeyEvent;
-use crate::ui::screen::{BuiltScreen, KeyModifiers, PointerReply, Screen, ScreenEnv};
+use crate::ui::screen::{BuiltScreen, KeyModifiers, PointerReply, Screen, ScreenEnv, TickReply};
 use crate::ui::strings;
 use crate::ui::text::{Align, Weight};
 use crate::ui::theme::Palette;
@@ -44,6 +44,7 @@ pub struct CalendarScreen {
     id_empty_new_proj: Option<WidgetId>,
 
     cached_projects: Vec<Project>,
+    last_full_refresh_ms: i64,
     pub new_project_requested: bool,
     #[cfg(test)]
     pub last_opened_activity: Option<super::calendar_layout::ActivitySession>,
@@ -65,6 +66,7 @@ impl CalendarScreen {
             id_mode_ids: Vec::new(),
             id_empty_new_proj: None,
             cached_projects: Vec::new(),
+            last_full_refresh_ms: now_ms,
             new_project_requested: false,
             #[cfg(test)]
             last_opened_activity: None,
@@ -186,6 +188,7 @@ impl CalendarScreen {
                 active_ms,
             )
         };
+        self.last_full_refresh_ms = now_ms;
         self.cached_projects = projects.clone();
         let projects_by_id: HashMap<String, Project> = projects
             .iter()
@@ -620,12 +623,41 @@ impl CalendarScreen {
         changed
     }
 
-    pub fn wants_tick(&self) -> bool {
-        self.timer.is_running(&self.store)
+    pub fn wants_tick(&self) -> Option<u32> {
+        if self.store.borrow().is_demo() {
+            None
+        } else if self.timer.is_running_cached() {
+            Some(1000)
+        } else {
+            Some(30_000)
+        }
     }
 
-    pub fn handle_tick(&mut self) -> bool {
-        !self.store.borrow().is_demo() && self.wants_tick()
+    pub fn handle_tick(&mut self, tree: &mut Tree) -> TickReply {
+        if self.store.borrow().is_demo() {
+            return TickReply::default();
+        }
+        let now_ms = self.store.borrow().now_ms();
+        let elapsed = now_ms - self.last_full_refresh_ms;
+        let running = self.timer.is_running_cached();
+        let refresh_due = if running {
+            !(0..30_000).contains(&elapsed)
+        } else {
+            !(0..25_000).contains(&elapsed)
+        };
+        if refresh_due {
+            return TickReply {
+                repaint: true,
+                rebuild: true,
+            };
+        }
+        if running && self.timer.update_clock_in_tree(tree, now_ms) {
+            return TickReply {
+                repaint: true,
+                rebuild: false,
+            };
+        }
+        TickReply::default()
     }
 }
 
@@ -704,12 +736,12 @@ impl Screen for CalendarScreen {
         self.grid.on_wheel_at(x_dip, y_dip, dy_dip)
     }
 
-    fn wants_tick(&self) -> bool {
+    fn wants_tick(&self) -> Option<u32> {
         self.wants_tick()
     }
 
-    fn on_tick(&mut self) -> bool {
-        self.handle_tick()
+    fn on_tick(&mut self, tree: &mut Tree) -> TickReply {
+        self.handle_tick(tree)
     }
 
     fn wants_autoscroll(&self) -> bool {
@@ -755,7 +787,7 @@ mod tests {
         let mut focus = FocusModel::new();
         let mut host = ScreenHost::mount(Box::new(screen), &env, &mut focus);
         assert_eq!(a11y::validate_tree_names(host.tree()), Ok(()));
-        assert!(host.wants_tick());
+        assert_eq!(host.wants_tick(), None);
 
         // Switch Mix -> Time -> Activity -> Mix.
         for label in [
@@ -1103,5 +1135,258 @@ mod tests {
 
         // And host handling virtual click stays valid.
         assert!(host.on_click(target_sess_wid));
+    }
+
+    #[test]
+    fn calendar_tick_updates_clock_lightweight_at_1s_refreshes_at_30s_and_stays_silent_in_demo() {
+        use std::cell::Cell;
+        use std::collections::HashMap as Map;
+
+        struct TimedDbStore {
+            inner: crate::db::DbStore,
+            now: Rc<Cell<i64>>,
+            entry_queries: Rc<Cell<u32>>,
+        }
+        impl crate::db::Store for TimedDbStore {
+            fn now_ms(&self) -> i64 {
+                self.now.get()
+            }
+            fn is_demo(&self) -> bool {
+                false
+            }
+            fn system_locale(&self) -> &SystemLocale {
+                self.inner.system_locale()
+            }
+            fn list_projects(&self) -> Result<Vec<Project>, String> {
+                self.inner.list_projects()
+            }
+            fn get_project(&self, id: &str) -> Result<Project, String> {
+                self.inner.get_project(id)
+            }
+            fn create_project(
+                &mut self,
+                input: crate::db::ProjectInput,
+            ) -> Result<Project, String> {
+                self.inner.create_project(input)
+            }
+            fn update_project(
+                &mut self,
+                id: &str,
+                patch: crate::db::ProjectPatch,
+            ) -> Result<Project, String> {
+                self.inner.update_project(id, patch)
+            }
+            fn delete_project(&mut self, id: &str) -> Result<(), String> {
+                self.inner.delete_project(id)
+            }
+            fn project_summaries(
+                &self,
+                mf: i64,
+                mt: i64,
+            ) -> Result<Map<String, crate::db::ProjectSummary>, String> {
+                self.inner.project_summaries(mf, mt)
+            }
+            fn project_all_time_stats(
+                &self,
+                id: &str,
+            ) -> Result<crate::db::ProjectAllTimeStats, String> {
+                self.inner.project_all_time_stats(id)
+            }
+            fn list_entries(&self, from: i64, to: i64) -> Result<Vec<TimeEntry>, String> {
+                self.entry_queries.set(self.entry_queries.get() + 1);
+                self.inner.list_entries(from, to)
+            }
+            fn get_entry(&self, id: &str) -> Result<TimeEntry, String> {
+                self.inner.get_entry(id)
+            }
+            fn has_any_entries(&self) -> Result<bool, String> {
+                self.inner.has_any_entries()
+            }
+            fn earliest_entry_start(
+                &self,
+                pid: Option<&str>,
+                np: bool,
+            ) -> Result<Option<i64>, String> {
+                self.inner.earliest_entry_start(pid, np)
+            }
+            fn create_entry(&mut self, input: crate::db::EntryInput) -> Result<TimeEntry, String> {
+                self.inner.create_entry(input)
+            }
+            fn update_entry(
+                &mut self,
+                id: &str,
+                patch: crate::db::EntryPatch,
+            ) -> Result<TimeEntry, String> {
+                self.inner.update_entry(id, patch)
+            }
+            fn delete_entry(&mut self, id: &str) -> Result<(), String> {
+                self.inner.delete_entry(id)
+            }
+            fn running_entry(&self) -> Result<Option<TimeEntry>, String> {
+                self.inner.running_entry()
+            }
+            fn start_timer(
+                &mut self,
+                input: crate::db::TimerStartInput,
+            ) -> Result<TimeEntry, String> {
+                self.inner.create_entry(crate::db::EntryInput {
+                    project_id: input.project_id,
+                    description: input.description,
+                    start: self.now.get(),
+                    end: None,
+                    billable: input.billable,
+                    source: "timer".into(),
+                })
+            }
+            fn stop_timer(&mut self) -> Result<Option<TimeEntry>, String> {
+                if let Some(cur) = self.inner.running_entry()? {
+                    return self
+                        .inner
+                        .update_entry(
+                            &cur.id,
+                            crate::db::EntryPatch {
+                                end: Some(Some(self.now.get().max(cur.start + 1))),
+                                ..Default::default()
+                            },
+                        )
+                        .map(Some);
+                }
+                Ok(None)
+            }
+            fn list_activity(&self, f: i64, t: i64) -> Result<Vec<crate::db::Activity>, String> {
+                self.inner.list_activity(f, t)
+            }
+            fn visit_activity(
+                &self,
+                f: i64,
+                t: i64,
+                func: &mut dyn FnMut(crate::db::Activity),
+            ) -> Result<(), String> {
+                self.inner.visit_activity(f, t, func)
+            }
+            fn active_union_ms(&self, f: i64, t: i64) -> Result<i64, String> {
+                self.inner.active_union_ms(f, t)
+            }
+            fn earliest_activity_start(&self) -> Result<Option<i64>, String> {
+                self.inner.earliest_activity_start()
+            }
+            fn clear_activity(&mut self) -> Result<(), String> {
+                self.inner.clear_activity()
+            }
+            fn get_settings(&self) -> Result<crate::db::Settings, String> {
+                self.inner.get_settings()
+            }
+            fn save_settings(
+                &mut self,
+                p: crate::db::SettingsPatch,
+            ) -> Result<crate::db::Settings, String> {
+                self.inner.save_settings(p)
+            }
+            fn monitor_status(&self) -> crate::db::MonitorStatus {
+                self.inner.monitor_status()
+            }
+        }
+
+        let text = TextSystem::new().expect("dwrite");
+        let palette = Palette::LIGHT;
+        let env = ScreenEnv {
+            width_dip: 1200.0,
+            height_dip: 800.0,
+            hover: None,
+            pressed: None,
+            focused: None,
+            palette: &palette,
+            text: &text,
+        };
+
+        // 1. Demo mode must request no timer ticks at all.
+        let mut demo_store = DemoStore::new(SystemLocale::en_us());
+        let _ = crate::db::Store::start_timer(
+            &mut demo_store,
+            crate::db::TimerStartInput {
+                project_id: None,
+                description: "Demo task".into(),
+                billable: false,
+            },
+        );
+        let demo_screen = CalendarScreen::new(shared_store(Box::new(demo_store)));
+        assert_eq!(demo_screen.wants_tick(), None);
+
+        // 2. Non-demo DB with NO timer running asks for a 30s tick (refreshes now/today).
+        let base = crate::time::from_local(2026, 11, 18, 10, 0, 0, 0);
+        let now = Rc::new(Cell::new(base));
+        let entry_queries = Rc::new(Cell::new(0));
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let store = shared_store(Box::new(TimedDbStore {
+            inner: crate::db::DbStore::new(db, SystemLocale::en_us()),
+            now: Rc::clone(&now),
+            entry_queries: Rc::clone(&entry_queries),
+        }));
+
+        let screen = CalendarScreen::new(Rc::clone(&store));
+        let mut focus = FocusModel::new();
+        let mut host = ScreenHost::mount(Box::new(screen), &env, &mut focus);
+        assert_eq!(host.wants_tick(), Some(30_000));
+        assert_eq!(entry_queries.get(), 1);
+
+        now.set(base + 30_000);
+        assert_eq!(
+            host.on_tick(),
+            TickReply {
+                repaint: true,
+                rebuild: true
+            }
+        );
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        assert_eq!(entry_queries.get(), 2);
+
+        // 3. Starting a timer switches tick to 1000ms; 1s ticks update only clock text (0 SQL queries, no rebuild).
+        store
+            .borrow_mut()
+            .start_timer(crate::db::TimerStartInput {
+                project_id: None,
+                description: "Live".into(),
+                billable: false,
+            })
+            .unwrap();
+        host.mark_dirty();
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        assert_eq!(host.wants_tick(), Some(1000));
+        let queries_after_start = entry_queries.get();
+
+        now.set(base + 35_000); // +5s since timer started at base+30s
+        let r1 = host.on_tick();
+        assert_eq!(
+            r1,
+            TickReply {
+                repaint: true,
+                rebuild: false
+            }
+        );
+        assert_eq!(entry_queries.get(), queries_after_start);
+        assert!(!host.rebuild_if_dirty(&env, &mut focus));
+
+        let clock_id = crate::ui::tree::keyed_widget_id("timer.clock");
+        let clock_text = host
+            .tree()
+            .node_by_id(clock_id)
+            .and_then(|n| host.tree().data(n))
+            .and_then(|d| match &d.leaf {
+                Some(crate::ui::tree::Leaf::StyledText { text, .. }) => Some(text.as_str()),
+                _ => None,
+            });
+        assert_eq!(clock_text, Some("0:00:05"));
+
+        // 4. At +30s with running timer, tick requests full rebuild to move the "now" line and live block.
+        now.set(base + 60_000);
+        assert_eq!(
+            host.on_tick(),
+            TickReply {
+                repaint: true,
+                rebuild: true
+            }
+        );
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        assert_eq!(entry_queries.get(), queries_after_start + 1);
     }
 }

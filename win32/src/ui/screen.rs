@@ -39,6 +39,12 @@ pub struct KeyModifiers {
 
 /// Response returned by screen-level pointer handlers (e.g., WeekGrid drag).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TickReply {
+    pub repaint: bool,
+    pub rebuild: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PointerReply {
     pub handled: bool,
     pub capture: bool,
@@ -96,11 +102,11 @@ pub trait Screen {
         false
     }
     fn sync_drag_tree(&mut self, _tree: &mut Tree) {}
-    fn wants_tick(&self) -> bool {
-        false
+    fn wants_tick(&self) -> Option<u32> {
+        None
     }
-    fn on_tick(&mut self) -> bool {
-        false
+    fn on_tick(&mut self, _tree: &mut Tree) -> TickReply {
+        TickReply::default()
     }
     fn wants_autoscroll(&self) -> bool {
         false
@@ -284,17 +290,16 @@ impl ScreenHost {
         self.screen.sync_drag_tree(&mut self.tree);
     }
 
-    pub fn wants_tick(&self) -> bool {
+    pub fn wants_tick(&self) -> Option<u32> {
         self.screen.wants_tick()
     }
 
-    pub fn on_tick(&mut self) -> bool {
-        if self.screen.on_tick() {
+    pub fn on_tick(&mut self) -> TickReply {
+        let reply = self.screen.on_tick(&mut self.tree);
+        if reply.rebuild {
             self.dirty = true;
-            true
-        } else {
-            false
         }
+        reply
     }
 
     pub fn wants_autoscroll(&self) -> bool {

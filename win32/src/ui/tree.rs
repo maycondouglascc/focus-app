@@ -470,6 +470,14 @@ impl Tree {
         }
     }
 
+    pub fn replace_styled_text(&mut self, node: Node, new_text: String) {
+        if let Some(d) = self.data_mut(node) {
+            if let Some(Leaf::StyledText { ref mut text, .. }) = d.leaf {
+                *text = new_text;
+            }
+        }
+    }
+
     pub fn set_a11y(&mut self, node: Node, a11y: A11yInfo) {
         if let Some(d) = self.data_mut(node) {
             d.a11y = a11y;

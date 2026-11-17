@@ -79,7 +79,7 @@ struct Ui {
     rich_fields: Vec<RichEditField>,
     paint_count: u64,
     screen_capturing: bool,
-    tick_timer_on: bool,
+    tick_timer_ms: Option<u32>,
     autoscroll_timer_on: bool,
     syncing_rich: bool,
 }
@@ -648,7 +648,7 @@ unsafe fn create() -> Option<HWND> {
             rich_fields: Vec::new(),
             paint_count: 0,
             screen_capturing: false,
-            tick_timer_on: false,
+            tick_timer_ms: None,
             autoscroll_timer_on: false,
             syncing_rich: false,
         })
@@ -1359,16 +1359,24 @@ fn sync_rich_focus(ui: &Ui) {
 }
 
 fn sync_timers(ui: &mut Ui, hwnd: HWND, minimized: bool) {
-    let want_tick = !minimized && ui.screen.as_ref().is_some_and(|h| h.wants_tick());
+    let want_tick = if minimized {
+        None
+    } else {
+        ui.screen.as_ref().and_then(|h| h.wants_tick())
+    };
     let want_auto = !minimized && ui.screen.as_ref().is_some_and(|h| h.wants_autoscroll());
     // SAFETY: `hwnd` is owned by this thread.
     unsafe {
-        if want_tick && !ui.tick_timer_on {
-            let _ = SetTimer(Some(hwnd), TIMER_TICK_ID, 1000, None);
-            ui.tick_timer_on = true;
-        } else if !want_tick && ui.tick_timer_on {
-            let _ = KillTimer(Some(hwnd), TIMER_TICK_ID);
-            ui.tick_timer_on = false;
+        if want_tick != ui.tick_timer_ms {
+            match want_tick {
+                Some(ms) => {
+                    let _ = SetTimer(Some(hwnd), TIMER_TICK_ID, ms.max(100), None);
+                }
+                None => {
+                    let _ = KillTimer(Some(hwnd), TIMER_TICK_ID);
+                }
+            }
+            ui.tick_timer_ms = want_tick;
         }
 
         if want_auto && !ui.autoscroll_timer_on {
@@ -1721,8 +1729,11 @@ unsafe extern "system" fn wnd_proc(
                 let mut a11y = false;
                 if id == TIMER_TICK_ID {
                     if let Some(h) = u.screen.as_mut() {
-                        if h.on_tick() {
+                        let reply = h.on_tick();
+                        if reply.rebuild {
                             a11y = rebuild_screen_if_dirty(u, hwnd);
+                            repaint = true;
+                        } else if reply.repaint {
                             repaint = true;
                         }
                     }
