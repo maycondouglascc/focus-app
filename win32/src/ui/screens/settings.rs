@@ -108,7 +108,11 @@ impl SettingsScreen {
                 if is_24h {
                     format!("{h:02}:00")
                 } else {
-                    let suffix = if h >= 12 { "PM" } else { "AM" };
+                    let suffix = if h >= 12 {
+                        strings::SETTINGS_TIME_PM
+                    } else {
+                        strings::SETTINGS_TIME_AM
+                    };
                     let h12 = match h % 12 {
                         0 => 12,
                         v => v,
@@ -337,7 +341,10 @@ impl SettingsScreen {
             env,
         );
         build_hairline(tree, mon_card, p);
-        let idle_labels: Vec<String> = IDLE_MINUTES.iter().map(|m| format!("{m} min")).collect();
+        let idle_labels: Vec<String> = IDLE_MINUTES
+            .iter()
+            .map(|m| format!("{m} {}", strings::SETTINGS_IDLE_UNIT))
+            .collect();
         let idle_refs: Vec<&str> = idle_labels.iter().map(String::as_str).collect();
         let idle_idx = IDLE_MINUTES.iter().position(|&m| m == s.idle_minutes);
         Self::build_select_row(
@@ -628,7 +635,10 @@ impl SettingsScreen {
             return true;
         }
         if Some(id) == self.sel_idle.trigger_id {
-            let labels: Vec<String> = IDLE_MINUTES.iter().map(|m| format!("{m} min")).collect();
+            let labels: Vec<String> = IDLE_MINUTES
+                .iter()
+                .map(|m| format!("{m} {}", strings::SETTINGS_IDLE_UNIT))
+                .collect();
             let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
             let idx = IDLE_MINUTES.iter().position(|&m| m == s.idle_minutes);
             self.sel_idle.open(&refs, idx, palette);

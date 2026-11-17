@@ -501,7 +501,7 @@ impl AppShell {
             tree.set_focusable(empty_row, true);
             tree.set_a11y(
                 empty_row,
-                interactive_a11y(A11yRole::Button, "Create a project", false),
+                interactive_a11y(A11yRole::Button, strings::SIDEBAR_CREATE_PROJECT, false),
             );
             tree.add_leaf(
                 empty_row,
@@ -515,7 +515,7 @@ impl AppShell {
             add_label(
                 tree,
                 empty_row,
-                "Create a project",
+                strings::SIDEBAR_CREATE_PROJECT,
                 12.0,
                 Weight::Regular,
                 Align::Left,

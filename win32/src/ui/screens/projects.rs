@@ -159,11 +159,11 @@ impl ProjectDialogState {
     fn try_save(&mut self, store: &SharedStore) -> ProjectDialogOutcome {
         let clean_name = self.name.trim();
         if clean_name.is_empty() {
-            self.error = Some("Give the project a name.".into());
+            self.error = Some(strings::PROJECT_ERR_NO_NAME.into());
             return ProjectDialogOutcome::None;
         }
         let Some(rate_val) = self.parse_rate() else {
-            self.error = Some("Hourly rate must be a valid non-negative number.".into());
+            self.error = Some(strings::PROJECT_ERR_BAD_RATE.into());
             return ProjectDialogOutcome::None;
         };
 
@@ -228,7 +228,7 @@ impl ProjectDialogState {
             &TextFieldProps {
                 key: KEY_PROJ_NAME,
                 aria_label: strings::PROJECT_FIELD_NAME,
-                placeholder: "Website redesign",
+                placeholder: strings::PROJECT_FIELD_NAME_HINT,
                 value: &self.name,
                 multiline: false,
                 min_height: 32.0,
@@ -315,7 +315,7 @@ impl ProjectDialogState {
             &TextFieldProps {
                 key: KEY_PROJ_RATE,
                 aria_label: strings::PROJECT_FIELD_RATE,
-                placeholder: "0 = non-billable",
+                placeholder: strings::PROJECT_FIELD_RATE_HINT,
                 value: &self.rate,
                 multiline: false,
                 min_height: 32.0,
@@ -836,9 +836,9 @@ impl ProjectsScreen {
         let headline = if visible.is_empty() {
             strings::PROJECTS_TITLE.to_string()
         } else if visible.len() == 1 {
-            "1 project".into()
+            strings::PROJECTS_COUNT_ONE.into()
         } else {
-            format!("{} projects", visible.len())
+            format!("{} {}", visible.len(), strings::PROJECTS_COUNT_MANY_SUFFIX)
         };
         add_label(
             tree,
@@ -903,14 +903,14 @@ impl ProjectsScreen {
                     sortable: true,
                 },
                 TableColumn {
-                    label: strings::PROJECTS_STATUS_ACTIVE, // label dynamically unused if col is Earned:
+                    label: strings::PROJECTS_COL_EARNED,
                     width: Some(110.0),
                     align: Align::Right,
                     sortable: true,
                 },
             ];
             let mut columns = cols;
-            columns[4].label = "Earned";
+            columns[4].label = strings::PROJECTS_COL_EARNED;
 
             // Prepare formatted cell strings cleanly so borrows outlive `TableRow`.
             let formatted: Vec<[String; 5]> = visible
@@ -931,7 +931,7 @@ impl ProjectsScreen {
                     let rate_cell = if proj.rate > 0.0 {
                         format!("{}/h", format::money(proj.rate, &proj.currency))
                     } else {
-                        "Internal".into()
+                        strings::PROJECTS_INTERNAL.into()
                     };
                     let month_cell = if sum.month_ms > 0 {
                         format::hm(sum.month_ms)
@@ -1012,7 +1012,11 @@ impl ProjectsScreen {
             let lbl = if self.show_archived {
                 strings::PROJECTS_HIDE_ARCHIVED.to_string()
             } else {
-                format!("Show {archived_count} archived")
+                format!(
+                    "{} {archived_count} {}",
+                    strings::PROJECTS_ARCHIVED_SHOW_PREFIX,
+                    strings::PROJECTS_ARCHIVED_SUFFIX
+                )
             };
             let mut btn = ButtonProps::new(&lbl);
             btn.variant = ButtonVariant::Ghost;

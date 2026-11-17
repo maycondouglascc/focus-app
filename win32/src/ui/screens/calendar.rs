@@ -423,7 +423,7 @@ impl CalendarScreen {
                 p.muted,
             );
             if projects.is_empty() {
-                let mut np = ButtonProps::new("Create a project");
+                let mut np = ButtonProps::new(strings::SIDEBAR_CREATE_PROJECT);
                 np.icon = Some(glyph::ADD);
                 np.size = ButtonSize::Small;
                 np.interact =

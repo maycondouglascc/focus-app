@@ -24,6 +24,7 @@ pub const SIDEBAR_THIS_WEEK: &str = "This week";
 pub const SIDEBAR_DEMO_BADGE: &str = "Demo data";
 pub const SIDEBAR_TIMER_LIVE: &str = "Timer running";
 pub const SIDEBAR_NAV_LABEL: &str = "Navigation";
+pub const SIDEBAR_CREATE_PROJECT: &str = "Create a project";
 
 // ── Period navigation ────────────────────────────────────────────────────
 
@@ -108,6 +109,9 @@ pub const SETTINGS_FIRST_DAY_SUNDAY: &str = "Sunday";
 pub const SETTINGS_TIME_SYSTEM: &str = "System default";
 pub const SETTINGS_TIME_24H: &str = "24-hour (14:30)";
 pub const SETTINGS_TIME_12H: &str = "12-hour (2:30 PM)";
+pub const SETTINGS_TIME_AM: &str = "AM";
+pub const SETTINGS_TIME_PM: &str = "PM";
+pub const SETTINGS_IDLE_UNIT: &str = "min";
 
 pub const SETTINGS_CSV_LABEL: &str = "Standard CSV by default";
 pub const SETTINGS_CSV_HINT: &str =
@@ -135,21 +139,31 @@ pub const PROJECTS_COL_CLIENT: &str = "Client";
 pub const PROJECTS_COL_RATE: &str = "Rate";
 pub const PROJECTS_COL_MONTH: &str = "This month";
 pub const PROJECTS_COL_TOTAL: &str = "Total";
+pub const PROJECTS_COL_EARNED: &str = "Earned";
 pub const PROJECTS_COL_STATUS: &str = "Status";
 pub const PROJECTS_STATUS_ACTIVE: &str = "Active";
 pub const PROJECTS_STATUS_ARCHIVED: &str = "Archived";
+pub const PROJECTS_INTERNAL: &str = "Internal";
+pub const PROJECTS_COUNT_ONE: &str = "1 project";
+pub const PROJECTS_COUNT_MANY_SUFFIX: &str = "projects";
+pub const PROJECTS_ARCHIVED_SHOW_PREFIX: &str = "Show";
+pub const PROJECTS_ARCHIVED_SUFFIX: &str = "archived";
 pub const PROJECTS_NON_BILLABLE: &str = "Non-billable";
 pub const PROJECTS_NO_PROJECT: &str = "No project";
 
 pub const PROJECT_DLG_NEW: &str = "New project";
 pub const PROJECT_DLG_EDIT: &str = "Edit project";
 pub const PROJECT_FIELD_NAME: &str = "Project name";
+pub const PROJECT_FIELD_NAME_HINT: &str = "Website redesign";
 pub const PROJECT_FIELD_CLIENT: &str = "Client";
 pub const PROJECT_FIELD_CLIENT_HINT: &str = "Client (optional)";
 pub const PROJECT_FIELD_RATE: &str = "Hourly rate";
+pub const PROJECT_FIELD_RATE_HINT: &str = "0 = internal";
 pub const PROJECT_FIELD_CURRENCY: &str = "Currency";
 pub const PROJECT_FIELD_COLOR: &str = "Color";
 pub const PROJECT_FIELD_BILLABLE: &str = "Billable by default";
+pub const PROJECT_ERR_NO_NAME: &str = "Give the project a name.";
+pub const PROJECT_ERR_BAD_RATE: &str = "Hourly rate must be a valid non-negative number.";
 pub const PROJECT_BTN_SAVE: &str = "Save";
 pub const PROJECT_BTN_CREATE: &str = "Create project";
 pub const PROJECT_BTN_ARCHIVE: &str = "Archive";
