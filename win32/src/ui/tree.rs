@@ -457,11 +457,25 @@ impl Tree {
                         let max_w = match (*wrap, known.width, avail.width) {
                             (Wrap::Word, Some(w), _) => w,
                             (Wrap::Word, None, AvailableSpace::Definite(w)) => w,
-                            (Wrap::Word, None, AvailableSpace::MaxContent) => f32::MAX / 4.0,
-                            _ => f32::MAX / 4.0,
+                            _ => 65_536.0,
+                        };
+                        // Intrinsic width of a non-wrapped line is alignment-independent;
+                        // measuring with `Align::Left` avoids DirectWrite center/right offset blowup.
+                        let measure_align = if *wrap == Wrap::NoWrap {
+                            Align::Left
+                        } else {
+                            *align
                         };
                         let (mw, mh) = text
-                            .measure_styled(TextFont::Ui, t, *size, *weight, *align, *wrap, max_w)
+                            .measure_styled(
+                                TextFont::Ui,
+                                t,
+                                *size,
+                                *weight,
+                                measure_align,
+                                *wrap,
+                                max_w,
+                            )
                             .unwrap_or((0.0, 0.0));
                         Size {
                             width: known.width.unwrap_or(mw),
@@ -475,7 +489,10 @@ impl Tree {
                             height: known.height.unwrap_or(scaled),
                         }
                     }
-                    Leaf::Canvas(_) | Leaf::RichTextSlot | Leaf::Box => Size::ZERO,
+                    Leaf::Canvas(_) | Leaf::RichTextSlot | Leaf::Box => Size {
+                        width: known.width.unwrap_or(0.0),
+                        height: known.height.unwrap_or(0.0),
+                    },
                 }
             },
         );

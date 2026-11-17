@@ -45,6 +45,7 @@ use super::render::{reset_shared, DrawError, FrameOpts, Hover, Renderer};
 use super::strings;
 use super::theme::Palette;
 use super::tree::Tree;
+use super::widgets::text_field::{RichEditField, WM_RICHEDIT_BLUR, WM_RICHEDIT_FOCUS};
 
 use accesskit::Action;
 use accesskit_windows::Adapter;
@@ -67,6 +68,7 @@ struct Ui {
     pointer: PointerState,
     a11y_queue: A11yActionQueue,
     a11y: Adapter,
+    rich_fields: Vec<RichEditField>,
     paint_count: u64,
 }
 
@@ -80,6 +82,11 @@ fn with_ui<R>(f: impl FnOnce(&mut Ui) -> R) -> Option<R> {
 
 fn current() -> Option<HWND> {
     UI.with(|u| u.try_borrow().ok().and_then(|g| g.as_ref().map(|u| u.hwnd)))
+}
+
+#[allow(dead_code)] // used by Select popups, RichEdit screens, and tests
+pub fn hwnd() -> Option<HWND> {
+    current()
 }
 
 pub fn is_open() -> bool {
@@ -206,6 +213,7 @@ unsafe fn create() -> Option<HWND> {
             pointer: PointerState::default(),
             a11y_queue,
             a11y,
+            rich_fields: Vec::new(),
             paint_count: 0,
         })
     });
@@ -554,8 +562,22 @@ unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
     handled
 }
 
+fn sync_rich_fields(ui: &Ui) {
+    let Some(tree) = ui.tree.as_ref() else {
+        return;
+    };
+    let slots = tree.rich_text_slots();
+    for field in &ui.rich_fields {
+        if let Some((_, rect, hidden)) = slots.iter().find(|(id, _, _)| *id == field.slot_id()) {
+            field.sync_bounds(*rect, *hidden);
+        }
+    }
+}
+
 unsafe fn on_size(hwnd: HWND) {
     let (w, h) = client_size(hwnd);
+    let dpi = GetDpiForWindow(hwnd);
+    let scale = frame::scale(dpi);
     with_ui(|u| {
         if let Some(r) = u.renderer.as_mut() {
             match r.resize(w as u32, h as u32) {
@@ -567,6 +589,10 @@ unsafe fn on_size(hwnd: HWND) {
                 }
             }
         }
+        if let (Some(tree), Some(r)) = (u.tree.as_mut(), u.renderer.as_ref()) {
+            tree.layout(w as f32 / scale, h as f32 / scale, r.text());
+        }
+        sync_rich_fields(u);
     });
     sync_a11y(hwnd);
     let _ = InvalidateRect(Some(hwnd), None, false);
@@ -632,6 +658,7 @@ unsafe fn on_paint(hwnd: HWND) {
 
 unsafe fn on_system_prefs_changed(hwnd: HWND) {
     let new_prefs = SystemPrefs::query();
+    let dpi = GetDpiForWindow(hwnd);
     let changed = with_ui(|u| {
         let mica = prefs::apply_mica(hwnd, new_prefs.high_contrast);
         let palette = Palette::for_system(new_prefs.high_contrast);
@@ -644,10 +671,14 @@ unsafe fn on_system_prefs_changed(hwnd: HWND) {
         u.prefs = new_prefs;
         u.mica = mica;
         u.palette = palette;
+        for field in &mut u.rich_fields {
+            field.sync_theme(&palette, dpi, new_prefs.text_scale);
+        }
         changed
     })
     .unwrap_or(false);
     if changed {
+        sync_a11y(hwnd);
         let _ = InvalidateRect(Some(hwnd), None, false);
     }
 }
@@ -782,6 +813,33 @@ unsafe extern "system" fn wnd_proc(
         }
         m if m == WM_A11Y_ACTION => {
             on_a11y_action_msg(hwnd);
+            return LRESULT(0);
+        }
+        m if m == WM_RICHEDIT_FOCUS || m == WM_RICHEDIT_BLUR => {
+            let child = HWND(wparam.0 as *mut core::ffi::c_void);
+            let focused_slot = with_ui(|u| {
+                u.rich_fields
+                    .iter()
+                    .find(|f| f.hwnd() == child)
+                    .map(|f| f.slot_id())
+            })
+            .flatten();
+            if let Some(slot_id) = focused_slot {
+                let changed = with_ui(|u| {
+                    if m == WM_RICHEDIT_FOCUS {
+                        u.focus.focus_pointer(slot_id)
+                    } else if u.focus.focused() == Some(slot_id) {
+                        u.focus.clear_focus()
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
+                if changed {
+                    sync_a11y(hwnd);
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+            }
             return LRESULT(0);
         }
         WM_PAINT => {

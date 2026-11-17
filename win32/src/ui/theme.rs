@@ -34,6 +34,15 @@ pub fn bgr(colorref: u32) -> Color {
     )
 }
 
+/// Converts an opaque `Color` into a Win32 `COLORREF` (`0x00BBGGRR`).
+#[allow(dead_code)] // used by native RichEdit child control tinting
+pub fn to_colorref(c: Color) -> u32 {
+    let r = (c.0.clamp(0.0, 1.0) * 255.0).round() as u32;
+    let g = (c.1.clamp(0.0, 1.0) * 255.0).round() as u32;
+    let b = (c.2.clamp(0.0, 1.0) * 255.0).round() as u32;
+    r | (g << 8) | (b << 16)
+}
+
 #[allow(dead_code)] // used by charts and tinted controls in F2/F3
 pub fn mix(fg: Color, bg: Color, t: f32) -> Color {
     let k = t.clamp(0.0, 1.0);

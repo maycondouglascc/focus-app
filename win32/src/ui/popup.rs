@@ -168,8 +168,22 @@ pub enum PopupEvent {
     Closed,
 }
 
+/// Outcome returned by [`PopupDelegate::on_event`] so popups never close reentrantly
+/// while `POPUP` is mutably borrowed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PopupOutcome {
+    pub handled: bool,
+    pub dirty: bool,
+    pub close: bool,
+}
+
 pub trait PopupDelegate {
-    fn on_event(&mut self, event: PopupEvent, tree: &mut Tree, focus: &mut FocusModel) -> bool;
+    fn on_event(
+        &mut self,
+        event: PopupEvent,
+        tree: &mut Tree,
+        focus: &mut FocusModel,
+    ) -> PopupOutcome;
 }
 
 struct ActivePopup {
@@ -492,25 +506,32 @@ unsafe fn on_pointer_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
             let Some((pid, _, _, x, y)) = query_pointer(hwnd, wparam) else {
                 return false;
             };
-            let (release_capture, clicked, visual_changed) = with_popup(|p| {
+            let (release_capture, clicked, dirty, should_close) = with_popup(|p| {
                 let hit = p.tree.hit_test(x, y);
                 let out = p.pointer.on_up(pid, PointerButton::Primary, hit, x, y);
                 let mut dirty = out.visual_changed;
+                let mut should_close = false;
                 if let Some(id) = out.clicked {
-                    dirty |= p
-                        .delegate
-                        .on_event(PopupEvent::Click(id), &mut p.tree, &mut p.focus);
+                    let ev_out =
+                        p.delegate
+                            .on_event(PopupEvent::Click(id), &mut p.tree, &mut p.focus);
+                    dirty |= ev_out.dirty;
+                    should_close |= ev_out.close;
                 }
-                (out.release_capture, out.clicked, dirty)
+                (out.release_capture, out.clicked, dirty, should_close)
             })
-            .unwrap_or((false, None, false));
+            .unwrap_or((false, None, false, false));
             if release_capture {
                 let _ = ReleaseCapture();
+            }
+            if should_close {
+                close();
+                return true;
             }
             if clicked.is_some() {
                 sync_a11y(hwnd);
             }
-            if visual_changed {
+            if dirty {
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             true
@@ -587,7 +608,7 @@ unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
         close();
         return true;
     }
-    let (handled, focus_changed, dirty) = with_popup(|p| match ev.key {
+    let (handled, focus_changed, dirty, should_close) = with_popup(|p| match ev.key {
         KeyCode::Tab if !ev.ctrl && !ev.alt => {
             let prev = p.focus.focused();
             let prev_vis = p.focus.is_focus_visible();
@@ -596,18 +617,23 @@ unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
                 true,
                 next != prev,
                 next != prev || p.focus.is_focus_visible() != prev_vis,
+                false,
             )
         }
         _ => {
             let prev = p.focus.focused();
-            let handled = p
+            let out = p
                 .delegate
                 .on_event(PopupEvent::Key(ev), &mut p.tree, &mut p.focus);
-            (handled, p.focus.focused() != prev, handled)
+            (out.handled, p.focus.focused() != prev, out.dirty, out.close)
         }
     })
-    .unwrap_or((false, false, false));
+    .unwrap_or((false, false, false, false));
 
+    if should_close {
+        close();
+        return true;
+    }
     if focus_changed {
         sync_a11y(hwnd);
     }
@@ -813,23 +839,32 @@ unsafe extern "system" fn popup_wnd_proc(
                         .and_then(|g| g.as_ref().map(|a| a.a11y_queue.drain()))
                 })
                 .unwrap_or_default();
-            let mut dirty = false;
-            with_popup(|p| {
+            let (dirty, should_close) = with_popup(|p| {
+                let mut dirty = false;
+                let mut should_close = false;
                 for req in requests {
                     let id = a11y::widget_id(req.target_node);
                     match req.action {
                         Action::Focus => dirty |= p.focus.focus_keyboard(id),
                         Action::Click => {
-                            dirty |= p.delegate.on_event(
+                            let out = p.delegate.on_event(
                                 PopupEvent::Click(id),
                                 &mut p.tree,
                                 &mut p.focus,
                             );
+                            dirty |= out.dirty;
+                            should_close |= out.close;
                         }
                         _ => {}
                     }
                 }
-            });
+                (dirty, should_close)
+            })
+            .unwrap_or((false, false));
+            if should_close {
+                close();
+                return LRESULT(0);
+            }
             if dirty {
                 sync_a11y(hwnd);
                 let _ = InvalidateRect(Some(hwnd), None, false);
@@ -881,8 +916,8 @@ mod tests {
             _event: PopupEvent,
             _tree: &mut Tree,
             _focus: &mut FocusModel,
-        ) -> bool {
-            false
+        ) -> PopupOutcome {
+            PopupOutcome::default()
         }
     }
 

@@ -1,0 +1,117 @@
+//! Native Focus UI widgets built directly on `Tree`, `Palette`, `FocusModel`,
+//! `PopupWindow`, and `AccessKit`. Strictly scoped to the controls needed by F3
+//! screens (see `win32/docs/decisions/widgets.md`).
+
+#[allow(dead_code)] // widget modules wired progressively across F2/F3
+pub mod button;
+#[allow(dead_code)]
+pub mod segmented;
+#[allow(dead_code)]
+pub mod select;
+#[allow(dead_code)]
+pub mod text_field;
+#[allow(dead_code)]
+pub mod toggle;
+
+use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Graphics::Gdi::ClientToScreen;
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
+
+use super::frame;
+use super::popup::ScreenRect;
+use super::text::{Align, Weight, Wrap};
+use super::theme::Color;
+use super::tree::{A11yInfo, A11yRole, Leaf, Node, Rect, Tree, WidgetId};
+
+/// Segoe MDL2 Assets / Fluent Icons codepoints used by chrome and controls.
+#[allow(dead_code)]
+pub mod glyph {
+    pub const CHEVRON_DOWN: char = '\u{E70D}';
+    pub const CHEVRON_UP: char = '\u{E70E}';
+    pub const CHECK: char = '\u{E73E}';
+    pub const CLOSE: char = '\u{E8BB}';
+}
+
+/// Visual interaction flags computed from pointer state for one control instance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Interact {
+    pub hovered: bool,
+    pub pressed: bool,
+    pub disabled: bool,
+}
+
+impl Interact {
+    pub fn from_state(
+        id: Option<WidgetId>,
+        hover: Option<WidgetId>,
+        pressed: Option<WidgetId>,
+        disabled: bool,
+    ) -> Self {
+        Self {
+            hovered: !disabled && id.is_some() && id == hover,
+            pressed: !disabled && id.is_some() && id == pressed,
+            disabled,
+        }
+    }
+}
+
+/// Shared accessible-info initializer guaranteeing `requires_name = true`.
+pub fn interactive_a11y(role: A11yRole, name: impl Into<String>, disabled: bool) -> A11yInfo {
+    A11yInfo {
+        role,
+        name: name.into(),
+        disabled,
+        clickable: true,
+        requires_name: true,
+        ..Default::default()
+    }
+}
+
+/// Convenience helper for a non-wrapping single-line styled label inside a control.
+pub fn add_label(
+    tree: &mut Tree,
+    parent: Node,
+    text: impl Into<String>,
+    size: f32,
+    weight: Weight,
+    align: Align,
+    color: Color,
+) -> Node {
+    tree.add_leaf(
+        parent,
+        taffy::Style::default(),
+        Leaf::StyledText {
+            text: text.into(),
+            size,
+            weight,
+            align,
+            wrap: Wrap::NoWrap,
+            color,
+        },
+    )
+}
+
+/// Converts a client DIP rectangle inside `hwnd` into virtual-screen physical pixels.
+pub fn client_rect_to_screen(hwnd: HWND, rect_dip: Rect) -> ScreenRect {
+    // SAFETY: `GetDpiForWindow` and `ClientToScreen` are safe for any valid HWND.
+    let scale = unsafe { frame::scale(GetDpiForWindow(hwnd)) };
+    let mut tl = POINT {
+        x: (rect_dip.x * scale).round() as i32,
+        y: (rect_dip.y * scale).round() as i32,
+    };
+    let mut br = POINT {
+        x: ((rect_dip.x + rect_dip.w) * scale).round() as i32,
+        y: ((rect_dip.y + rect_dip.h) * scale).round() as i32,
+    };
+    // SAFETY: `tl` and `br` are local mutable `POINT` values; failure leaves original coords.
+    unsafe {
+        let _ = ClientToScreen(hwnd, &mut tl);
+        let _ = ClientToScreen(hwnd, &mut br);
+    }
+    ScreenRect {
+        left: tl.x,
+        top: tl.y,
+        right: br.x,
+        bottom: br.y,
+    }
+}

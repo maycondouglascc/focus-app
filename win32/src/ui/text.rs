@@ -157,7 +157,7 @@ impl TextSystem {
             weight,
             Align::Left,
             Wrap::NoWrap,
-            f32::MAX / 4.0,
+            65_536.0,
         )
     }
 
@@ -179,8 +179,8 @@ impl TextSystem {
             let layout = self.factory.CreateTextLayout(
                 &wide,
                 &format,
-                max_width.max(1.0),
-                f32::MAX / 4.0,
+                max_width.clamp(1.0, 1_000_000.0),
+                1_000_000.0,
             )?;
             let mut m = DWRITE_TEXT_METRICS::default();
             layout.GetMetrics(&mut m)?;

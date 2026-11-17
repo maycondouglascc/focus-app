@@ -14,6 +14,7 @@ pub mod strings;
 pub mod text;
 pub mod theme;
 pub mod tree;
+pub mod widgets;
 pub mod window;
 
 use windows::Win32::UI::HiDpi::{
