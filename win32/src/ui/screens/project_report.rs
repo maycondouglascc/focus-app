@@ -124,6 +124,59 @@ impl ProjectReportScreen {
         }
     }
 
+    #[allow(clippy::type_complexity)]
+    fn accumulate_detail(
+        map: &mut HashMap<(String, String), (String, String, i64, crate::ui::theme::Color)>,
+        a: &Activity,
+        app_name: &str,
+        dur_ms: i64,
+        filtered_by_app: bool,
+        claude_by: ClaudeGrouping,
+    ) {
+        let is_claude = a.kind == "claude";
+        let label = if is_claude {
+            match claude_by {
+                ClaudeGrouping::Project => {
+                    if a.context.is_empty() {
+                        strings::PROJECTS_NO_PROJECT.to_string()
+                    } else {
+                        a.context.clone()
+                    }
+                }
+                ClaudeGrouping::Session => {
+                    if a.detail.is_empty() {
+                        "Untitled session".into()
+                    } else {
+                        a.detail.clone()
+                    }
+                }
+            }
+        } else if !a.detail.is_empty() {
+            a.detail.clone()
+        } else if filtered_by_app {
+            "No window title".into()
+        } else {
+            a.app.clone()
+        };
+        let sub = if is_claude {
+            match claude_by {
+                ClaudeGrouping::Project => String::new(),
+                ClaudeGrouping::Session => a.context.clone(),
+            }
+        } else if filtered_by_app {
+            a.context.clone()
+        } else if !a.detail.is_empty() {
+            a.app.clone()
+        } else {
+            String::new()
+        };
+        let c = app_color(app_name);
+        let entry = map
+            .entry((label.clone(), sub.clone()))
+            .or_insert((label, sub, 0, c));
+        entry.2 += dur_ms;
+    }
+
     pub fn build_content(
         &mut self,
         tree: &mut Tree,
@@ -176,9 +229,13 @@ impl ProjectReportScreen {
                 (String, String),
                 (String, String, i64, crate::ui::theme::Color),
             > = HashMap::new();
+            let mut fallback_detail_totals: HashMap<
+                (String, String),
+                (String, String, i64, crate::ui::theme::Color),
+            > = HashMap::new();
+            let sel_filter = self.selected_app.clone();
 
             if !iv.is_empty() {
-                let sel_filter = self.selected_app.clone();
                 let claude_by = self.claude_by;
                 let _ = st.visit_activity(period.from, period.to, &mut |a| {
                     // Find overlapping entry intervals via partition point.
@@ -193,59 +250,48 @@ impl ProjectReportScreen {
                         }
                         let cs = a.start.max(s);
                         let ce = a.end.min(e);
+                        let dur_ms = ce - cs;
                         let name = Self::app_name_of(&a).to_string();
-                        *app_totals.entry(name.clone()).or_insert(0) += ce - cs;
+                        *app_totals.entry(name.clone()).or_insert(0) += dur_ms;
                         if a.kind == "app" {
                             covered_iv.push((cs, ce));
                         }
 
-                        let include_detail = match sel_filter.as_deref() {
-                            Some(target) => name == target,
-                            None => a.kind != "claude",
-                        };
-                        if include_detail {
-                            let is_claude = a.kind == "claude";
-                            let label = if is_claude {
-                                match claude_by {
-                                    ClaudeGrouping::Project => {
-                                        if a.context.is_empty() {
-                                            strings::PROJECTS_NO_PROJECT.to_string()
-                                        } else {
-                                            a.context.clone()
-                                        }
-                                    }
-                                    ClaudeGrouping::Session => {
-                                        if a.detail.is_empty() {
-                                            "Untitled session".into()
-                                        } else {
-                                            a.detail.clone()
-                                        }
-                                    }
+                        match sel_filter.as_deref() {
+                            Some(target) => {
+                                if name == target {
+                                    Self::accumulate_detail(
+                                        &mut detail_totals,
+                                        &a,
+                                        &name,
+                                        dur_ms,
+                                        true,
+                                        claude_by,
+                                    );
                                 }
-                            } else if !a.detail.is_empty() {
-                                a.detail.clone()
-                            } else if sel_filter.is_some() {
-                                "No window title".into()
-                            } else {
-                                a.app.clone()
-                            };
-                            let sub = if is_claude {
-                                match claude_by {
-                                    ClaudeGrouping::Project => String::new(),
-                                    ClaudeGrouping::Session => a.context.clone(),
+                                if a.kind != "claude" {
+                                    Self::accumulate_detail(
+                                        &mut fallback_detail_totals,
+                                        &a,
+                                        &name,
+                                        dur_ms,
+                                        false,
+                                        claude_by,
+                                    );
                                 }
-                            } else if sel_filter.is_some() {
-                                a.context.clone()
-                            } else if !a.detail.is_empty() {
-                                a.app.clone()
-                            } else {
-                                String::new()
-                            };
-                            let c = app_color(&name);
-                            let entry = detail_totals
-                                .entry((label.clone(), sub.clone()))
-                                .or_insert((label, sub, 0, c));
-                            entry.2 += ce - cs;
+                            }
+                            None => {
+                                if a.kind != "claude" {
+                                    Self::accumulate_detail(
+                                        &mut detail_totals,
+                                        &a,
+                                        &name,
+                                        dur_ms,
+                                        false,
+                                        claude_by,
+                                    );
+                                }
+                            }
                         }
                     }
                 });
@@ -256,6 +302,16 @@ impl ProjectReportScreen {
                 .filter(|(_, ms)| *ms >= 30_000)
                 .collect();
             ranked_apps.sort_by_key(|a| std::cmp::Reverse(a.1));
+
+            let selection_valid = sel_filter
+                .as_deref()
+                .is_some_and(|sel| ranked_apps.iter().any(|(name, _)| name == sel));
+            let chosen_details = if sel_filter.is_some() && !selection_valid {
+                self.selected_app = None;
+                fallback_detail_totals
+            } else {
+                detail_totals
+            };
 
             covered_iv.sort_unstable_by_key(|&(s, _)| s);
             let mut covered_ms = 0i64;
@@ -275,7 +331,7 @@ impl ProjectReportScreen {
             }
 
             let mut detail_rows: Vec<(String, String, i64, crate::ui::theme::Color)> =
-                detail_totals
+                chosen_details
                     .into_values()
                     .filter(|d| d.2 >= 30_000)
                     .collect();
@@ -1107,5 +1163,55 @@ mod tests {
         assert!(host.on_click(earn_btn));
         assert!(host.rebuild_if_dirty(&env, &mut focus));
         assert_eq!(a11y::validate_tree_names(host.tree()), Ok(()));
+    }
+
+    #[test]
+    fn selected_app_absent_in_period_resets_to_none_and_renders_default_details() {
+        let text = TextSystem::new().expect("dwrite");
+        let palette = Palette::LIGHT;
+        let env = ScreenEnv {
+            width_dip: 1120.0,
+            height_dip: 760.0,
+            hover: None,
+            pressed: None,
+            focused: None,
+            palette: &palette,
+            text: &text,
+        };
+        let store = shared_store(Box::new(DemoStore::new(SystemLocale::en_us())));
+        let projects = store.borrow().list_projects().unwrap();
+        let pid = projects[0].id.clone();
+
+        let mut screen = ProjectReportScreen::new(Rc::clone(&store), pid);
+        screen.selected_app = Some("NonexistentAppInThisPeriod".into());
+        let mut focus = FocusModel::new();
+        let host = ScreenHost::mount(Box::new(screen), &env, &mut focus);
+
+        // Absent selected_app must fall back to "Top windows & files" rather than pinning
+        // "In NonexistentAppInThisPeriod" with empty details.
+        let has_default_title = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .any(|d| match &d.leaf {
+                Some(crate::ui::tree::Leaf::StyledText { text, .. }) => {
+                    text == strings::PROJ_REP_FILES
+                }
+                _ => false,
+            });
+        let has_stale_title = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .any(|d| match &d.leaf {
+                Some(crate::ui::tree::Leaf::StyledText { text, .. }) => {
+                    text.contains("NonexistentAppInThisPeriod")
+                }
+                _ => false,
+            });
+        assert!(has_default_title);
+        assert!(!has_stale_title);
     }
 }
