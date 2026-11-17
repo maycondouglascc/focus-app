@@ -793,6 +793,30 @@ impl Renderer {
     }
 }
 
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        // SAFETY: `self` owns these live COM interfaces; releasing targets and
+        // flushing device state prevents D2D/D3D11/DComp deferred queues from
+        // retaining glyph-atlas or staging allocations across window closes.
+        unsafe {
+            self.ctx.SetTarget(None);
+            if let Ok(d2d) = self.ctx.GetDevice() {
+                d2d.ClearResources(0);
+            }
+            let _ = self._visual.SetContent(None);
+            let _ = self._target.SetRoot(None);
+            let _ = self.gfx.dcomp.Commit();
+            let _ = self.gfx.dcomp.WaitForCommitCompletion();
+            if let Ok(d3d) = self.swap.GetDevice::<ID3D11Device>() {
+                if let Ok(dc) = d3d.GetImmediateContext() {
+                    dc.ClearState();
+                    dc.Flush();
+                }
+            }
+        }
+    }
+}
+
 fn d2d_rect(r: Rect) -> D2D_RECT_F {
     D2D_RECT_F {
         left: r.x,
