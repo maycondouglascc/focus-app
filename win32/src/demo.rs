@@ -229,10 +229,15 @@ impl DemoStore {
                     activity: &mut Vec<Activity>,
                     from: i64,
                     to: i64,
-                    wins: &[(&str, &str, &str, &str)]| {
+                    wins: &[(&str, &str, &str, &str)],
+                    coarse: bool| {
             let mut t = from;
             while t < to && t < now {
-                let len = (3 + (rng.next_f64() * 18.0).floor() as i64) * MIN;
+                let len = if coarse {
+                    (25 + (rng.next_f64() * 35.0).floor() as i64) * MIN
+                } else {
+                    (3 + (rng.next_f64() * 18.0).floor() as i64) * MIN
+                };
                 let (app, detail, context, url) = if rng.next_f64() < 0.78 {
                     wins[rng.pick_idx(wins.len())]
                 } else {
@@ -296,6 +301,7 @@ impl DemoStore {
                 .filter(|(_, _, a, b)| weeks_ago <= *a && weeks_ago >= *b)
                 .map(|(id, w, _, _)| (*id, *w))
                 .collect();
+            let coarse = weeks_ago > 16;
             let mut m = 9 * 60 + ((rng.next_f64() * 3.0).floor() as i32) * 15;
             fill(
                 &mut rng,
@@ -303,6 +309,7 @@ impl DemoStore {
                 at_minutes(day, m - 20),
                 at_minutes(day, m),
                 chatter,
+                coarse,
             );
             let is_today = day == today_start;
             let mut step = 0usize;
@@ -363,7 +370,7 @@ impl DemoStore {
                         "calendar".into()
                     },
                 });
-                fill(&mut rng, &mut activity, start, end, task.apps);
+                fill(&mut rng, &mut activity, start, end, task.apps, coarse);
                 if let Some((ctitle, cfolder)) = task.claude {
                     let cs = start + ((rng.next_f64() * 15.0).floor() as i64) * MIN;
                     let cend = (cs + (25 + (rng.next_f64() * 40.0).floor() as i64) * MIN).min(end);
@@ -398,6 +405,7 @@ impl DemoStore {
                         end,
                         at_minutes(day, m + len + gap),
                         chatter,
+                        coarse,
                     );
                 }
                 m += len + gap;

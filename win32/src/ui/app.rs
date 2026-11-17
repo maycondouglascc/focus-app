@@ -722,6 +722,10 @@ impl Screen for AppShell {
                     width: length(content_w),
                     height: percent(1.0_f32),
                 },
+                min_size: Size {
+                    width: length(0.0_f32),
+                    height: length(0.0_f32),
+                },
                 ..Default::default()
             },
         );
@@ -981,11 +985,11 @@ impl Screen for AppShell {
     }
 
     fn wants_tick(&self) -> bool {
-        self.is_onboarded() && self.calendar.wants_tick()
+        self.is_onboarded() && self.section == Section::Calendar && self.calendar.wants_tick()
     }
 
     fn on_tick(&mut self) -> bool {
-        self.wants_tick()
+        self.is_onboarded() && self.section == Section::Calendar && self.calendar.handle_tick()
     }
 
     fn wants_autoscroll(&self) -> bool {
@@ -1049,6 +1053,34 @@ mod tests {
         let mut host = ScreenHost::mount(Box::new(shell), &env, &mut focus);
         assert_eq!(a11y::validate_tree_names(host.tree()), Ok(()));
 
+        fn assert_bounds(tree: &Tree) {
+            for n in tree.all_nodes() {
+                if let Some(d) = tree.data(n) {
+                    if d.focusable && !d.hidden {
+                        let check_node = if d.a11y.name == crate::ui::strings::CAL_GRID_LABEL {
+                            tree.parent(n).unwrap_or(n)
+                        } else {
+                            n
+                        };
+                        let r = tree.rect(check_node);
+                        assert!(
+                            r.y >= crate::ui::frame::TITLE_BAR_DIP - 0.5,
+                            "widget '{}' overlapped titlebar at y={}",
+                            d.a11y.name,
+                            r.y
+                        );
+                        assert!(
+                            r.w > 0.0 && r.h > 0.0,
+                            "widget '{}' collapsed to zero size: {:?}",
+                            d.a11y.name,
+                            r
+                        );
+                    }
+                }
+            }
+        }
+        assert_bounds(host.tree());
+
         // Navigate across all sections via Ctrl+2, Ctrl+3, Ctrl+4, Ctrl+,, Ctrl+1, Ctrl+Space.
         for vk in [0x32_u16, 0x33, 0x34, 0xBC, 0x31] {
             let (handled, dirty) = host.on_key(
@@ -1063,6 +1095,7 @@ mod tests {
             assert!(handled && dirty);
             assert!(host.rebuild_if_dirty(&env, &mut focus));
             assert_eq!(a11y::validate_tree_names(host.tree()), Ok(()));
+            assert_bounds(host.tree());
         }
 
         // Ctrl+Space toggles running timer cleanly.

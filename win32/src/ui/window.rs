@@ -235,13 +235,29 @@ pub struct DragBenchMetrics {
     pub p95_ms: f64,
     pub max_ms: f64,
     pub fps: f64,
+    pub esc_cancel_ok: bool,
+    pub alt_nosnap_ok: bool,
+    pub autoscroll_ok: bool,
+}
+
+fn find_create_preview_range(tree: &Tree, id: WidgetId) -> Option<String> {
+    let n = tree.node_by_id(id)?;
+    let d = tree.data(n)?;
+    let super::tree::Leaf::Canvas(cmds) = d.leaf.as_ref()? else {
+        return None;
+    };
+    cmds.iter().rev().find_map(|c| match c {
+        super::tree::DrawCmd::Text { text, .. } if text.contains(" – ") => Some(text.clone()),
+        _ => None,
+    })
 }
 
 /// Lays out the active Calendar screen at 1920x1080 DIPs (`200%` DPI -> `3840x2160` px),
+/// verifies Esc cancel, Alt no-snap, and edge autoscroll against live layout bounds, then
 /// executes `frames` continuous week-grid drag + `sync_drag_tree` + Direct2D draws without
-/// vsync blocking, and reports timing percentiles.
+/// vsync blocking.
 pub fn bench_drag_4k(frames: u32) -> Result<DragBenchMetrics, String> {
-    let setup = with_ui(|u| -> Result<(WidgetId, Rect), String> {
+    let setup = with_ui(|u| -> Result<(WidgetId, WidgetId, Rect), String> {
         let palette = u.palette;
         {
             let r = u
@@ -278,54 +294,125 @@ pub fn bench_drag_4k(frames: u32) -> Result<DragBenchMetrics, String> {
             })
             .ok_or_else(|| "calendar grid canvas node not found".to_string())?;
         let canvas_id = t.id(node);
-        let vp_rect = t
+        let vp_node = t
             .parent(node)
-            .map(|p| t.rect(p))
-            .unwrap_or_else(|| t.rect(node));
-        Ok((canvas_id, vp_rect))
+            .ok_or_else(|| "canvas viewport parent missing".to_string())?;
+        let vp_id = t.id(vp_node);
+        let vp_rect = t.rect(vp_node);
+        Ok((canvas_id, vp_id, vp_rect))
     })
     .ok_or_else(|| "ui unavailable".to_string())??;
 
-    let (canvas_id, vp_rect) = setup;
-    let start_x = vp_rect.x + 120.0;
+    let (canvas_id, vp_id, vp_rect) = setup;
+    let sunday_x = vp_rect.x + vp_rect.w - 40.0;
     let start_y = vp_rect.y + 40.0;
 
-    let (mut frame_ms, elapsed_ms) = with_ui(|u| -> Result<(Vec<f64>, f64), String> {
-        let palette = u.palette;
-        let host = u
-            .screen
-            .as_mut()
-            .ok_or_else(|| "no mounted screen".to_string())?;
-        let r = u
-            .renderer
-            .as_mut()
-            .ok_or_else(|| "no renderer".to_string())?;
-        let down = host.on_pointer_down(canvas_id, start_x, start_y, KeyModifiers::default());
-        if !down.dragging {
-            return Err("pointer_down did not start grid drag".into());
-        }
-        let _ = host.on_pointer_move(start_x + 20.0, start_y + 15.0, KeyModifiers::default());
-        host.sync_drag_tree();
-        r.draw_frame(FrameOpts {
-            dpi: 192,
-            w: 1920.0,
-            h: 1080.0,
-            hover: Hover::None,
-            palette: &palette,
-            mica: false,
-            show_title_bar: true,
-            tree: Some(host.tree()),
-            focus_ring: None,
-        })
-        .map_err(|e| format!("{e:?}"))?;
+    let (mut frame_ms, elapsed_ms, esc_cancel_ok, alt_nosnap_ok, autoscroll_ok) =
+        with_ui(|u| -> Result<(Vec<f64>, f64, bool, bool, bool), String> {
+            let palette = u.palette;
+            let host = u
+                .screen
+                .as_mut()
+                .ok_or_else(|| "no mounted screen".to_string())?;
 
-        let mut samples = Vec::with_capacity(frames as usize);
-        let t_all = std::time::Instant::now();
-        for f in 0..frames {
-            let tf = std::time::Instant::now();
-            let y = vp_rect.y + 40.0 + ((f % 160) as f32) * 1.5;
-            let x = vp_rect.x + 120.0 + (((f / 30) % 5) as f32) * 140.0;
-            let _ = host.on_pointer_move(x, y, KeyModifiers::default());
+            // 1. Esc cancels active drag cleanly.
+            let down_esc =
+                host.on_pointer_down(canvas_id, sunday_x, start_y, KeyModifiers::default());
+            let _ = host.on_pointer_move(sunday_x, start_y + 30.0, KeyModifiers::default());
+            let (esc_handled, _) = host.on_key(
+                KeyEvent {
+                    key: KeyCode::Escape,
+                    shift: false,
+                    ctrl: false,
+                    alt: false,
+                },
+                &mut u.focus,
+            );
+            let after_esc = host.on_pointer_move(sunday_x, start_y + 45.0, KeyModifiers::default());
+            let esc_cancel_ok = down_esc.dragging && esc_handled && !after_esc.dragging;
+
+            // 2. Alt disables 15-minute snap (`+37` DIPs -> non-quarter minute).
+            let alt_mods = KeyModifiers {
+                alt: true,
+                ..Default::default()
+            };
+            let down_alt = host.on_pointer_down(canvas_id, sunday_x, start_y, alt_mods);
+            let _ = host.on_pointer_move(sunday_x, start_y + 37.0, alt_mods);
+            host.sync_drag_tree();
+            let preview = find_create_preview_range(host.tree(), canvas_id);
+            let alt_nosnap_ok = down_alt.dragging
+                && preview.as_deref().is_some_and(|range| {
+                    let end = range.split(" – ").nth(1).unwrap_or("");
+                    let mins_str: String = end
+                        .split(':')
+                        .nth(1)
+                        .unwrap_or("")
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit())
+                        .collect();
+                    mins_str.parse::<i32>().is_ok_and(|m| m % 15 != 0)
+                });
+            let _ = host.on_pointer_cancel();
+
+            // 3. Edge autoscroll scrolls UP near top edge and DOWN near bottom edge.
+            let _ = host.on_pointer_down(canvas_id, sunday_x, start_y, KeyModifiers::default());
+            let initial_scroll = host
+                .tree()
+                .node_by_id(vp_id)
+                .and_then(|n| host.tree().data(n))
+                .map(|d| d.scroll_y)
+                .unwrap_or(0.0);
+            let mut up_ok = true;
+            if initial_scroll > 1.0 {
+                let _ = host.on_pointer_move(sunday_x, vp_rect.y + 4.0, KeyModifiers::default());
+                let wants_up = host.wants_autoscroll();
+                for _ in 0..4 {
+                    let _ = host.on_autoscroll();
+                }
+                host.sync_drag_tree();
+                let mid_scroll = host
+                    .tree()
+                    .node_by_id(vp_id)
+                    .and_then(|n| host.tree().data(n))
+                    .map(|d| d.scroll_y)
+                    .unwrap_or(initial_scroll);
+                up_ok = wants_up && mid_scroll < initial_scroll;
+            }
+            let mid_scroll = host
+                .tree()
+                .node_by_id(vp_id)
+                .and_then(|n| host.tree().data(n))
+                .map(|d| d.scroll_y)
+                .unwrap_or(0.0);
+            let _ = host.on_pointer_move(
+                sunday_x,
+                vp_rect.y + vp_rect.h - 4.0,
+                KeyModifiers::default(),
+            );
+            let wants_down = host.wants_autoscroll();
+            for _ in 0..4 {
+                let _ = host.on_autoscroll();
+            }
+            host.sync_drag_tree();
+            let after_scroll = host
+                .tree()
+                .node_by_id(vp_id)
+                .and_then(|n| host.tree().data(n))
+                .map(|d| d.scroll_y)
+                .unwrap_or(0.0);
+            let _ = host.on_pointer_cancel();
+            let autoscroll_ok = up_ok && wants_down && after_scroll > mid_scroll;
+
+            // 4. 180 continuous drag frames rendered at 3840x2160 (`200%` DPI).
+            let r = u
+                .renderer
+                .as_mut()
+                .ok_or_else(|| "no renderer".to_string())?;
+            let down = host.on_pointer_down(canvas_id, sunday_x, start_y, KeyModifiers::default());
+            if !down.dragging {
+                return Err("pointer_down did not start grid drag".into());
+            }
+            let _ = host.on_pointer_move(sunday_x - 20.0, start_y + 15.0, KeyModifiers::default());
             host.sync_drag_tree();
             r.draw_frame(FrameOpts {
                 dpi: 192,
@@ -339,14 +426,41 @@ pub fn bench_drag_4k(frames: u32) -> Result<DragBenchMetrics, String> {
                 focus_ring: None,
             })
             .map_err(|e| format!("{e:?}"))?;
-            samples.push(tf.elapsed().as_secs_f64() * 1000.0);
-        }
-        let elapsed = t_all.elapsed().as_secs_f64() * 1000.0;
-        let _ = host.on_pointer_cancel();
-        r.set_present_sync(true);
-        Ok((samples, elapsed))
-    })
-    .ok_or_else(|| "ui unavailable".to_string())??;
+
+            let mut samples = Vec::with_capacity(frames as usize);
+            let t_all = std::time::Instant::now();
+            for f in 0..frames {
+                let tf = std::time::Instant::now();
+                let y = vp_rect.y + 40.0 + ((f % 160) as f32) * 1.5;
+                let x = vp_rect.x + 120.0 + (((f / 30) % 6) as f32) * 140.0;
+                let _ = host.on_pointer_move(x, y, KeyModifiers::default());
+                host.sync_drag_tree();
+                r.draw_frame(FrameOpts {
+                    dpi: 192,
+                    w: 1920.0,
+                    h: 1080.0,
+                    hover: Hover::None,
+                    palette: &palette,
+                    mica: false,
+                    show_title_bar: true,
+                    tree: Some(host.tree()),
+                    focus_ring: None,
+                })
+                .map_err(|e| format!("{e:?}"))?;
+                samples.push(tf.elapsed().as_secs_f64() * 1000.0);
+            }
+            let elapsed = t_all.elapsed().as_secs_f64() * 1000.0;
+            let _ = host.on_pointer_cancel();
+            r.set_present_sync(true);
+            Ok((
+                samples,
+                elapsed,
+                esc_cancel_ok,
+                alt_nosnap_ok,
+                autoscroll_ok,
+            ))
+        })
+        .ok_or_else(|| "ui unavailable".to_string())??;
 
     frame_ms.sort_by(|a, b| a.total_cmp(b));
     let n = frame_ms.len().max(1);
@@ -365,6 +479,9 @@ pub fn bench_drag_4k(frames: u32) -> Result<DragBenchMetrics, String> {
         p95_ms,
         max_ms,
         fps,
+        esc_cancel_ok,
+        alt_nosnap_ok,
+        autoscroll_ok,
     })
 }
 

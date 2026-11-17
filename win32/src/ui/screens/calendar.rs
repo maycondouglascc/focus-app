@@ -202,6 +202,10 @@ impl CalendarScreen {
                     width: percent(1.0_f32),
                     height: percent(1.0_f32),
                 },
+                min_size: Size {
+                    width: length(0.0_f32),
+                    height: length(0.0_f32),
+                },
                 ..Default::default()
             },
         );
@@ -584,6 +588,10 @@ impl CalendarScreen {
     pub fn wants_tick(&self) -> bool {
         self.timer.is_running(&self.store)
     }
+
+    pub fn handle_tick(&mut self) -> bool {
+        !self.store.borrow().is_demo() && self.wants_tick()
+    }
 }
 
 impl Screen for CalendarScreen {
@@ -666,7 +674,7 @@ impl Screen for CalendarScreen {
     }
 
     fn on_tick(&mut self) -> bool {
-        self.wants_tick()
+        self.handle_tick()
     }
 
     fn wants_autoscroll(&self) -> bool {

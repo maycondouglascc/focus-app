@@ -20,13 +20,8 @@ use crate::demo::DemoStore;
 use crate::locale::SystemLocale;
 
 use super::app::{AppShell, Section};
-use super::focus::FocusModel;
-use super::input::{KeyCode, KeyEvent};
-use super::screen::{KeyModifiers, Screen, ScreenEnv, ScreenHost};
+use super::screen::Screen;
 use super::strings;
-use super::text::TextSystem;
-use super::theme::Palette;
-use super::tree::{DrawCmd, Leaf, Rect, WidgetId};
 use super::window;
 
 /// Decision 0004: the graphics stack keeps about 21 MB after the first open.
@@ -374,129 +369,9 @@ pub fn show(
     0
 }
 
-fn find_grid_canvas(tree: &super::tree::Tree) -> Option<(WidgetId, super::tree::Node, Rect)> {
-    let node = tree.all_nodes().into_iter().find(|&n| {
-        tree.data(n)
-            .is_some_and(|d| d.a11y.name == strings::CAL_GRID_LABEL)
-    })?;
-    let vp_rect = tree
-        .parent(node)
-        .map(|p| tree.rect(p))
-        .unwrap_or_else(|| tree.rect(node));
-    Some((tree.id(node), node, vp_rect))
-}
-
-fn find_preview_time_range(
-    tree: &super::tree::Tree,
-    canvas_node: super::tree::Node,
-) -> Option<String> {
-    let data = tree.data(canvas_node)?;
-    let Leaf::Canvas(cmds) = data.leaf.as_ref()? else {
-        return None;
-    };
-    cmds.iter().rev().find_map(|c| match c {
-        DrawCmd::Text { text, .. } if text.contains(" – ") => Some(text.clone()),
-        _ => None,
-    })
-}
-
-fn verify_drag_interactions() -> (bool, bool, bool) {
-    let Ok(text) = TextSystem::new() else {
-        return (false, false, false);
-    };
-    let palette = Palette::LIGHT;
-    let env = ScreenEnv {
-        width_dip: 1920.0,
-        height_dip: 1080.0,
-        hover: None,
-        pressed: None,
-        focused: None,
-        palette: &palette,
-        text: &text,
-    };
-    let mut focus = FocusModel::new();
-    let store = shared_store(Box::new(DemoStore::new(SystemLocale::en_us())));
-    let mut host = ScreenHost::mount(Box::new(AppShell::new(store)), &env, &mut focus);
-    let Some((canvas_id, canvas_node, vp)) = find_grid_canvas(host.tree()) else {
-        return (false, false, false);
-    };
-
-    // Stand-alone ScreenHost falls back to `WeekGridState::last_viewport_rect` for `widget_rect`;
-    // pick a coordinate safely inside Sunday morning (`x` near right end, `y` near top).
-    let sunday_x = 200.0 + 900.0 - 40.0;
-    let start_y = 160.0 + 30.0;
-
-    // 1. Esc cancels active drag cleanly.
-    let down = host.on_pointer_down(canvas_id, sunday_x, start_y, KeyModifiers::default());
-    let _ = host.on_pointer_move(sunday_x, start_y + 30.0, KeyModifiers::default());
-    let (esc_handled, _) = host.on_key(
-        KeyEvent {
-            key: KeyCode::Escape,
-            shift: false,
-            ctrl: false,
-            alt: false,
-        },
-        &mut focus,
-    );
-    let after_esc = host.on_pointer_move(sunday_x, start_y + 45.0, KeyModifiers::default());
-    let esc_ok = down.dragging && esc_handled && !after_esc.dragging;
-
-    // 2. Alt disables 15-minute snap (drag +37 DIP -> minutes end in non-quarter value).
-    let alt_mods = KeyModifiers {
-        alt: true,
-        ..Default::default()
-    };
-    let _ = host.on_pointer_down(canvas_id, sunday_x, start_y, alt_mods);
-    let _ = host.on_pointer_move(sunday_x, start_y + 37.0, alt_mods);
-    host.sync_drag_tree();
-    let preview = find_preview_time_range(host.tree(), canvas_node);
-    let alt_ok = preview.as_deref().is_some_and(|range| {
-        let mut parts = range.split(" – ");
-        let _start = parts.next();
-        let end = parts.next().unwrap_or("");
-        let mins_str: String = end
-            .split(':')
-            .nth(1)
-            .unwrap_or("")
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        let mins: Option<i32> = mins_str.parse().ok();
-        mins.is_some_and(|m| m % 15 != 0)
-    });
-    let _ = host.on_pointer_cancel();
-
-    // 3. Edge autoscroll adjusts scroll offset smoothly when pointer is near viewport bottom edge.
-    let _ = vp;
-    let _ = host.on_pointer_down(canvas_id, sunday_x, start_y, KeyModifiers::default());
-    let initial_scroll = host
-        .tree()
-        .parent(canvas_node)
-        .and_then(|p| host.tree().data(p))
-        .map(|d| d.scroll_y)
-        .unwrap_or(0.0);
-    let _ = host.on_pointer_move(sunday_x, 160.0 + 560.0 - 4.0, KeyModifiers::default());
-    let wants_auto = host.wants_autoscroll();
-    for _ in 0..4 {
-        let _ = host.on_autoscroll();
-    }
-    host.sync_drag_tree();
-    let after_scroll = host
-        .tree()
-        .parent(canvas_node)
-        .and_then(|p| host.tree().data(p))
-        .map(|d| d.scroll_y)
-        .unwrap_or(0.0);
-    let _ = host.on_pointer_cancel();
-    let autoscroll_ok = wants_auto && after_scroll > initial_scroll;
-
-    (esc_ok, alt_ok, autoscroll_ok)
-}
-
 /// `focus.exe --diag-drag`: verifies Esc cancel, Alt no-snap, edge autoscroll, and
 /// benchmarks 180 continuous drag frames rendered at 3840x2160 (`200%` DPI).
 pub fn diag_drag() -> i32 {
-    let (esc_ok, alt_ok, autoscroll_ok) = verify_drag_interactions();
     super::init();
     if !window::open() {
         eprintln!("focus: diag_drag could not open window");
@@ -516,12 +391,12 @@ pub fn diag_drag() -> i32 {
     window::close();
     super::render::reset_shared();
 
-    println!(
-        "diag_drag checks: esc_cancel={} alt_nosnap={} autoscroll={}",
-        esc_ok, alt_ok, autoscroll_ok
-    );
     match metrics {
         Ok(m) => {
+            println!(
+                "diag_drag checks: esc_cancel={} alt_nosnap={} autoscroll={}",
+                m.esc_cancel_ok, m.alt_nosnap_ok, m.autoscroll_ok
+            );
             println!(
                 "diag_drag res={}x{} dpi={}% frames={} elapsed_ms={:.2} avg_ms={:.3} p95_ms={:.3} max_ms={:.3} fps={:.2}",
                 m.res_w_px,
@@ -534,7 +409,7 @@ pub fn diag_drag() -> i32 {
                 m.max_ms,
                 m.fps
             );
-            if esc_ok && alt_ok && autoscroll_ok && m.fps >= 60.0 {
+            if m.esc_cancel_ok && m.alt_nosnap_ok && m.autoscroll_ok && m.fps >= 60.0 {
                 println!("OK");
                 0
             } else {

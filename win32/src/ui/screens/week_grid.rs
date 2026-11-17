@@ -707,6 +707,10 @@ impl WeekGridState {
                     width: percent(1.0_f32),
                     height: auto(),
                 },
+                min_size: Size {
+                    width: length(0.0_f32),
+                    height: length(0.0_f32),
+                },
                 ..Default::default()
             },
         );
@@ -829,6 +833,10 @@ impl WeekGridState {
                 size: Size {
                     width: percent(1.0_f32),
                     height: auto(),
+                },
+                min_size: Size {
+                    width: length(0.0_f32),
+                    height: length(0.0_f32),
                 },
                 ..Default::default()
             },

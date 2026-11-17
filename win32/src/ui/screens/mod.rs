@@ -118,9 +118,14 @@ pub fn build_scroll_page(
             flex_direction: FlexDirection::Column,
             align_items: Some(AlignItems::Center),
             flex_grow: 1.0,
+            flex_basis: length(0.0_f32),
             size: Size {
                 width: percent(1.0_f32),
                 height: percent(1.0_f32),
+            },
+            min_size: Size {
+                width: length(0.0_f32),
+                height: length(0.0_f32),
             },
             ..Default::default()
         },
