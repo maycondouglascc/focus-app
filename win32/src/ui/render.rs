@@ -172,6 +172,7 @@ pub struct Renderer {
     // Held so the composition tree stays alive as long as the renderer.
     _target: IDCompositionTarget,
     _visual: IDCompositionVisual,
+    first_present: bool,
     #[cfg(test)]
     generation: u64,
     next_draw_error: Option<HRESULT>,
@@ -251,6 +252,7 @@ impl Renderer {
                 brush,
                 _target: target,
                 _visual: visual,
+                first_present: true,
                 #[cfg(test)]
                 generation,
                 next_draw_error: None,
@@ -376,7 +378,9 @@ impl Renderer {
             let end = self.ctx.EndDraw(None, None);
             self.ctx.SetTarget(None);
             end?;
-            self.swap.Present(1, DXGI_PRESENT(0)).ok()?;
+            let sync_interval = if self.first_present { 0 } else { 1 };
+            self.swap.Present(sync_interval, DXGI_PRESENT(0)).ok()?;
+            self.first_present = false;
         }
         Ok(())
     }

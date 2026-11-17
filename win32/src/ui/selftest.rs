@@ -4,8 +4,12 @@
 
 use std::time::{Duration, Instant};
 
+use windows::Win32::Graphics::Gdi::UpdateWindow;
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
 use windows::Win32::System::Threading::GetCurrentProcess;
+use windows::Win32::UI::WindowsAndMessaging::{
+    DispatchMessageW, GetMessageW, KillTimer, SetTimer, TranslateMessage, MSG, WM_TIMER,
+};
 
 use super::window;
 
@@ -98,14 +102,32 @@ pub fn show(seconds: u64, gallery: bool) -> i32 {
     if gallery {
         let _ = window::set_screen(Box::new(super::screen::WidgetGalleryScreen::new()));
     }
-    let mut first_frame_ms = None;
-    let end = Instant::now() + Duration::from_secs(seconds);
-    while Instant::now() < end && window::is_open() {
-        window::pump();
-        if first_frame_ms.is_none() && window::paint_count() >= 1 {
-            first_frame_ms = Some(t0.elapsed().as_secs_f64() * 1000.0);
+    if let Some(hwnd) = window::hwnd() {
+        // SAFETY: `hwnd` is our newly created window on this thread.
+        unsafe {
+            let _ = UpdateWindow(hwnd);
         }
-        std::thread::sleep(Duration::from_millis(2));
+    }
+    let mut first_frame_ms =
+        (window::paint_count() >= 1).then(|| t0.elapsed().as_secs_f64() * 1000.0);
+    let ms = (seconds.saturating_mul(1000).min(u32::MAX as u64)).max(100) as u32;
+    // SAFETY: thread-scoped timer and `GetMessageW` loop run on the UI thread that owns the window.
+    unsafe {
+        let timer = SetTimer(None, 0, ms, None);
+        let mut msg = MSG::default();
+        while window::is_open() && GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            if msg.message == WM_TIMER && msg.hwnd.0.is_null() && msg.wParam.0 == timer {
+                break;
+            }
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+            if first_frame_ms.is_none() && window::paint_count() >= 1 {
+                first_frame_ms = Some(t0.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+        if timer != 0 {
+            let _ = KillTimer(None, timer);
+        }
     }
     println!(
         "first_frame_ms={:.1} paints={}",
