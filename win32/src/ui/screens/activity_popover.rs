@@ -15,7 +15,9 @@ use crate::ui::popup::{PopupDelegate, PopupEvent, PopupOutcome};
 use crate::ui::strings;
 use crate::ui::text::{Align, Weight};
 use crate::ui::theme::{app_color, Palette};
-use crate::ui::tree::{style, A11yInfo, A11yRole, HitMode, Leaf, PaintStyle, Rect, Tree, WidgetId};
+use crate::ui::tree::{
+    style, A11yInfo, A11yRole, HitMode, Leaf, Node, PaintStyle, Rect, Tree, WidgetId,
+};
 use crate::ui::widgets::button::{self, ButtonProps, ButtonSize, ButtonVariant};
 use crate::ui::widgets::popover;
 use crate::ui::widgets::{add_label, glyph, interactive_a11y};
@@ -30,12 +32,21 @@ pub struct LogSessionRequest {
     pub anchor_dip: Rect,
 }
 
+struct BuiltPopoverTree {
+    tree: Tree,
+    apps_vp: Option<Node>,
+    toggles: Vec<(WidgetId, String)>,
+    log_id: Option<WidgetId>,
+}
+
 struct ActivityPopoverDelegate {
     session: ActivitySession,
     is_24h: bool,
     palette: Palette,
     open_apps: HashSet<String>,
     anchor_dip: Rect,
+    scroll_y: f32,
+    apps_vp: Option<Node>,
     app_toggle_ids: Vec<(WidgetId, String)>,
     log_btn_id: Option<WidgetId>,
     on_log: Rc<RefCell<Option<LogSessionRequest>>>,
@@ -58,9 +69,11 @@ impl ActivityPopoverDelegate {
         session: &ActivitySession,
         is_24h: bool,
         open_apps: &HashSet<String>,
+        scroll_y: f32,
         palette: &Palette,
-    ) -> (Tree, Vec<(WidgetId, String)>, Option<WidgetId>) {
+    ) -> BuiltPopoverTree {
         let mut tree = popover::build_tree("Activity session", 360.0, palette);
+        tree.set_root_height_fill();
         let root = tree.root();
 
         // Header
@@ -69,6 +82,7 @@ impl ActivityPopoverDelegate {
             Style {
                 display: Display::Flex,
                 flex_direction: FlexDirection::Column,
+                flex_shrink: 0.0,
                 gap: style::gap(2.0),
                 ..Default::default()
             },
@@ -108,18 +122,66 @@ impl ActivityPopoverDelegate {
             palette.muted,
         );
 
+        let apps_vp = tree.add_container(
+            root,
+            Style {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Column,
+                flex_grow: 1.0,
+                flex_shrink: 1.0,
+                flex_basis: length(0.0_f32),
+                size: Size {
+                    width: percent(1.0_f32),
+                    height: auto(),
+                },
+                min_size: Size {
+                    width: length(0.0_f32),
+                    height: length(0.0_f32),
+                },
+                ..Default::default()
+            },
+        );
+        tree.set_paint(
+            apps_vp,
+            PaintStyle {
+                bg: None,
+                border_color: None,
+                border_width: 0.0,
+                radius: 0.0,
+                clip: true,
+            },
+        );
+        tree.set_scrollable_y(apps_vp, true);
+        tree.set_scroll(apps_vp, 0.0, scroll_y);
+
+        let apps_col = tree.add_container(
+            apps_vp,
+            Style {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Column,
+                flex_shrink: 0.0,
+                gap: style::gap(4.0),
+                size: Size {
+                    width: percent(1.0_f32),
+                    height: auto(),
+                },
+                ..Default::default()
+            },
+        );
+
         let max_ms = session.apps.iter().map(|a| a.ms).max().unwrap_or(1).max(1) as f32;
         let mut toggle_ids = Vec::new();
 
-        for a in &session.apps {
+        for (app_idx, a) in session.apps.iter().enumerate() {
             let has_details = !a.details.is_empty();
             let expanded = open_apps.contains(&a.name);
 
             let block = tree.add_container(
-                root,
+                apps_col,
                 Style {
                     display: Display::Flex,
                     flex_direction: FlexDirection::Column,
+                    flex_shrink: 0.0,
                     gap: style::gap(4.0),
                     size: Size {
                         width: percent(1.0_f32),
@@ -245,7 +307,7 @@ impl ActivityPopoverDelegate {
                         color: palette.muted,
                     },
                 );
-                let bid = tree.id(row_btn);
+                let bid = tree.set_key(row_btn, &format!("act_pop.app.{app_idx}.{}", a.name));
                 tree.set_hit(row_btn, HitMode::Interactive);
                 tree.set_focusable(row_btn, true);
                 let mut info =
@@ -372,6 +434,7 @@ impl ActivityPopoverDelegate {
             Style {
                 display: Display::Flex,
                 flex_direction: FlexDirection::Row,
+                flex_shrink: 0.0,
                 justify_content: Some(JustifyContent::FlexStart),
                 padding: style::pad(0.0, 4.0, 0.0, 0.0),
                 size: Size {
@@ -385,10 +448,34 @@ impl ActivityPopoverDelegate {
         log_p.icon = Some(glyph::ADD);
         log_p.variant = ButtonVariant::Primary;
         log_p.size = ButtonSize::Small;
-        let (_, log_id) = button::build(&mut tree, foot, &log_p, palette);
+        let (log_node, _) = button::build(&mut tree, foot, &log_p, palette);
+        let log_id = tree.set_key(log_node, "act_pop.log");
         debug_assert_eq!(a11y::validate_tree_names(&tree), Ok(()));
 
-        (tree, toggle_ids, Some(log_id))
+        BuiltPopoverTree {
+            tree,
+            apps_vp: Some(apps_vp),
+            toggles: toggle_ids,
+            log_id: Some(log_id),
+        }
+    }
+
+    fn apply_wheel(&mut self, tree: &mut Tree, dy: f32) -> PopupOutcome {
+        let Some(vp) = self.apps_vp else {
+            return PopupOutcome::default();
+        };
+        let max_s = tree.scroll_max_y(vp);
+        let next = (self.scroll_y - dy).clamp(0.0, max_s);
+        if (next - self.scroll_y).abs() > 0.2 {
+            self.scroll_y = next;
+            tree.set_scroll(vp, 0.0, next);
+            return PopupOutcome {
+                handled: true,
+                dirty: true,
+                ..Default::default()
+            };
+        }
+        PopupOutcome::default()
     }
 }
 
@@ -421,15 +508,17 @@ impl PopupDelegate for ActivityPopoverDelegate {
                     if !self.open_apps.remove(app_name) {
                         self.open_apps.insert(app_name.clone());
                     }
-                    let (new_tree, new_toggles, new_log) = Self::build_tree(
+                    let built = Self::build_tree(
                         &self.session,
                         self.is_24h,
                         &self.open_apps,
+                        self.scroll_y,
                         &self.palette,
                     );
-                    *tree = new_tree;
-                    self.app_toggle_ids = new_toggles;
-                    self.log_btn_id = new_log;
+                    *tree = built.tree;
+                    self.apps_vp = built.apps_vp;
+                    self.app_toggle_ids = built.toggles;
+                    self.log_btn_id = built.log_id;
                     let new_h = Self::estimate_height_dip(&self.session, &self.open_apps);
                     return PopupOutcome {
                         handled: true,
@@ -441,7 +530,38 @@ impl PopupDelegate for ActivityPopoverDelegate {
                 }
                 PopupOutcome::default()
             }
-            PopupEvent::Key(_) | PopupEvent::Closed => PopupOutcome::default(),
+            PopupEvent::Wheel(dy) => self.apply_wheel(tree, dy),
+            PopupEvent::FocusChanged(fid) => {
+                if let (Some(vp), Some(id)) = (self.apps_vp, fid) {
+                    if let Some(target) = tree.node_by_id(id) {
+                        if let Some(new_y) = tree.scroll_node_into_view(vp, target) {
+                            self.scroll_y = new_y;
+                            return PopupOutcome {
+                                handled: true,
+                                dirty: true,
+                                ..Default::default()
+                            };
+                        }
+                    }
+                    let clamped = self.scroll_y.clamp(0.0, tree.scroll_max_y(vp));
+                    if (clamped - self.scroll_y).abs() > 0.2 {
+                        self.scroll_y = clamped;
+                        tree.set_scroll(vp, 0.0, clamped);
+                        return PopupOutcome {
+                            handled: false,
+                            dirty: true,
+                            ..Default::default()
+                        };
+                    }
+                }
+                PopupOutcome::default()
+            }
+            PopupEvent::Key(ev) => match ev.key {
+                crate::ui::input::KeyCode::PageUp => self.apply_wheel(tree, 180.0),
+                crate::ui::input::KeyCode::PageDown => self.apply_wheel(tree, -180.0),
+                _ => PopupOutcome::default(),
+            },
+            PopupEvent::Closed => PopupOutcome::default(),
         }
     }
 }
@@ -457,8 +577,7 @@ pub fn open_activity_popover(
 ) -> Option<Rc<RefCell<Option<LogSessionRequest>>>> {
     let open_apps = HashSet::new();
     let est_h = ActivityPopoverDelegate::estimate_height_dip(&session, &open_apps);
-    let (tree, toggle_ids, log_id) =
-        ActivityPopoverDelegate::build_tree(&session, is_24h, &open_apps, palette);
+    let built = ActivityPopoverDelegate::build_tree(&session, is_24h, &open_apps, 0.0, palette);
     let log_slot = Rc::new(RefCell::new(None));
     let delegate = ActivityPopoverDelegate {
         session,
@@ -466,8 +585,10 @@ pub fn open_activity_popover(
         palette: *palette,
         open_apps,
         anchor_dip,
-        app_toggle_ids: toggle_ids,
-        log_btn_id: log_id,
+        scroll_y: 0.0,
+        apps_vp: built.apps_vp,
+        app_toggle_ids: built.toggles,
+        log_btn_id: built.log_id,
         on_log: Rc::clone(&log_slot),
     };
     popover::open(
@@ -475,7 +596,7 @@ pub fn open_activity_popover(
         anchor_dip,
         (360.0, est_h),
         crate::ui::popup::PopupAlign::BelowStart,
-        tree,
+        built.tree,
         Box::new(delegate),
     )?;
     Some(log_slot)
@@ -509,8 +630,11 @@ mod tests {
         };
 
         let mut open = HashSet::new();
-        let (mut tree, toggles, log_id) =
-            ActivityPopoverDelegate::build_tree(&session, true, &open, &Palette::LIGHT);
+        let built =
+            ActivityPopoverDelegate::build_tree(&session, true, &open, 0.0, &Palette::LIGHT);
+        let mut tree = built.tree;
+        let toggles = built.toggles;
+        let log_id = built.log_id;
         tree.layout(360.0, 240.0, &text);
         assert_eq!(a11y::validate_tree_names(&tree), Ok(()));
         assert_eq!(toggles.len(), 1);
@@ -528,6 +652,8 @@ mod tests {
                 w: 80.0,
                 h: 40.0,
             },
+            scroll_y: 0.0,
+            apps_vp: built.apps_vp,
             app_toggle_ids: toggles.clone(),
             log_btn_id: log_id,
             on_log: Rc::clone(&log_slot),
@@ -644,5 +770,88 @@ mod tests {
         window::close();
         window::pump();
         reset_shared();
+    }
+
+    #[test]
+    fn activity_popover_scrolls_many_apps_and_keeps_footer_and_tab_focus_visible() {
+        let text = TextSystem::new().expect("dwrite");
+        let day = from_local(2026, 11, 18, 9, 0, 0, 0);
+        let apps: Vec<SessionApp> = (0..20)
+            .map(|i| SessionApp {
+                name: format!("App {i}"),
+                ms: 3 * MIN,
+                details: vec![SessionDetail {
+                    label: format!("Window {i}"),
+                    sub: String::new(),
+                    ms: 3 * MIN,
+                }],
+            })
+            .collect();
+        let session = ActivitySession {
+            key: "s_many".into(),
+            start: day,
+            end: day + 60 * MIN,
+            active_ms: 60 * MIN,
+            apps,
+        };
+        let open = HashSet::new();
+        let est_h = ActivityPopoverDelegate::estimate_height_dip(&session, &open);
+        assert!((est_h - 520.0).abs() < 0.1);
+
+        let built =
+            ActivityPopoverDelegate::build_tree(&session, true, &open, 0.0, &Palette::LIGHT);
+        let mut tree = built.tree;
+        let toggles = built.toggles;
+        let log_id = built.log_id;
+        tree.layout(360.0, est_h, &text);
+        let vp = built.apps_vp.unwrap();
+        let max_s = tree.scroll_max_y(vp);
+        assert!(max_s > 200.0, "expected scrollable overflow, got {max_s}");
+
+        // Footer button must stay visible inside the 520 DIP popup (never clipped off bottom).
+        let log_rect = tree.rect(tree.node_by_id(log_id.unwrap()).unwrap());
+        assert!(
+            log_rect.y + log_rect.h <= est_h,
+            "footer clipped: {log_rect:?}"
+        );
+
+        let mut del = ActivityPopoverDelegate {
+            session,
+            is_24h: true,
+            palette: Palette::LIGHT,
+            open_apps: open,
+            anchor_dip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 50.0,
+                h: 30.0,
+            },
+            scroll_y: 0.0,
+            apps_vp: Some(vp),
+            app_toggle_ids: toggles.clone(),
+            log_btn_id: log_id,
+            on_log: Rc::new(RefCell::new(None)),
+        };
+        let mut focus = FocusModel::new();
+        focus.sync_from_tree(&tree, |_, _| crate::ui::focus::FocusScope::Main);
+
+        // Wheel scrolls the app list down cleanly.
+        let w_out = del.on_event(PopupEvent::Wheel(-180.0), &mut tree, &mut focus);
+        assert!(w_out.dirty && del.scroll_y > 100.0);
+
+        // Tabbing to the last app row scrolls it into view within `vp`.
+        let last_toggle_id = toggles.last().unwrap().0;
+        let f_out = del.on_event(
+            PopupEvent::FocusChanged(Some(last_toggle_id)),
+            &mut tree,
+            &mut focus,
+        );
+        assert!(f_out.dirty);
+        let vp_rect = tree.rect(vp);
+        let item_rect = tree.rect(tree.node_by_id(last_toggle_id).unwrap());
+        assert!(
+            item_rect.y >= vp_rect.y && item_rect.y + item_rect.h <= vp_rect.y + vp_rect.h,
+            "focused item not visible: item={item_rect:?} vp={vp_rect:?}"
+        );
     }
 }

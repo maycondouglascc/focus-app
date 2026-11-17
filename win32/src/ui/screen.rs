@@ -117,6 +117,13 @@ pub trait Screen {
     fn on_popup_poll(&mut self) -> bool {
         false
     }
+    fn sync_after_layout(
+        &mut self,
+        _tree: &mut Tree,
+        _focused: Option<WidgetId>,
+        _scroll_to_focused: bool,
+    ) {
+    }
 }
 
 /// Owns the active `Screen` instance and its retained `Tree` with on-demand invalidation.
@@ -127,6 +134,7 @@ pub struct ScreenHost {
     dirty: bool,
     last_w: f32,
     last_h: f32,
+    last_focused: Option<WidgetId>,
 }
 
 impl ScreenHost {
@@ -135,6 +143,8 @@ impl ScreenHost {
         built.tree.layout(env.width_dip, env.height_dip, env.text);
         debug_assert_eq!(a11y::validate_tree_names(&built.tree), Ok(()));
         sync_focus(focus, &built.tree, built.modal_root);
+        let cur_focus = focus.focused();
+        screen.sync_after_layout(&mut built.tree, cur_focus, false);
         Self {
             screen,
             tree: built.tree,
@@ -142,6 +152,7 @@ impl ScreenHost {
             dirty: false,
             last_w: env.width_dip,
             last_h: env.height_dip,
+            last_focused: cur_focus,
         }
     }
 
@@ -166,6 +177,11 @@ impl ScreenHost {
         self.last_h = env.height_dip;
         self.dirty = false;
         sync_focus(focus, &self.tree, self.modal_root);
+        let cur_focus = focus.focused();
+        let moved = cur_focus.is_some() && cur_focus != self.last_focused;
+        self.screen
+            .sync_after_layout(&mut self.tree, cur_focus, moved);
+        self.last_focused = cur_focus;
         true
     }
 
@@ -173,6 +189,14 @@ impl ScreenHost {
         self.tree.layout(width_dip, height_dip, text);
         self.last_w = width_dip;
         self.last_h = height_dip;
+        self.screen
+            .sync_after_layout(&mut self.tree, self.last_focused, false);
+    }
+
+    pub fn sync_focused_scroll(&mut self, focused: WidgetId) {
+        self.screen
+            .sync_after_layout(&mut self.tree, Some(focused), true);
+        self.last_focused = Some(focused);
     }
 
     pub fn on_click(&mut self, id: WidgetId) -> bool {

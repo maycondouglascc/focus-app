@@ -26,10 +26,7 @@ use crate::ui::window;
 use super::entry_editor::{EntryDraft, EntryEditorOutcome, EntryEditorState};
 use super::entry_tree::EntryTreeState;
 use super::projects::{ProjectDialogOutcome, ProjectDialogState};
-use super::{
-    build_card, build_empty_state, build_scroll_page, build_stat_card, screen_root_tree,
-    scroll_wheel_step,
-};
+use super::{build_card, build_empty_state, build_stat_card, screen_root_tree, PageScroll};
 
 const CLAUDE: &str = "Claude Code";
 
@@ -76,8 +73,7 @@ pub struct ProjectReportScreen {
     metric: ChartMetric,
     selected_app: Option<String>,
     claude_by: ClaudeGrouping,
-    scroll_y: f32,
-    viewport_h: f32,
+    scroll: PageScroll,
     entry_tree: EntryTreeState,
     edit_dialog: Option<ProjectDialogState>,
     entry_editor: Option<EntryEditorState>,
@@ -106,8 +102,7 @@ impl ProjectReportScreen {
             metric: ChartMetric::Hours,
             selected_app: None,
             claude_by: ClaudeGrouping::Project,
-            scroll_y: 0.0,
-            viewport_h: 720.0,
+            scroll: PageScroll::default(),
             entry_tree: EntryTreeState::new(),
             edit_dialog: None,
             entry_editor: None,
@@ -136,7 +131,6 @@ impl ProjectReportScreen {
         parent: Node,
         env: &ScreenEnv<'_>,
     ) -> Option<Node> {
-        self.viewport_h = env.height_dip;
         let p = env.palette;
 
         let (
@@ -302,7 +296,7 @@ impl ProjectReportScreen {
             )
         };
 
-        let (_vp, col) = build_scroll_page(tree, parent, 1100.0, 28.0, 16.0, self.scroll_y);
+        let col = self.scroll.build(tree, parent, 1100.0, 28.0, 16.0);
 
         let Some(proj) = project else {
             let empty = build_empty_state(
@@ -914,7 +908,16 @@ impl ProjectReportScreen {
         if let Some(ref mut dlg) = self.edit_dialog {
             return dlg.on_key(key);
         }
-        self.entry_tree.handle_key(key)
+        self.entry_tree.handle_key(key) || self.scroll.on_key(key)
+    }
+
+    pub fn sync_after_layout(
+        &mut self,
+        tree: &mut Tree,
+        focused: Option<WidgetId>,
+        scroll_to_focused: bool,
+    ) {
+        self.scroll.sync(tree, focused, scroll_to_focused);
     }
 
     pub fn handle_escape(&mut self) -> bool {
@@ -944,8 +947,7 @@ impl ProjectReportScreen {
                 }
             }
         }
-        let max_scroll = (1100.0 - self.viewport_h).max(0.0);
-        scroll_wheel_step(&mut self.scroll_y, delta_dip, max_scroll)
+        self.scroll.wheel(delta_dip)
     }
 }
 
@@ -1009,6 +1011,15 @@ impl Screen for ProjectReportScreen {
 
     fn on_wheel_at(&mut self, x_dip: f32, y_dip: f32, _dx_dip: f32, dy_dip: f32) -> bool {
         self.handle_wheel_at(x_dip, y_dip, dy_dip)
+    }
+
+    fn sync_after_layout(
+        &mut self,
+        tree: &mut Tree,
+        focused: Option<WidgetId>,
+        scroll_to_focused: bool,
+    ) {
+        ProjectReportScreen::sync_after_layout(self, tree, focused, scroll_to_focused);
     }
 
     fn on_popup_poll(&mut self) -> bool {

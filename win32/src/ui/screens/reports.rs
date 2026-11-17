@@ -29,10 +29,7 @@ use crate::ui::window;
 use super::entry_editor::{EntryDraft, EntryEditorOutcome, EntryEditorState};
 use super::entry_tree::EntryTreeState;
 use super::project_report::ChartMetric;
-use super::{
-    build_card, build_scroll_page, build_stat_card, screen_root_tree, scroll_wheel_step,
-    PopupSelectSlot,
-};
+use super::{build_card, build_stat_card, screen_root_tree, PageScroll, PopupSelectSlot};
 
 const NONE_KEY: &str = "__none";
 
@@ -57,8 +54,7 @@ pub struct ReportsScreen {
     period_nav: PeriodNavState,
     filter: ProjectFilter,
     metric: ChartMetric,
-    scroll_y: f32,
-    viewport_h: f32,
+    scroll: PageScroll,
     entry_tree: EntryTreeState,
     entry_editor: Option<EntryEditorState>,
     csv_dialog: Option<CsvExportDialog>,
@@ -83,8 +79,7 @@ impl ReportsScreen {
             period_nav: PeriodNavState::new(PeriodKind::Month, now_ms),
             filter: ProjectFilter::All,
             metric: ChartMetric::Hours,
-            scroll_y: 0.0,
-            viewport_h: 720.0,
+            scroll: PageScroll::default(),
             entry_tree: EntryTreeState::new(),
             entry_editor: None,
             csv_dialog: None,
@@ -111,7 +106,7 @@ impl ReportsScreen {
         self.sel_filter.clear();
         self.period_nav.clear_popup();
         self.go_timer_requested = false;
-        self.scroll_y = 0.0;
+        self.scroll.reset();
     }
 
     fn filter_options(projects: &[Project]) -> Vec<(ProjectFilter, String)> {
@@ -171,7 +166,6 @@ impl ReportsScreen {
         parent: Node,
         env: &ScreenEnv<'_>,
     ) -> Option<Node> {
-        self.viewport_h = env.height_dip;
         let p = env.palette;
 
         let (
@@ -289,7 +283,7 @@ impl ReportsScreen {
             }
         };
 
-        let (_vp, col) = build_scroll_page(tree, parent, 1140.0, 28.0, 16.0, self.scroll_y);
+        let col = self.scroll.build(tree, parent, 1140.0, 28.0, 16.0);
 
         // Header: Project filter Select + PeriodNav + Export CSV
         let head = tree.add_container(
@@ -799,7 +793,16 @@ impl ReportsScreen {
         if self.entry_editor.is_some() || self.csv_dialog.is_some() {
             return false;
         }
-        self.entry_tree.handle_key(key)
+        self.entry_tree.handle_key(key) || self.scroll.on_key(key)
+    }
+
+    pub fn sync_after_layout(
+        &mut self,
+        tree: &mut Tree,
+        focused: Option<WidgetId>,
+        scroll_to_focused: bool,
+    ) {
+        self.scroll.sync(tree, focused, scroll_to_focused);
     }
 
     pub fn handle_escape(&mut self) -> bool {
@@ -825,8 +828,7 @@ impl ReportsScreen {
                 }
             }
         }
-        let max_scroll = (1100.0 - self.viewport_h).max(0.0);
-        scroll_wheel_step(&mut self.scroll_y, delta_dip, max_scroll)
+        self.scroll.wheel(delta_dip)
     }
 }
 
@@ -877,6 +879,15 @@ impl Screen for ReportsScreen {
 
     fn on_wheel_at(&mut self, x_dip: f32, y_dip: f32, _dx_dip: f32, dy_dip: f32) -> bool {
         self.handle_wheel_at(x_dip, y_dip, dy_dip)
+    }
+
+    fn sync_after_layout(
+        &mut self,
+        tree: &mut Tree,
+        focused: Option<WidgetId>,
+        scroll_to_focused: bool,
+    ) {
+        ReportsScreen::sync_after_layout(self, tree, focused, scroll_to_focused);
     }
 
     fn on_popup_poll(&mut self) -> bool {

@@ -907,13 +907,14 @@ impl Screen for AppShell {
 
         match self.section {
             Section::Calendar => self.calendar.on_key(ev, focus),
+            Section::Activity => self.activity.on_key(ev, focus),
             Section::Projects => self.projects.on_key(ev, focus),
             Section::Project(_) => self
                 .project_report
                 .as_mut()
                 .is_some_and(|pr| pr.on_key(ev, focus)),
             Section::Reports => self.reports.on_key(ev, focus),
-            _ => false,
+            Section::Settings => self.settings.on_key(ev, focus),
         }
     }
 
@@ -1075,6 +1076,39 @@ impl Screen for AppShell {
                 .as_mut()
                 .is_some_and(|pr| pr.on_popup_poll()),
             Section::Settings => self.settings.on_popup_poll(),
+        }
+    }
+
+    fn sync_after_layout(
+        &mut self,
+        tree: &mut Tree,
+        focused: Option<WidgetId>,
+        scroll_to_focused: bool,
+    ) {
+        if !self.is_onboarded() {
+            self.welcome
+                .sync_after_layout(tree, focused, scroll_to_focused);
+            return;
+        }
+        match self.section {
+            Section::Calendar => {}
+            Section::Activity => self
+                .activity
+                .sync_after_layout(tree, focused, scroll_to_focused),
+            Section::Reports => self
+                .reports
+                .sync_after_layout(tree, focused, scroll_to_focused),
+            Section::Projects => self
+                .projects
+                .sync_after_layout(tree, focused, scroll_to_focused),
+            Section::Project(_) => {
+                if let Some(ref mut pr) = self.project_report {
+                    pr.sync_after_layout(tree, focused, scroll_to_focused);
+                }
+            }
+            Section::Settings => self
+                .settings
+                .sync_after_layout(tree, focused, scroll_to_focused),
         }
     }
 }

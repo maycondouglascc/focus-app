@@ -11,15 +11,14 @@ use crate::ui::widgets::button::{self, ButtonProps, ButtonVariant};
 use crate::ui::widgets::toggle::{self, ToggleKind, ToggleProps};
 use crate::ui::widgets::{add_label, glyph, Interact};
 
-use super::{build_card, build_hairline, build_scroll_page, screen_root_tree, scroll_wheel_step};
+use super::{build_card, build_hairline, screen_root_tree, PageScroll};
 
 pub struct WelcomeScreen {
     store: SharedStore,
     monitor_enabled: bool,
     browser_tabs: bool,
     claude_sessions: bool,
-    scroll_y: f32,
-    viewport_h: f32,
+    scroll: PageScroll,
     id_monitor: Option<WidgetId>,
     id_browser: Option<WidgetId>,
     id_claude: Option<WidgetId>,
@@ -38,8 +37,7 @@ impl WelcomeScreen {
             monitor_enabled: s.monitor_enabled,
             browser_tabs: s.browser_tabs,
             claude_sessions: s.claude_sessions,
-            scroll_y: 0.0,
-            viewport_h: 720.0,
+            scroll: PageScroll::default(),
             id_monitor: None,
             id_browser: None,
             id_claude: None,
@@ -179,10 +177,9 @@ impl WelcomeScreen {
 
 impl WelcomeScreen {
     pub fn build_content(&mut self, tree: &mut Tree, root: Node, env: &ScreenEnv<'_>) {
-        self.viewport_h = env.height_dip;
         let p = env.palette;
 
-        let (_vp, col) = build_scroll_page(tree, root, 620.0, 28.0, 0.0, self.scroll_y);
+        let col = self.scroll.build(tree, root, 620.0, 28.0, 0.0);
         let card = build_card(tree, col, 28.0, 16.0, p);
 
         add_label(
@@ -358,8 +355,24 @@ impl Screen for WelcomeScreen {
     }
 
     fn on_wheel(&mut self, delta_dip: f32) -> bool {
-        let max_scroll = (600.0 - self.viewport_h).max(0.0);
-        scroll_wheel_step(&mut self.scroll_y, delta_dip, max_scroll)
+        self.scroll.wheel(delta_dip)
+    }
+
+    fn on_key(
+        &mut self,
+        ev: crate::ui::input::KeyEvent,
+        _focus: &mut crate::ui::focus::FocusModel,
+    ) -> bool {
+        self.scroll.on_key(ev.key)
+    }
+
+    fn sync_after_layout(
+        &mut self,
+        tree: &mut Tree,
+        focused: Option<WidgetId>,
+        scroll_to_focused: bool,
+    ) {
+        self.scroll.sync(tree, focused, scroll_to_focused);
     }
 }
 

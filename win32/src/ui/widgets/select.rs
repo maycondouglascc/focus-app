@@ -315,7 +315,9 @@ impl PopupDelegate for SelectPopupDelegate {
                 }
                 _ => PopupOutcome::default(),
             },
-            PopupEvent::Closed => PopupOutcome::default(),
+            PopupEvent::Closed | PopupEvent::Wheel(_) | PopupEvent::FocusChanged(_) => {
+                PopupOutcome::default()
+            }
         }
     }
 }

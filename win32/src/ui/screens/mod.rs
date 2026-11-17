@@ -145,6 +145,7 @@ pub fn build_scroll_page(
         },
     );
     tree.set_scroll(viewport, 0.0, scroll_y);
+    tree.set_scrollable_y(viewport, true);
 
     let col = tree.add_container(
         viewport,
@@ -166,6 +167,74 @@ pub fn build_scroll_page(
         },
     );
     (viewport, col)
+}
+
+/// Shared vertical scroll controller whose `max_y` and `viewport_h` are derived from real
+/// laid-out tree bounds (replacing fixed 1100–1150 DIP estimates) and that scrolls focused
+/// descendants into view automatically on keyboard Tab / UIA Focus.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct PageScroll {
+    pub y: f32,
+    pub max_y: f32,
+    pub viewport_h: f32,
+    vp_node: Option<Node>,
+}
+
+impl PageScroll {
+    pub fn build(
+        &mut self,
+        tree: &mut Tree,
+        parent: Node,
+        max_width_dip: f32,
+        padding_dip: f32,
+        gap_dip: f32,
+    ) -> Node {
+        let (vp, col) =
+            build_scroll_page(tree, parent, max_width_dip, padding_dip, gap_dip, self.y);
+        self.vp_node = Some(vp);
+        col
+    }
+
+    pub fn sync(&mut self, tree: &mut Tree, focused: Option<WidgetId>, scroll_to_focused: bool) {
+        let Some(vp) = self.vp_node else {
+            return;
+        };
+        if tree.data(vp).is_none() {
+            return;
+        }
+        self.max_y = tree.scroll_max_y(vp);
+        self.viewport_h = tree.rect(vp).h;
+        self.y = self.y.clamp(0.0, self.max_y);
+        tree.set_scroll(vp, 0.0, self.y);
+        if scroll_to_focused {
+            if let Some(fid) = focused {
+                if let Some(target) = tree.node_by_id(fid) {
+                    if let Some(new_y) = tree.scroll_node_into_view(vp, target) {
+                        self.y = new_y;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn wheel(&mut self, delta_dip: f32) -> bool {
+        scroll_wheel_step(&mut self.y, delta_dip, self.max_y)
+    }
+
+    pub fn on_key(&mut self, key: crate::ui::input::KeyCode) -> bool {
+        let step = (self.viewport_h * 0.85).max(160.0);
+        match key {
+            crate::ui::input::KeyCode::PageUp => self.wheel(step),
+            crate::ui::input::KeyCode::PageDown => self.wheel(-step),
+            _ => false,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.y = 0.0;
+        self.max_y = 0.0;
+        self.vp_node = None;
+    }
 }
 
 /// Builds a rounded surface card matching the Focus `.lo-card` design token.

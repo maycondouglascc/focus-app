@@ -22,10 +22,7 @@ use crate::ui::widgets::text_field::{self, TextFieldProps};
 use crate::ui::widgets::toggle::{self, ToggleKind, ToggleProps};
 use crate::ui::widgets::{add_label, glyph, interactive_a11y, Interact};
 
-use super::{
-    build_card, build_empty_state, build_scroll_page, screen_root_tree, scroll_wheel_step,
-    PopupSelectSlot,
-};
+use super::{build_card, build_empty_state, screen_root_tree, PageScroll, PopupSelectSlot};
 
 const KEY_PROJ_NAME: &str = "project_dlg.name";
 const KEY_PROJ_CLIENT: &str = "project_dlg.client";
@@ -717,8 +714,7 @@ pub struct ProjectsScreen {
     store: SharedStore,
     show_archived: bool,
     sort: SortState,
-    scroll_y: f32,
-    viewport_h: f32,
+    scroll: PageScroll,
     dialog: Option<ProjectDialogState>,
 
     id_new_btn: Option<WidgetId>,
@@ -741,8 +737,7 @@ impl ProjectsScreen {
                 col: 2,
                 dir: SortDir::Desc,
             },
-            scroll_y: 0.0,
-            viewport_h: 720.0,
+            scroll: PageScroll::default(),
             dialog: None,
             id_new_btn: None,
             id_empty_new_btn: None,
@@ -761,7 +756,7 @@ impl ProjectsScreen {
     pub fn reset_transient(&mut self) {
         self.dialog = None;
         self.opened_project = None;
-        self.scroll_y = 0.0;
+        self.scroll.reset();
     }
 
     #[cfg(test)]
@@ -794,7 +789,6 @@ impl ProjectsScreen {
         parent: Node,
         env: &ScreenEnv<'_>,
     ) -> Option<Node> {
-        self.viewport_h = env.height_dip;
         let p = env.palette;
 
         let (now_ms, all_projects, summaries) = {
@@ -821,7 +815,7 @@ impl ProjectsScreen {
             .collect();
         Self::sort_projects(&mut visible, self.sort);
 
-        let (_vp, col) = build_scroll_page(tree, parent, 960.0, 28.0, 16.0, self.scroll_y);
+        let col = self.scroll.build(tree, parent, 960.0, 28.0, 16.0);
 
         // Header
         let head = tree.add_container(
@@ -1123,7 +1117,19 @@ impl ProjectsScreen {
     }
 
     pub fn handle_key(&mut self, key: KeyCode) -> bool {
-        self.dialog.as_mut().is_some_and(|d| d.on_key(key))
+        if let Some(ref mut dlg) = self.dialog {
+            return dlg.on_key(key);
+        }
+        self.scroll.on_key(key)
+    }
+
+    pub fn sync_after_layout(
+        &mut self,
+        tree: &mut Tree,
+        focused: Option<WidgetId>,
+        scroll_to_focused: bool,
+    ) {
+        self.scroll.sync(tree, focused, scroll_to_focused);
     }
 
     pub fn handle_escape(&mut self) -> bool {
@@ -1139,9 +1145,7 @@ impl ProjectsScreen {
         if self.dialog.is_some() {
             return false;
         }
-        let max_scroll =
-            (self.row_project_ids.len() as f32 * 40.0 + 180.0 - self.viewport_h).max(0.0);
-        scroll_wheel_step(&mut self.scroll_y, delta_dip, max_scroll)
+        self.scroll.wheel(delta_dip)
     }
 
     pub fn handle_popup_poll(&mut self) -> bool {
@@ -1187,6 +1191,15 @@ impl Screen for ProjectsScreen {
 
     fn on_popup_poll(&mut self) -> bool {
         self.handle_popup_poll()
+    }
+
+    fn sync_after_layout(
+        &mut self,
+        tree: &mut Tree,
+        focused: Option<WidgetId>,
+        scroll_to_focused: bool,
+    ) {
+        ProjectsScreen::sync_after_layout(self, tree, focused, scroll_to_focused);
     }
 }
 

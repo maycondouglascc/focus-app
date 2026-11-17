@@ -1118,6 +1118,11 @@ unsafe fn on_a11y_action_msg(hwnd: HWND) {
                         }
                     } else {
                         focus_changed |= u.focus.focus_keyboard(target);
+                        if focus_changed {
+                            if let Some(h) = u.screen.as_mut() {
+                                h.sync_focused_scroll(target);
+                            }
+                        }
                     }
                     visual_changed = true;
                 }

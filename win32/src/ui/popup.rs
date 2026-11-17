@@ -162,11 +162,13 @@ pub fn monitor_work_area(anchor: Option<ScreenRect>) -> ScreenRect {
 }
 
 /// Events emitted from an open popup window to its widget controller.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // consumed by Select and Popover in commits 6-7
+#[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)] // consumed by Select and Popover
 pub enum PopupEvent {
     Click(WidgetId),
     Key(KeyEvent),
+    Wheel(f32),
+    FocusChanged(Option<WidgetId>),
     Closed,
 }
 
@@ -436,6 +438,10 @@ pub fn refresh_layout_with_height(desired_h_dip: Option<f32>) {
             let root_id = p.tree.id(p.tree.root());
             p.focus
                 .sync_from_tree(&p.tree, |_, _| FocusScope::Popup(root_id));
+            let cur = p.focus.focused();
+            let _ = p
+                .delegate
+                .on_event(PopupEvent::FocusChanged(cur), &mut p.tree, &mut p.focus);
         });
         sync_a11y(hwnd);
         let _ = InvalidateRect(Some(hwnd), None, false);
@@ -635,15 +641,28 @@ unsafe fn on_pointer_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
 unsafe fn on_wheel_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
     let delta = (wparam.0 >> 16) as i16;
     let horizontal = msg == WM_MOUSEHWHEEL || msg == WM_POINTERHWHEEL;
-    with_popup(|p| {
-        let _ = if horizontal {
-            p.pointer.wheel.push_horizontal_dip(delta, 48.0)
+    let (handled, dirty) = with_popup(|p| {
+        let dy = if horizontal {
+            let _ = p.pointer.wheel.push_horizontal_dip(delta, 48.0);
+            0.0
         } else {
             p.pointer.wheel.push_vertical_dip(delta, 48.0)
         };
-    });
-    let _ = hwnd;
-    msg == WM_POINTERWHEEL || msg == WM_POINTERHWHEEL
+        if dy.abs() > 0.01 {
+            let out = p
+                .delegate
+                .on_event(PopupEvent::Wheel(dy), &mut p.tree, &mut p.focus);
+            (out.handled, out.dirty)
+        } else {
+            (false, false)
+        }
+    })
+    .unwrap_or((false, false));
+    if dirty {
+        sync_a11y(hwnd);
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+    handled || msg == WM_POINTERWHEEL || msg == WM_POINTERHWHEEL
 }
 
 fn translate_key(wparam: WPARAM) -> KeyEvent {
@@ -699,10 +718,17 @@ unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
             let prev = p.focus.focused();
             let prev_vis = p.focus.is_focus_visible();
             let next = p.focus.tab(ev.shift);
+            let mut scroll_dirty = false;
+            if next != prev {
+                let fout =
+                    p.delegate
+                        .on_event(PopupEvent::FocusChanged(next), &mut p.tree, &mut p.focus);
+                scroll_dirty = fout.dirty;
+            }
             (
                 true,
                 next != prev,
-                next != prev || p.focus.is_focus_visible() != prev_vis,
+                next != prev || p.focus.is_focus_visible() != prev_vis || scroll_dirty,
                 false,
                 false,
                 false,
@@ -981,7 +1007,17 @@ unsafe extern "system" fn popup_wnd_proc(
                 for req in requests {
                     let id = a11y::widget_id(req.target_node);
                     match req.action {
-                        Action::Focus => dirty |= p.focus.focus_keyboard(id),
+                        Action::Focus => {
+                            if p.focus.focus_keyboard(id) {
+                                dirty = true;
+                                let fout = p.delegate.on_event(
+                                    PopupEvent::FocusChanged(Some(id)),
+                                    &mut p.tree,
+                                    &mut p.focus,
+                                );
+                                dirty |= fout.dirty;
+                            }
+                        }
                         Action::Click => {
                             let out = p.delegate.on_event(
                                 PopupEvent::Click(id),

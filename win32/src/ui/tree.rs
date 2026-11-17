@@ -215,6 +215,7 @@ pub struct NodeData {
     pub hidden: bool,
     pub scroll_x: f32,
     pub scroll_y: f32,
+    pub scrollable_y: bool,
     pub a11y: A11yInfo,
     pub virtual_children: Vec<VirtualA11yChild>,
     pub virtual_focus: Option<WidgetId>,
@@ -232,6 +233,7 @@ impl NodeData {
             hidden: false,
             scroll_x: 0.0,
             scroll_y: 0.0,
+            scrollable_y: false,
             a11y: A11yInfo::default(),
             virtual_children: Vec::new(),
             virtual_focus: None,
@@ -461,6 +463,80 @@ impl Tree {
         if let Some(d) = self.data_mut(node) {
             d.scroll_x = x.max(0.0);
             d.scroll_y = y.max(0.0);
+        }
+    }
+
+    pub fn set_scrollable_y(&mut self, node: Node, scrollable: bool) {
+        if let Some(d) = self.data_mut(node) {
+            d.scrollable_y = scrollable;
+        }
+    }
+
+    /// Sets the root container height to `100%` of the available viewport height.
+    pub fn set_root_height_fill(&mut self) {
+        if let Ok(mut st) = self.taffy.style(self.root).cloned() {
+            st.size.height = percent(1.0_f32);
+            let _ = self.taffy.set_style(self.root, st);
+        }
+    }
+
+    /// Computes maximum vertical scroll offset (`content_h - viewport_h`, >= 0) from laid-out geometry.
+    pub fn scroll_max_y(&self, viewport: Node) -> f32 {
+        let Ok(vp_l) = self.taffy.layout(viewport.0) else {
+            return 0.0;
+        };
+        let vp_h = vp_l.size.height;
+        let mut content_bottom = 0.0_f32;
+        for child in self.children(viewport) {
+            if self.data(child).is_some_and(|d| d.hidden) {
+                continue;
+            }
+            if let Ok(cl) = self.taffy.layout(child.0) {
+                content_bottom = content_bottom.max(cl.location.y + cl.size.height);
+            }
+        }
+        (content_bottom + vp_l.padding.bottom - vp_h).max(0.0)
+    }
+
+    /// Scrolls `viewport` vertically if `target` lies outside its visible DIP window.
+    /// Returns `Some(new_scroll_y)` when `scroll_y` changed.
+    pub fn scroll_node_into_view(&mut self, viewport: Node, target: Node) -> Option<f32> {
+        let mut anc = self.parent(target);
+        let mut is_descendant = false;
+        while let Some(p) = anc {
+            if p == viewport {
+                is_descendant = true;
+                break;
+            }
+            anc = self.parent(p);
+        }
+        if !is_descendant {
+            return None;
+        }
+
+        let cur_scroll = self.data(viewport).map(|d| d.scroll_y).unwrap_or(0.0);
+        let vp_rect = self.rect(viewport);
+        if vp_rect.h <= 1.0 {
+            return None;
+        }
+        let t_rect = self.rect(target);
+        let rel_top = t_rect.y - vp_rect.y;
+        let rel_bot = rel_top + t_rect.h;
+        let margin = 12.0_f32.min(vp_rect.h * 0.15);
+
+        let next_scroll = if rel_top < margin {
+            cur_scroll + rel_top - margin
+        } else if rel_bot > vp_rect.h - margin {
+            cur_scroll + (rel_bot - (vp_rect.h - margin))
+        } else {
+            return None;
+        };
+        let clamped = next_scroll.clamp(0.0, self.scroll_max_y(viewport));
+        if (clamped - cur_scroll).abs() > 0.2 {
+            self.set_scroll(viewport, 0.0, clamped);
+            Some(clamped)
+        } else {
+            None
         }
     }
 
