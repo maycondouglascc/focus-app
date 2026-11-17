@@ -91,6 +91,15 @@ pub fn hwnd() -> Option<HWND> {
     current()
 }
 
+pub fn paint_count() -> u64 {
+    UI.with(|u| {
+        u.try_borrow()
+            .ok()
+            .and_then(|g| g.as_ref().map(|x| x.paint_count))
+    })
+    .unwrap_or(0)
+}
+
 /// Mounts a retained screen onto the open window and schedules a single paint.
 #[allow(dead_code)] // wired to F3 screens and verified by F2 gallery tests
 pub fn set_screen(screen: Box<dyn Screen>) -> bool {
@@ -1185,6 +1194,84 @@ mod tests {
             paints_after_idle, paints_after_mount,
             "idle window must not run a continuous redraw loop"
         );
+
+        close();
+        pump();
+        reset_shared();
+        assert!(!is_open());
+    }
+
+    #[test]
+    fn wm_dpichanged_and_caption_hit_test_cover_100_150_200() {
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+        super::super::init();
+        assert!(open());
+        assert!(set_screen(Box::new(
+            super::super::screen::WidgetGalleryScreen::new()
+        )));
+        pump_until_painted(1);
+        let hwnd = hwnd().expect("live hwnd");
+
+        // SAFETY: `hwnd` is our thread-owned window; `GetWindowRect` & `GetDpiForWindow` are safe.
+        let (rc, dpi) = unsafe {
+            let mut rc = RECT::default();
+            let _ = GetWindowRect(hwnd, &mut rc);
+            (rc, GetDpiForWindow(hwnd))
+        };
+        let max_x = rc.right - frame::px(46.0 * 2.0 - 20.0, dpi);
+        let title_y = rc.top + frame::px(16.0, dpi);
+        let cap_x = rc.left + frame::px(40.0, dpi);
+        let lparam_pt =
+            |x: i32, y: i32| LPARAM((((y as u32 & 0xFFFF) << 16) | (x as u32 & 0xFFFF)) as isize);
+
+        // SAFETY: sends synchronous hit-test queries to our live window.
+        unsafe {
+            assert_eq!(
+                SendMessageW(
+                    hwnd,
+                    WM_NCHITTEST,
+                    Some(WPARAM(0)),
+                    Some(lparam_pt(max_x, title_y))
+                )
+                .0 as u32,
+                HTMAXBUTTON
+            );
+            assert_eq!(
+                SendMessageW(
+                    hwnd,
+                    WM_NCHITTEST,
+                    Some(WPARAM(0)),
+                    Some(lparam_pt(cap_x, title_y))
+                )
+                .0 as u32,
+                HTCAPTION
+            );
+
+            // Simulate moving across monitors: 150% (144 DPI) then 200% (192 DPI)
+            // using base 500x350 DIPs so even 200% (1000x700 px) stays inside 1080p limits.
+            for target_dpi in [144_usize, 192_usize, 96_usize] {
+                let s = target_dpi as f32 / 96.0;
+                let suggested = RECT {
+                    left: rc.left,
+                    top: rc.top,
+                    right: rc.left + (500.0 * s).round() as i32,
+                    bottom: rc.top + (350.0 * s).round() as i32,
+                };
+                let wp = WPARAM((target_dpi << 16) | target_dpi);
+                let _ = SendMessageW(
+                    hwnd,
+                    WM_DPICHANGED,
+                    Some(wp),
+                    Some(LPARAM((&suggested as *const RECT) as isize)),
+                );
+                pump();
+                let mut cur = RECT::default();
+                let _ = GetWindowRect(hwnd, &mut cur);
+                assert_eq!(cur.right - cur.left, suggested.right - suggested.left);
+                assert_eq!(cur.bottom - cur.top, suggested.bottom - suggested.top);
+            }
+        }
 
         close();
         pump();

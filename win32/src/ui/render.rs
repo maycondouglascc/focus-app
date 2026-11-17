@@ -24,7 +24,8 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+    D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_CREATE_DEVICE_SINGLETHREADED, D3D11_SDK_VERSION,
 };
 use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
@@ -178,14 +179,16 @@ pub struct Renderer {
 
 fn d3d_device() -> Result<ID3D11Device> {
     let mut device = None;
-    for driver in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
+    // Prefer WARP for 2D retained UI: avoids loading ~45-50 MB of GPU shader-compiler
+    // working set while keeping DirectComposition, Mica backdrop, and 60fps redraws intact.
+    for driver in [D3D_DRIVER_TYPE_WARP, D3D_DRIVER_TYPE_HARDWARE] {
         // SAFETY: the out pointer is a valid Option slot; no software module.
         let r = unsafe {
             D3D11CreateDevice(
                 None,
                 driver,
                 HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_SINGLETHREADED,
                 None,
                 D3D11_SDK_VERSION,
                 Some(&mut device),

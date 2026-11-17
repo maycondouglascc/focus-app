@@ -87,18 +87,31 @@ pub fn cycle(n: u32) -> i32 {
     0
 }
 
-/// `focus.exe --ui-show SECONDS`: shows the window and keeps it alive, to look
-/// at it or drive it by hand.
-pub fn show(seconds: u64) -> i32 {
+/// `focus.exe --ui-show SECONDS [--gallery]`: shows the window and keeps it
+/// alive, logging the cold open time to the first painted frame.
+pub fn show(seconds: u64, gallery: bool) -> i32 {
+    let t0 = Instant::now();
     super::init();
     if !window::open() {
         return 1;
     }
+    if gallery {
+        let _ = window::set_screen(Box::new(super::screen::WidgetGalleryScreen::new()));
+    }
+    let mut first_frame_ms = None;
     let end = Instant::now() + Duration::from_secs(seconds);
     while Instant::now() < end && window::is_open() {
         window::pump();
-        std::thread::sleep(Duration::from_millis(5));
+        if first_frame_ms.is_none() && window::paint_count() >= 1 {
+            first_frame_ms = Some(t0.elapsed().as_secs_f64() * 1000.0);
+        }
+        std::thread::sleep(Duration::from_millis(2));
     }
+    println!(
+        "first_frame_ms={:.1} paints={}",
+        first_frame_ms.unwrap_or(-1.0),
+        window::paint_count()
+    );
     window::close();
     super::render::reset_shared();
     0

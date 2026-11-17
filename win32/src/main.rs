@@ -439,7 +439,8 @@ fn main() {
         }
         if let Some(i) = args.iter().position(|a| a == "--ui-show") {
             let n = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(10);
-            std::process::exit(ui::selftest::show(n));
+            let gallery = args.iter().any(|a| a == "--gallery");
+            std::process::exit(ui::selftest::show(n, gallery));
         }
     }
     let path = db_path_from_args();
