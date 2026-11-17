@@ -333,8 +333,74 @@ mod tests {
             .filter(|s| matches!(s.entry.id.as_str(), "a" | "b" | "c"))
             .collect();
         assert!(cluster.iter().all(|s| s.cols == 3));
+        assert_eq!(cluster[0].entry.id, "a");
+        assert_eq!(cluster[0].col, 0);
+        assert_eq!(cluster[1].entry.id, "b");
+        assert_eq!(cluster[1].col, 1);
+        assert_eq!(cluster[2].entry.id, "c");
+        assert_eq!(cluster[2].col, 2);
         assert_eq!(segs.last().unwrap().entry.id, "d");
         assert_eq!(segs.last().unwrap().cols, 1);
+        assert_eq!(segs.last().unwrap().col, 0);
+    }
+
+    #[test]
+    fn layout_day_handles_abutting_chain_reuse_and_equal_starts() {
+        let day = from_local(2026, 11, 18, 0, 0, 0, 0);
+        let entries = vec![
+            // Abutting pair (end == start): must NOT overlap -> each col=0, cols=1.
+            entry(
+                "ab1",
+                local_day_at(2026, 11, 18, 7 * 60),
+                local_day_at(2026, 11, 18, 8 * 60),
+            ),
+            entry(
+                "ab2",
+                local_day_at(2026, 11, 18, 8 * 60),
+                local_day_at(2026, 11, 18, 9 * 60),
+            ),
+            // Chain A–B–C: A(9:00..10:00) overlaps B(9:30..10:30); C(10:00..11:00) abuts A
+            // and overlaps B -> C reuses column 0, cluster width stays cols=2.
+            entry(
+                "ch_a",
+                local_day_at(2026, 11, 18, 9 * 60),
+                local_day_at(2026, 11, 18, 10 * 60),
+            ),
+            entry(
+                "ch_b",
+                local_day_at(2026, 11, 18, 9 * 60 + 30),
+                local_day_at(2026, 11, 18, 10 * 60 + 30),
+            ),
+            entry(
+                "ch_c",
+                local_day_at(2026, 11, 18, 10 * 60),
+                local_day_at(2026, 11, 18, 11 * 60),
+            ),
+            // Equal start times: longer block placed first (col=0), shorter second (col=1), cols=2.
+            entry(
+                "eq_short",
+                local_day_at(2026, 11, 18, 13 * 60),
+                local_day_at(2026, 11, 18, 13 * 60 + 30),
+            ),
+            entry(
+                "eq_long",
+                local_day_at(2026, 11, 18, 13 * 60),
+                local_day_at(2026, 11, 18, 14 * 60 + 30),
+            ),
+        ];
+
+        let segs = layout_day(&entries, day, add_days_start(day, 1));
+        let find = |id: &str| segs.iter().find(|s| s.entry.id == id).unwrap();
+
+        assert_eq!((find("ab1").col, find("ab1").cols), (0, 1));
+        assert_eq!((find("ab2").col, find("ab2").cols), (0, 1));
+
+        assert_eq!((find("ch_a").col, find("ch_a").cols), (0, 2));
+        assert_eq!((find("ch_b").col, find("ch_b").cols), (1, 2));
+        assert_eq!((find("ch_c").col, find("ch_c").cols), (0, 2));
+
+        assert_eq!((find("eq_long").col, find("eq_long").cols), (0, 2));
+        assert_eq!((find("eq_short").col, find("eq_short").cols), (1, 2));
     }
 
     #[test]
