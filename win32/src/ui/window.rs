@@ -104,6 +104,7 @@ pub fn open() -> bool {
 
 /// Destroys the window and every graphics resource if it is open.
 pub fn close() {
+    super::popup::close();
     // Take the state out first: dropping the renderer releases the swap chain,
     // and WM_DESTROY must not find the state borrowed.
     let ui = UI.with(|u| u.borrow_mut().take());
@@ -788,6 +789,7 @@ unsafe extern "system" fn wnd_proc(
             return LRESULT(0);
         }
         WM_DESTROY => {
+            super::popup::close();
             // Closed by the user (or by `close`, which already took the state):
             // drop the renderer with the window.
             let ui = UI.with(|u| {

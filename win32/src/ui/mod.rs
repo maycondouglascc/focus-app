@@ -6,6 +6,7 @@ pub mod chrome;
 pub mod focus;
 pub mod frame;
 pub mod input;
+pub mod popup;
 pub mod prefs;
 pub mod render;
 pub mod selftest;

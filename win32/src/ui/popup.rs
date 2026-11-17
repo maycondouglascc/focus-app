@@ -1,0 +1,1045 @@
+//! Lightweight top-level `WS_POPUP` window for transient overlays (`Select` menus
+//! and `Popover` panels). Clamps/flips against the monitor's `rcWork` via
+//! `MonitorFromPoint` + `GetMonitorInfoW`, owns its own swap chain / AccessKit
+//! adapter, and dismisses on `Esc` or `WM_ACTIVATE(WA_INACTIVE)`.
+
+use std::cell::RefCell;
+
+use accesskit::Action;
+use accesskit_windows::Adapter;
+use windows::core::w;
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MonitorFromPoint, ScreenToClient,
+    MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT,
+};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+    VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_MENU, VK_NEXT,
+    VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+};
+use windows::Win32::UI::Input::Pointer::{
+    GetPointerInfo, POINTER_FLAG_FIRSTBUTTON, POINTER_FLAG_SECONDBUTTON, POINTER_INFO,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, IsWindow, LoadCursorW,
+    PostMessageW, RegisterClassW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, IDC_ARROW,
+    PT_PEN, PT_TOUCH, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, WA_INACTIVE,
+    WINDOW_EX_STYLE, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_GETOBJECT, WM_KEYDOWN, WM_KILLFOCUS, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_PAINT,
+    WM_POINTERCAPTURECHANGED, WM_POINTERDOWN, WM_POINTERENTER, WM_POINTERHWHEEL, WM_POINTERLEAVE,
+    WM_POINTERUP, WM_POINTERUPDATE, WM_POINTERWHEEL, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE,
+    WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED, WNDCLASSW, WS_CLIPCHILDREN,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
+};
+
+use super::a11y::{self, A11yActionQueue, StaticActivation, WM_A11Y_ACTION};
+use super::focus::{FocusModel, FocusScope};
+use super::frame;
+use super::input::{KeyCode, KeyEvent, PointerButton, PointerKind, PointerState};
+use super::prefs::{self, SystemPrefs};
+use super::render::{reset_shared, DrawError, FrameOpts, Hover, Renderer};
+use super::strings;
+use super::theme::Palette;
+use super::tree::{Tree, WidgetId};
+
+/// `WM_MOUSELEAVE`
+const WM_MOUSELEAVE: u32 = 0x02A3;
+
+/// Physical screen-space rectangle (`left/top/right/bottom` in virtual desktop pixels).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScreenRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+impl ScreenRect {
+    pub fn width(self) -> i32 {
+        (self.right - self.left).max(0)
+    }
+
+    pub fn height(self) -> i32 {
+        (self.bottom - self.top).max(0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // variants used by Select and Popover
+pub enum PopupAlign {
+    BelowStart,
+    BelowEnd,
+    Center,
+}
+
+/// Computes the top-left physical screen position `(x, y)` for a `size_px` popup,
+/// flipping across the anchor when overflowing the monitor work area and clamping inside `work`.
+pub fn place_popup(
+    anchor: Option<ScreenRect>,
+    size_px: (i32, i32),
+    work: ScreenRect,
+    align: PopupAlign,
+) -> (i32, i32) {
+    let w = size_px.0.max(1).min(work.width().max(1));
+    let h = size_px.1.max(1).min(work.height().max(1));
+
+    let Some(a) = anchor else {
+        let x = work.left + (work.width() - w) / 2;
+        let y = work.top + (work.height() - h) / 2;
+        return (
+            x.clamp(work.left, (work.right - w).max(work.left)),
+            y.clamp(work.top, (work.bottom - h).max(work.top)),
+        );
+    };
+
+    if align == PopupAlign::Center {
+        let x = a.left + (a.width() - w) / 2;
+        let y = a.top + (a.height() - h) / 2;
+        return (
+            x.clamp(work.left, (work.right - w).max(work.left)),
+            y.clamp(work.top, (work.bottom - h).max(work.top)),
+        );
+    }
+
+    let mut x = match align {
+        PopupAlign::BelowEnd => a.right - w,
+        PopupAlign::BelowStart | PopupAlign::Center => a.left,
+    };
+    if x + w > work.right && a.right - w >= work.left {
+        x = a.right - w;
+    }
+    x = x.clamp(work.left, (work.right - w).max(work.left));
+
+    let mut y = a.bottom + 4;
+    if y + h > work.bottom {
+        let above = a.top - 4 - h;
+        if above >= work.top {
+            y = above;
+        }
+    }
+    y = y.clamp(work.top, (work.bottom - h).max(work.top));
+
+    (x, y)
+}
+
+/// Queries the nearest monitor's work area (`rcWork`, excluding the taskbar) in physical pixels.
+pub fn monitor_work_area(anchor: Option<ScreenRect>) -> ScreenRect {
+    let pt = match anchor {
+        Some(a) => POINT {
+            x: a.left + a.width() / 2,
+            y: a.top + a.height() / 2,
+        },
+        None => POINT { x: 0, y: 0 },
+    };
+    // SAFETY: `MonitorFromPoint` and `GetMonitorInfoW` accept any POINT and fill `MONITORINFO`.
+    unsafe {
+        let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            ScreenRect {
+                left: mi.rcWork.left,
+                top: mi.rcWork.top,
+                right: mi.rcWork.right,
+                bottom: mi.rcWork.bottom,
+            }
+        } else {
+            ScreenRect {
+                left: 0,
+                top: 0,
+                right: 1280,
+                bottom: 800,
+            }
+        }
+    }
+}
+
+/// Events emitted from an open popup window to its widget controller.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // consumed by Select and Popover in commits 6-7
+pub enum PopupEvent {
+    Click(WidgetId),
+    Key(KeyEvent),
+    Closed,
+}
+
+pub trait PopupDelegate {
+    fn on_event(&mut self, event: PopupEvent, tree: &mut Tree, focus: &mut FocusModel) -> bool;
+}
+
+struct ActivePopup {
+    hwnd: HWND,
+    owner: Option<HWND>,
+    renderer: Option<Renderer>,
+    prefs: SystemPrefs,
+    palette: Palette,
+    tree: Tree,
+    focus: FocusModel,
+    pointer: PointerState,
+    a11y_queue: A11yActionQueue,
+    a11y: Adapter,
+    delegate: Box<dyn PopupDelegate>,
+    size_dip: (f32, f32),
+    dismissing: bool,
+}
+
+thread_local! {
+    static POPUP: RefCell<Option<ActivePopup>> = const { RefCell::new(None) };
+}
+
+fn with_popup<R>(f: impl FnOnce(&mut ActivePopup) -> R) -> Option<R> {
+    POPUP.with(|p| p.try_borrow_mut().ok().and_then(|mut g| g.as_mut().map(f)))
+}
+
+#[allow(dead_code)] // used by Select and Popover in commits 6-7
+pub fn is_open() -> bool {
+    let hwnd = POPUP.with(|p| p.try_borrow().ok().and_then(|g| g.as_ref().map(|a| a.hwnd)));
+    // SAFETY: `IsWindow` safely validates any HWND value.
+    hwnd.is_some_and(|h| unsafe { IsWindow(Some(h)).as_bool() })
+}
+
+/// Opens a new `WS_POPUP` window, closing any previous popup first.
+#[allow(dead_code)] // used by Select and Popover in commits 6-7
+pub fn open(
+    owner: Option<HWND>,
+    anchor_screen: Option<ScreenRect>,
+    size_dip: (f32, f32),
+    align: PopupAlign,
+    mut tree: Tree,
+    delegate: Box<dyn PopupDelegate>,
+) -> Option<HWND> {
+    close();
+
+    // SAFETY: called on the UI thread; handles are owned by the caller/popup.
+    unsafe {
+        let hinstance = HINSTANCE(GetModuleHandleW(None).ok()?.0);
+        let class = w!("FocusPopupWindow");
+        let wc = WNDCLASSW {
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(popup_wnd_proc),
+            hInstance: hinstance,
+            hCursor: LoadCursorW(None, IDC_ARROW).ok()?,
+            lpszClassName: class,
+            ..Default::default()
+        };
+        RegisterClassW(&wc);
+
+        let dpi = owner
+            .filter(|h| IsWindow(Some(*h)).as_bool())
+            .map(|h| GetDpiForWindow(h))
+            .unwrap_or(96);
+        let scale = frame::scale(dpi);
+        let size_px = (
+            (size_dip.0 * scale).ceil().max(48.0) as i32,
+            (size_dip.1 * scale).ceil().max(32.0) as i32,
+        );
+        let work = monitor_work_area(anchor_screen);
+        let (x, y) = place_popup(anchor_screen, size_px, work, align);
+
+        let hwnd = CreateWindowExW(
+            WINDOW_EX_STYLE(WS_EX_TOOLWINDOW.0 | WS_EX_NOREDIRECTIONBITMAP.0),
+            class,
+            w!("FocusPopup"),
+            WS_POPUP | WS_CLIPCHILDREN,
+            x,
+            y,
+            size_px.0,
+            size_px.1,
+            owner,
+            None,
+            Some(hinstance),
+            None,
+        )
+        .ok()?;
+
+        // Adjust position once using the popup's actual monitor DPI in case owner straddled monitors.
+        let actual_dpi = GetDpiForWindow(hwnd);
+        let actual_scale = frame::scale(actual_dpi);
+        if (actual_scale - scale).abs() > 0.001 {
+            let new_px = (
+                (size_dip.0 * actual_scale).ceil().max(48.0) as i32,
+                (size_dip.1 * actual_scale).ceil().max(32.0) as i32,
+            );
+            let (nx, ny) = place_popup(anchor_screen, new_px, work, align);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                nx,
+                ny,
+                new_px.0,
+                new_px.1,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+
+        prefs::apply_rounded_corners(hwnd);
+        let sys_prefs = SystemPrefs::query();
+        let palette = Palette::for_system(sys_prefs.high_contrast);
+        let (cw, ch) = client_size(hwnd);
+        let renderer = match Renderer::new(hwnd, cw.max(1) as u32, ch.max(1) as u32) {
+            Ok(r) => {
+                r.set_text_scale(sys_prefs.text_scale);
+                tree.layout(cw as f32 / actual_scale, ch as f32 / actual_scale, r.text());
+                Some(r)
+            }
+            Err(e) => {
+                eprintln!("focus: popup renderer failed: {e}");
+                None
+            }
+        };
+
+        let root_id = tree.id(tree.root());
+        let mut focus = FocusModel::new();
+        focus.sync_from_tree(&tree, |_, _| FocusScope::Popup(root_id));
+        focus.push_popup(root_id);
+
+        let a11y_queue = A11yActionQueue::new(hwnd);
+        let a11y = Adapter::new(hwnd, false, a11y_queue.handler());
+
+        POPUP.with(|p| {
+            *p.borrow_mut() = Some(ActivePopup {
+                hwnd,
+                owner,
+                renderer,
+                prefs: sys_prefs,
+                palette,
+                tree,
+                focus,
+                pointer: PointerState::default(),
+                a11y_queue,
+                a11y,
+                delegate,
+                size_dip,
+                dismissing: false,
+            });
+        });
+
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = InvalidateRect(Some(hwnd), None, false);
+        Some(hwnd)
+    }
+}
+
+/// Closes any open popup window cleanly and returns focus to its owner if still open.
+pub fn close() {
+    let popped = POPUP.with(|p| p.try_borrow_mut().ok().and_then(|mut g| g.take()));
+    let Some(mut popup) = popped else {
+        return;
+    };
+    popup.dismissing = true;
+    let _ = popup
+        .delegate
+        .on_event(PopupEvent::Closed, &mut popup.tree, &mut popup.focus);
+    let hwnd = popup.hwnd;
+    let owner = popup.owner;
+    drop(popup);
+    // SAFETY: `hwnd` and `owner` belong to the current UI thread; invalid handles are harmless.
+    unsafe {
+        if IsWindow(Some(hwnd)).as_bool() {
+            let _ = DestroyWindow(hwnd);
+        }
+        if let Some(ow) = owner {
+            if IsWindow(Some(ow)).as_bool() {
+                let _ = SetFocus(Some(ow));
+            }
+        }
+    }
+}
+
+/// Updates the active popup's tree after its controller mutated state.
+#[allow(dead_code)] // used by Select and Popover
+pub fn refresh_layout() {
+    let hwnd = POPUP.with(|p| p.try_borrow().ok().and_then(|g| g.as_ref().map(|a| a.hwnd)));
+    let Some(hwnd) = hwnd else {
+        return;
+    };
+    // SAFETY: `hwnd` is a live popup owned by this thread.
+    unsafe {
+        let dpi = GetDpiForWindow(hwnd);
+        let scale = frame::scale(dpi);
+        let (cw, ch) = client_size(hwnd);
+        with_popup(|p| {
+            if let Some(r) = p.renderer.as_ref() {
+                p.tree
+                    .layout(cw as f32 / scale, ch as f32 / scale, r.text());
+            }
+            let root_id = p.tree.id(p.tree.root());
+            p.focus
+                .sync_from_tree(&p.tree, |_, _| FocusScope::Popup(root_id));
+        });
+        sync_a11y(hwnd);
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+}
+
+unsafe fn client_size(hwnd: HWND) -> (i32, i32) {
+    let mut rc = RECT::default();
+    let _ = GetClientRect(hwnd, &mut rc);
+    (rc.right - rc.left, rc.bottom - rc.top)
+}
+
+unsafe fn sync_a11y(hwnd: HWND) {
+    let dpi = GetDpiForWindow(hwnd);
+    let client_px = client_size(hwnd);
+    let scale = frame::scale(dpi);
+    let queued = POPUP.with(|p| {
+        let Ok(mut g) = p.try_borrow_mut() else {
+            return None;
+        };
+        let popup = g.as_mut()?;
+        let tree = &popup.tree;
+        let focused = popup.focus.focused();
+        popup.a11y.update_if_active(|| {
+            a11y::build_tree_update(Some(tree), focused, scale, client_px, strings::APP_NAME)
+        })
+    });
+    if let Some(ev) = queued {
+        ev.raise();
+    }
+}
+
+unsafe fn query_pointer(
+    hwnd: HWND,
+    wparam: WPARAM,
+) -> Option<(u32, PointerKind, PointerButton, f32, f32)> {
+    let pointer_id = (wparam.0 & 0xFFFF) as u32;
+    let mut info = POINTER_INFO::default();
+    GetPointerInfo(pointer_id, &mut info).ok()?;
+    let mut pt = info.ptPixelLocation;
+    let _ = ScreenToClient(hwnd, &mut pt);
+    let scale = frame::scale(GetDpiForWindow(hwnd));
+    let kind = match info.pointerType {
+        PT_TOUCH => PointerKind::Touch,
+        PT_PEN => PointerKind::Pen,
+        _ => PointerKind::Mouse,
+    };
+    let button = if (info.pointerFlags.0 & POINTER_FLAG_FIRSTBUTTON.0) != 0 {
+        PointerButton::Primary
+    } else if (info.pointerFlags.0 & POINTER_FLAG_SECONDBUTTON.0) != 0 {
+        PointerButton::Secondary
+    } else {
+        PointerButton::Other
+    };
+    Some((
+        pointer_id,
+        kind,
+        button,
+        pt.x as f32 / scale,
+        pt.y as f32 / scale,
+    ))
+}
+
+unsafe fn on_pointer_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
+    match msg {
+        WM_POINTERENTER | WM_POINTERUPDATE => {
+            let Some((_, kind, _, x, y)) = query_pointer(hwnd, wparam) else {
+                return false;
+            };
+            if kind == PointerKind::Mouse {
+                let mut t = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                let _ = TrackMouseEvent(&mut t);
+            }
+            let changed = with_popup(|p| {
+                let hit = p.tree.hit_test(x, y);
+                p.pointer.on_move(hit, x, y).visual_changed
+            })
+            .unwrap_or(false);
+            if changed {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            true
+        }
+        WM_POINTERDOWN => {
+            let Some((pid, kind, btn, x, y)) = query_pointer(hwnd, wparam) else {
+                return false;
+            };
+            let (request_capture, focus_changed, visual_changed) = with_popup(|p| {
+                let hit = p.tree.hit_test(x, y);
+                let out = p.pointer.on_down(pid, btn, hit, x, y);
+                let focus_changed = match hit {
+                    Some(id) => p.focus.focus_pointer(id),
+                    None => p.focus.clear_focus(),
+                };
+                (
+                    out.request_capture,
+                    focus_changed,
+                    out.visual_changed || focus_changed,
+                )
+            })
+            .unwrap_or((false, false, false));
+            if request_capture && kind == PointerKind::Mouse {
+                SetCapture(hwnd);
+            }
+            if focus_changed {
+                sync_a11y(hwnd);
+            }
+            if visual_changed {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            true
+        }
+        WM_POINTERUP => {
+            let Some((pid, _, _, x, y)) = query_pointer(hwnd, wparam) else {
+                return false;
+            };
+            let (release_capture, clicked, visual_changed) = with_popup(|p| {
+                let hit = p.tree.hit_test(x, y);
+                let out = p.pointer.on_up(pid, PointerButton::Primary, hit, x, y);
+                let mut dirty = out.visual_changed;
+                if let Some(id) = out.clicked {
+                    dirty |= p
+                        .delegate
+                        .on_event(PopupEvent::Click(id), &mut p.tree, &mut p.focus);
+                }
+                (out.release_capture, out.clicked, dirty)
+            })
+            .unwrap_or((false, None, false));
+            if release_capture {
+                let _ = ReleaseCapture();
+            }
+            if clicked.is_some() {
+                sync_a11y(hwnd);
+            }
+            if visual_changed {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            true
+        }
+        WM_POINTERLEAVE | WM_MOUSELEAVE => {
+            let changed = with_popup(|p| p.pointer.on_leave().visual_changed).unwrap_or(false);
+            if changed {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            true
+        }
+        WM_POINTERCAPTURECHANGED | WM_CAPTURECHANGED => {
+            let changed =
+                with_popup(|p| p.pointer.on_capture_lost().visual_changed).unwrap_or(false);
+            if changed {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+unsafe fn on_wheel_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
+    let delta = (wparam.0 >> 16) as i16;
+    let horizontal = msg == WM_MOUSEHWHEEL || msg == WM_POINTERHWHEEL;
+    with_popup(|p| {
+        let _ = if horizontal {
+            p.pointer.wheel.push_horizontal_dip(delta, 48.0)
+        } else {
+            p.pointer.wheel.push_vertical_dip(delta, 48.0)
+        };
+    });
+    let _ = hwnd;
+    msg == WM_POINTERWHEEL || msg == WM_POINTERHWHEEL
+}
+
+fn translate_key(wparam: WPARAM) -> KeyEvent {
+    let vk = VIRTUAL_KEY(wparam.0 as u16);
+    let key = match vk {
+        VK_TAB => KeyCode::Tab,
+        VK_ESCAPE => KeyCode::Escape,
+        VK_RETURN => KeyCode::Enter,
+        VK_SPACE => KeyCode::Space,
+        VK_LEFT => KeyCode::Left,
+        VK_RIGHT => KeyCode::Right,
+        VK_UP => KeyCode::Up,
+        VK_DOWN => KeyCode::Down,
+        VK_HOME => KeyCode::Home,
+        VK_END => KeyCode::End,
+        VK_PRIOR => KeyCode::PageUp,
+        VK_NEXT => KeyCode::PageDown,
+        other => KeyCode::Other(other.0),
+    };
+    // SAFETY: `GetKeyState` queries the calling thread's modifier key state.
+    let (shift, ctrl, alt) = unsafe {
+        (
+            GetKeyState(VK_SHIFT.0 as i32) < 0,
+            GetKeyState(VK_CONTROL.0 as i32) < 0,
+            GetKeyState(VK_MENU.0 as i32) < 0,
+        )
+    };
+    KeyEvent {
+        key,
+        shift,
+        ctrl,
+        alt,
+    }
+}
+
+unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
+    let ev = translate_key(wparam);
+    if ev.key == KeyCode::Escape {
+        close();
+        return true;
+    }
+    let (handled, focus_changed, dirty) = with_popup(|p| match ev.key {
+        KeyCode::Tab if !ev.ctrl && !ev.alt => {
+            let prev = p.focus.focused();
+            let prev_vis = p.focus.is_focus_visible();
+            let next = p.focus.tab(ev.shift);
+            (
+                true,
+                next != prev,
+                next != prev || p.focus.is_focus_visible() != prev_vis,
+            )
+        }
+        _ => {
+            let prev = p.focus.focused();
+            let handled = p
+                .delegate
+                .on_event(PopupEvent::Key(ev), &mut p.tree, &mut p.focus);
+            (handled, p.focus.focused() != prev, handled)
+        }
+    })
+    .unwrap_or((false, false, false));
+
+    if focus_changed {
+        sync_a11y(hwnd);
+    }
+    if dirty {
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+    handled
+}
+
+unsafe fn on_paint(hwnd: HWND) {
+    let mut ps = PAINTSTRUCT::default();
+    BeginPaint(hwnd, &mut ps);
+    let _ = EndPaint(hwnd, &ps);
+
+    let dpi = GetDpiForWindow(hwnd);
+    let (w, h) = client_size(hwnd);
+    let scale = frame::scale(dpi);
+    let retry = with_popup(|p| {
+        if p.renderer.is_none() {
+            p.renderer = Renderer::new(hwnd, w.max(1) as u32, h.max(1) as u32).ok();
+            if let Some(r) = p.renderer.as_ref() {
+                r.set_text_scale(p.prefs.text_scale);
+            }
+        }
+        let palette = p.palette;
+        let focus_ring = p.focus.focus_ring_rect(&p.tree);
+        let Some(r) = p.renderer.as_mut() else {
+            return false;
+        };
+        let res = r.draw_frame(FrameOpts {
+            dpi,
+            w: w as f32 / scale,
+            h: h as f32 / scale,
+            hover: Hover::None,
+            palette: &palette,
+            mica: false,
+            show_title_bar: false,
+            tree: Some(&p.tree),
+            focus_ring,
+        });
+        match res {
+            Ok(()) => false,
+            Err(DrawError::DeviceLost) => {
+                p.renderer = None;
+                reset_shared();
+                true
+            }
+            Err(DrawError::Other(e)) => {
+                eprintln!("focus: popup draw failed: {e}");
+                false
+            }
+        }
+    })
+    .unwrap_or(false);
+    if retry {
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+}
+
+unsafe extern "system" fn popup_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_ERASEBKGND => return LRESULT(1),
+        WM_ACTIVATE => {
+            if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE {
+                let already_closing =
+                    POPUP.with(|p| p.try_borrow().ok().is_none_or(|g| g.is_none()));
+                if !already_closing {
+                    let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+            }
+            return LRESULT(0);
+        }
+        WM_CLOSE => {
+            close();
+            return LRESULT(0);
+        }
+        WM_SIZE => {
+            let (w, h) = client_size(hwnd);
+            let dpi = GetDpiForWindow(hwnd);
+            let scale = frame::scale(dpi);
+            with_popup(|p| {
+                if let Some(r) = p.renderer.as_mut() {
+                    if r.resize(w.max(1) as u32, h.max(1) as u32).is_err() {
+                        p.renderer = None;
+                        reset_shared();
+                    }
+                }
+                if let Some(r) = p.renderer.as_ref() {
+                    p.tree.layout(w as f32 / scale, h as f32 / scale, r.text());
+                }
+            });
+            sync_a11y(hwnd);
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            return LRESULT(0);
+        }
+        WM_DPICHANGED => {
+            let dpi = (wparam.0 & 0xFFFF) as u32;
+            let scale = frame::scale(dpi);
+            let r = &*(lparam.0 as *const RECT);
+            let target_w =
+                with_popup(|p| (p.size_dip.0 * scale).ceil() as i32).unwrap_or(r.right - r.left);
+            let target_h =
+                with_popup(|p| (p.size_dip.1 * scale).ceil() as i32).unwrap_or(r.bottom - r.top);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                r.left,
+                r.top,
+                target_w,
+                target_h,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE,
+            );
+            return LRESULT(0);
+        }
+        WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE => {
+            let sys_prefs = SystemPrefs::query();
+            let changed = with_popup(|p| {
+                let palette = Palette::for_system(sys_prefs.high_contrast);
+                let text_changed = p
+                    .renderer
+                    .as_ref()
+                    .is_some_and(|r| r.set_text_scale(sys_prefs.text_scale));
+                let changed = p.prefs != sys_prefs || p.palette != palette || text_changed;
+                p.prefs = sys_prefs;
+                p.palette = palette;
+                changed
+            })
+            .unwrap_or(false);
+            if changed {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+        }
+        WM_POINTERENTER
+        | WM_POINTERLEAVE
+        | WM_POINTERDOWN
+        | WM_POINTERUPDATE
+        | WM_POINTERUP
+        | WM_POINTERCAPTURECHANGED
+        | WM_CAPTURECHANGED
+        | WM_MOUSELEAVE => {
+            if on_pointer_msg(hwnd, msg, wparam) {
+                return LRESULT(0);
+            }
+        }
+        WM_POINTERWHEEL | WM_POINTERHWHEEL | WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
+            if on_wheel_msg(hwnd, msg, wparam) {
+                return LRESULT(0);
+            }
+        }
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            if on_key_msg(hwnd, wparam) {
+                return LRESULT(0);
+            }
+        }
+        WM_GETOBJECT => {
+            let dpi = GetDpiForWindow(hwnd);
+            let client_px = client_size(hwnd);
+            let scale = frame::scale(dpi);
+            let result = POPUP.with(|p| {
+                let Ok(mut g) = p.try_borrow_mut() else {
+                    return None;
+                };
+                let popup = g.as_mut()?;
+                let update = a11y::build_tree_update(
+                    Some(&popup.tree),
+                    popup.focus.focused(),
+                    scale,
+                    client_px,
+                    strings::APP_NAME,
+                );
+                let mut activation = StaticActivation(Some(update));
+                popup
+                    .a11y
+                    .handle_wm_getobject(wparam, lparam, &mut activation)
+            });
+            if let Some(res) = result {
+                return res.into();
+            }
+        }
+        WM_SETFOCUS | WM_KILLFOCUS => {
+            let is_focused = msg == WM_SETFOCUS;
+            let queued = POPUP.with(|p| {
+                let Ok(mut g) = p.try_borrow_mut() else {
+                    return None;
+                };
+                let popup = g.as_mut()?;
+                popup.a11y.update_window_focus_state(is_focused)
+            });
+            if let Some(ev) = queued {
+                ev.raise();
+            }
+        }
+        m if m == WM_A11Y_ACTION => {
+            let requests = POPUP
+                .with(|p| {
+                    p.try_borrow()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|a| a.a11y_queue.drain()))
+                })
+                .unwrap_or_default();
+            let mut dirty = false;
+            with_popup(|p| {
+                for req in requests {
+                    let id = a11y::widget_id(req.target_node);
+                    match req.action {
+                        Action::Focus => dirty |= p.focus.focus_keyboard(id),
+                        Action::Click => {
+                            dirty |= p.delegate.on_event(
+                                PopupEvent::Click(id),
+                                &mut p.tree,
+                                &mut p.focus,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            if dirty {
+                sync_a11y(hwnd);
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            return LRESULT(0);
+        }
+        WM_PAINT => {
+            on_paint(hwnd);
+            return LRESULT(0);
+        }
+        WM_DESTROY => {
+            let popped = POPUP.with(|p| {
+                let Ok(mut g) = p.try_borrow_mut() else {
+                    return None;
+                };
+                if g.as_ref().is_some_and(|a| a.hwnd == hwnd) {
+                    g.take()
+                } else {
+                    None
+                }
+            });
+            if let Some(mut popup) = popped {
+                if !popup.dismissing {
+                    let _ = popup.delegate.on_event(
+                        PopupEvent::Closed,
+                        &mut popup.tree,
+                        &mut popup.focus,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+    DefWindowProcW(hwnd, msg, wparam, lparam)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::tree::{style, A11yInfo, A11yRole, HitMode, Leaf};
+    use crate::ui::window;
+    use windows::Win32::UI::Accessibility::UiaRootObjectId;
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, SendMessageW};
+
+    struct NoopDelegate;
+    impl PopupDelegate for NoopDelegate {
+        fn on_event(
+            &mut self,
+            _event: PopupEvent,
+            _tree: &mut Tree,
+            _focus: &mut FocusModel,
+        ) -> bool {
+            false
+        }
+    }
+
+    fn popup_test_tree() -> Tree {
+        let mut tree = Tree::new(style::column());
+        let item = tree.add_leaf(
+            tree.root(),
+            taffy::Style {
+                size: style::size(180.0, 32.0),
+                ..Default::default()
+            },
+            Leaf::Box,
+        );
+        tree.set_hit(item, HitMode::Interactive);
+        tree.set_focusable(item, true);
+        tree.set_a11y(
+            item,
+            A11yInfo {
+                role: A11yRole::ListBoxOption,
+                name: "Option 1".into(),
+                clickable: true,
+                requires_name: true,
+                ..Default::default()
+            },
+        );
+        tree
+    }
+
+    #[test]
+    fn place_popup_flips_and_clamps_to_monitor_work_area() {
+        let work = ScreenRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1032,
+        };
+        // Normal placement below-start.
+        let anchor_mid = ScreenRect {
+            left: 200,
+            top: 200,
+            right: 320,
+            bottom: 232,
+        };
+        assert_eq!(
+            place_popup(Some(anchor_mid), (200, 180), work, PopupAlign::BelowStart),
+            (200, 236)
+        );
+
+        // Near bottom-right corner: flips above anchor and clamps left inside work area.
+        let anchor_corner = ScreenRect {
+            left: 1850,
+            top: 980,
+            right: 1910,
+            bottom: 1012,
+        };
+        let (x, y) = place_popup(
+            Some(anchor_corner),
+            (240, 200),
+            work,
+            PopupAlign::BelowStart,
+        );
+        assert_eq!(x, 1910 - 240);
+        assert_eq!(y, 980 - 4 - 200);
+        assert!(x >= work.left && x + 240 <= work.right);
+        assert!(y >= work.top && y + 200 <= work.bottom);
+
+        // Negative secondary monitor coordinates work identically.
+        let neg_work = ScreenRect {
+            left: -1920,
+            top: 0,
+            right: 0,
+            bottom: 1080,
+        };
+        let (nx, ny) = place_popup(None, (300, 200), neg_work, PopupAlign::Center);
+        assert!(nx >= neg_work.left && nx + 300 <= neg_work.right);
+        assert!(ny >= neg_work.top && ny + 200 <= neg_work.bottom);
+    }
+
+    #[test]
+    fn popup_repositions_in_work_area_and_dismisses_on_esc_and_deactivation() {
+        crate::ui::init();
+        assert!(window::open());
+        window::pump();
+
+        let work = monitor_work_area(None);
+        // Anchor right against the bottom-right corner so popup must clamp & flip.
+        let corner = ScreenRect {
+            left: work.right - 40,
+            top: work.bottom - 40,
+            right: work.right - 4,
+            bottom: work.bottom - 8,
+        };
+        let tree = popup_test_tree();
+        assert_eq!(a11y::validate_tree_names(&tree), Ok(()));
+        let hwnd = open(
+            None,
+            Some(corner),
+            (220.0, 140.0),
+            PopupAlign::BelowStart,
+            tree,
+            Box::new(NoopDelegate),
+        )
+        .expect("open popup");
+        assert!(is_open());
+
+        let mut rc = RECT::default();
+        // SAFETY: `hwnd` is our newly created popup HWND.
+        unsafe {
+            assert!(GetWindowRect(hwnd, &mut rc).is_ok());
+            assert!(rc.right <= work.right, "right overflow: {rc:?} vs {work:?}");
+            assert!(
+                rc.bottom <= work.bottom,
+                "bottom overflow: {rc:?} vs {work:?}"
+            );
+            let lres = SendMessageW(
+                hwnd,
+                WM_GETOBJECT,
+                Some(WPARAM(0)),
+                Some(LPARAM(UiaRootObjectId as isize)),
+            );
+            assert_ne!(lres.0, 0);
+            // Esc closes popup immediately.
+            let _ = SendMessageW(
+                hwnd,
+                WM_KEYDOWN,
+                Some(WPARAM(VK_ESCAPE.0 as usize)),
+                Some(LPARAM(0)),
+            );
+        }
+        window::pump();
+        assert!(!is_open(), "Esc must close popup");
+
+        // Second open: WA_INACTIVE must close popup too.
+        let hwnd2 = open(
+            None,
+            Some(corner),
+            (200.0, 120.0),
+            PopupAlign::BelowStart,
+            popup_test_tree(),
+            Box::new(NoopDelegate),
+        )
+        .expect("open second popup");
+        assert!(is_open());
+        // SAFETY: `hwnd2` is our active popup HWND.
+        unsafe {
+            let _ = SendMessageW(
+                hwnd2,
+                WM_ACTIVATE,
+                Some(WPARAM(WA_INACTIVE as usize)),
+                Some(LPARAM(0)),
+            );
+        }
+        window::pump();
+        assert!(!is_open(), "WA_INACTIVE must close popup");
+
+        window::close();
+        window::pump();
+        reset_shared();
+    }
+}

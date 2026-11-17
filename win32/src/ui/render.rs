@@ -265,6 +265,10 @@ impl Renderer {
         self.next_draw_error = Some(hr);
     }
 
+    pub fn text(&self) -> &TextSystem {
+        &self.text
+    }
+
     pub fn set_text_scale(&self, scale: f32) -> bool {
         self.text.set_text_scale(scale)
     }
