@@ -8,7 +8,7 @@ use taffy::prelude::*;
 use crate::db::SharedStore;
 use crate::format::hm;
 use crate::time::{add_days, start_of_week_with_first};
-use crate::ui::focus::FocusModel;
+use crate::ui::focus::{FocusModel, FocusScope};
 use crate::ui::input::{KeyCode, KeyEvent};
 use crate::ui::screen::{BuiltScreen, KeyModifiers, PointerReply, Screen, ScreenEnv};
 use crate::ui::screens::activity::ActivityScreen;
@@ -133,6 +133,19 @@ impl AppShell {
 
     pub fn force_welcome(&mut self) {
         self.welcome_override = true;
+    }
+
+    fn has_modal(&self) -> bool {
+        match self.section {
+            Section::Calendar => self.calendar.has_modal(),
+            Section::Reports => self.reports.has_modal(),
+            Section::Projects => self.projects.has_modal(),
+            Section::Project(_) => self
+                .project_report
+                .as_ref()
+                .is_some_and(ProjectReportScreen::has_modal),
+            Section::Activity | Section::Settings => false,
+        }
     }
 
     fn is_onboarded(&self) -> bool {
@@ -814,8 +827,13 @@ impl Screen for AppShell {
             return self.welcome.on_key(ev, focus);
         }
 
-        // Global shortcuts (Ctrl+1..4,, | Ctrl+N | Ctrl+Space)
-        if ev.ctrl && !ev.alt && !ev.shift {
+        let modal_or_popup = matches!(
+            focus.active_scope(),
+            FocusScope::Modal(_) | FocusScope::Popup(_)
+        ) || self.has_modal();
+
+        // Global shortcuts (Ctrl+1..4,, | Ctrl+N | Ctrl+Space) are suspended while a modal is open.
+        if !modal_or_popup && ev.ctrl && !ev.alt && !ev.shift {
             match ev.key {
                 KeyCode::Space => {
                     self.calendar.timer.toggle_start_stop(&self.store);
@@ -1029,7 +1047,6 @@ mod tests {
     use crate::demo::DemoStore;
     use crate::locale::SystemLocale;
     use crate::ui::a11y;
-    use crate::ui::focus::FocusModel;
     use crate::ui::screen::ScreenHost;
     use crate::ui::text::TextSystem;
     use std::rc::Rc;
@@ -1114,5 +1131,71 @@ mod tests {
             store.borrow().running_entry().unwrap().is_some(),
             was_running
         );
+    }
+
+    #[test]
+    fn global_shortcuts_do_not_fire_while_modal_is_open_and_dialog_sync_rev_increments() {
+        let text = TextSystem::new().expect("dwrite");
+        let palette = Palette::LIGHT;
+        let env = ScreenEnv {
+            width_dip: 1280.0,
+            height_dip: 820.0,
+            hover: None,
+            pressed: None,
+            focused: None,
+            palette: &palette,
+            text: &text,
+        };
+        let store = shared_store(Box::new(DemoStore::new(SystemLocale::en_us())));
+        let mut shell = AppShell::new(Rc::clone(&store));
+        shell.navigate(Section::Projects);
+        let mut focus = FocusModel::new();
+        let mut host = ScreenHost::mount(Box::new(shell), &env, &mut focus);
+
+        // Open New project dialog via Ctrl+N.
+        let ctrl_n = KeyEvent {
+            key: KeyCode::Other(0x4E),
+            shift: false,
+            ctrl: true,
+            alt: false,
+        };
+        let (h, d) = host.on_key(ctrl_n, &mut focus);
+        assert!(h && d);
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        host.on_text_change("project_dlg.name", "Draft Project");
+
+        // Pressing Ctrl+N or Ctrl+2 while modal is open must NOT replace the dialog or navigate.
+        let (h2, _) = host.on_key(ctrl_n, &mut focus);
+        assert!(!h2);
+        let ctrl_2 = KeyEvent {
+            key: KeyCode::Other(0x32),
+            shift: false,
+            ctrl: true,
+            alt: false,
+        };
+        let (h3, _) = host.on_key(ctrl_2, &mut focus);
+        assert!(!h3);
+        // Verify name survived and Create saves the project cleanly.
+        let save_id = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == crate::ui::strings::PROJECT_BTN_CREATE)
+            .unwrap()
+            .id;
+        assert!(host.on_click(save_id));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        assert!(store
+            .borrow()
+            .list_projects()
+            .unwrap()
+            .iter()
+            .any(|p| p.name == "Draft Project"));
+
+        // Reopening dialogs always produces strictly increasing sync_rev.
+        let first = crate::ui::screens::projects::ProjectDialogState::for_new("USD", &[]);
+        let second = crate::ui::screens::projects::ProjectDialogState::for_new("USD", &[]);
+        assert!(second.sync_rev() > first.sync_rev());
     }
 }

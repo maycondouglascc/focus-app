@@ -2,6 +2,8 @@
 //! create, edit, stop running timer, delete, midnight-wrapping end time,
 //! 24-hour duration cap, and live earnings preview.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use taffy::prelude::*;
 
 use crate::db::{EntryInput, EntryPatch, Project, SharedStore, TimeEntry};
@@ -27,6 +29,8 @@ const KEY_ENTRY_DESC: &str = "entry_dlg.desc";
 const KEY_ENTRY_DATE: &str = "entry_dlg.date";
 const KEY_ENTRY_START: &str = "entry_dlg.start";
 const KEY_ENTRY_END: &str = "entry_dlg.end";
+
+static NEXT_ENTRY_SYNC_REV: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntryDraft {
@@ -103,7 +107,7 @@ impl EntryEditorState {
             start_text,
             end_text,
             error: None,
-            sync_rev: 1,
+            sync_rev: NEXT_ENTRY_SYNC_REV.fetch_add(1, Ordering::Relaxed),
             draft,
             id_close: None,
             sel_project: PopupSelectSlot::default(),

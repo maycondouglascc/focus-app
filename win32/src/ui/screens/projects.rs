@@ -1,6 +1,8 @@
 //! Projects list screen (`ProjectsScreen`) using SQL-aggregated summaries
 //! plus the reusable `ProjectDialogState` modal for create/edit/archive/delete.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use taffy::prelude::*;
 
 use crate::db::{Project, ProjectInput, ProjectPatch, ProjectSummary, SharedStore};
@@ -28,6 +30,12 @@ use super::{
 const KEY_PROJ_NAME: &str = "project_dlg.name";
 const KEY_PROJ_CLIENT: &str = "project_dlg.client";
 const KEY_PROJ_RATE: &str = "project_dlg.rate";
+
+static NEXT_PROJECT_SYNC_REV: AtomicU64 = AtomicU64::new(1);
+
+fn next_project_sync_rev() -> u64 {
+    NEXT_PROJECT_SYNC_REV.fetch_add(1, Ordering::Relaxed)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectDialogOutcome {
@@ -63,6 +71,11 @@ pub struct ProjectDialogState {
 }
 
 impl ProjectDialogState {
+    #[cfg(test)]
+    pub fn sync_rev(&self) -> u64 {
+        self.sync_rev
+    }
+
     pub fn for_new(default_currency: &str, used_colors: &[String]) -> Self {
         let pick_color = PROJECT_COLOR_HEX
             .iter()
@@ -79,7 +92,7 @@ impl ProjectDialogState {
             billable: true,
             confirm_delete: false,
             error: None,
-            sync_rev: 1,
+            sync_rev: next_project_sync_rev(),
             id_close: None,
             id_billable: None,
             id_swatch_ids: Vec::new(),
@@ -109,7 +122,7 @@ impl ProjectDialogState {
             editing: Some(p),
             confirm_delete: false,
             error: None,
-            sync_rev: 1,
+            sync_rev: next_project_sync_rev(),
             id_close: None,
             id_billable: None,
             id_swatch_ids: Vec::new(),
@@ -739,6 +752,10 @@ impl ProjectsScreen {
             opened_project: None,
             on_open_project: None,
         }
+    }
+
+    pub fn has_modal(&self) -> bool {
+        self.dialog.is_some()
     }
 
     #[cfg(test)]

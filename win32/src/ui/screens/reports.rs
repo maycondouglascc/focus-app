@@ -100,6 +100,10 @@ impl ReportsScreen {
         }
     }
 
+    pub fn has_modal(&self) -> bool {
+        self.csv_dialog.is_some() || self.entry_editor.is_some()
+    }
+
     fn filter_options(projects: &[Project]) -> Vec<(ProjectFilter, String)> {
         let mut out = Vec::with_capacity(projects.len() + 2);
         out.push((ProjectFilter::All, strings::REP_ALL_PROJECTS.to_string()));

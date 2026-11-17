@@ -93,6 +93,10 @@ pub struct ProjectReportScreen {
 }
 
 impl ProjectReportScreen {
+    pub fn has_modal(&self) -> bool {
+        self.edit_dialog.is_some() || self.entry_editor.is_some()
+    }
+
     pub fn new(store: SharedStore, project_id: impl Into<String>) -> Self {
         let now_ms = store.borrow().now_ms();
         Self {
