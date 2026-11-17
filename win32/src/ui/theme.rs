@@ -234,10 +234,94 @@ pub const PROJECT_COLORS: [Color; 12] = [
 ];
 
 #[allow(dead_code)]
+pub const PROJECT_COLOR_HEX: [&str; 12] = [
+    "#3b7ddd", "#d9488a", "#2f9e8f", "#b98a1e", "#6c56d9", "#3f8f4f", "#c23a4b", "#5b6b8c",
+    "#2a9bc4", "#9a4fa0", "#78872c", "#2f4b8a",
+];
+
+#[allow(dead_code)]
 pub const NO_PROJECT: Color = rgb(0x8A93A3);
 
 #[allow(dead_code)]
 pub const CHART_BLUE: Color = rgb(0x4C84E8);
+
+/// Parses a `#RRGGBB` string into a `Color`, returning `None` if malformed.
+#[allow(dead_code)]
+pub fn parse_hex_color(s: &str) -> Option<Color> {
+    let hex = s.trim().strip_prefix('#')?;
+    if hex.len() != 6 {
+        return None;
+    }
+    let v = u32::from_str_radix(hex, 16).ok()?;
+    Some(rgb(v))
+}
+
+fn hsl(h_deg: f32, s_pct: f32, l_pct: f32) -> Color {
+    let h = h_deg.rem_euclid(360.0) / 360.0;
+    let s = (s_pct / 100.0).clamp(0.0, 1.0);
+    let l = (l_pct / 100.0).clamp(0.0, 1.0);
+    if s == 0.0 {
+        return Color(l, l, l, 1.0);
+    }
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
+    let p = 2.0 * l - q;
+    let hue2rgb = |mut t: f32| {
+        if t < 0.0 {
+            t += 1.0;
+        }
+        if t > 1.0 {
+            t -= 1.0;
+        }
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 0.5 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
+    };
+    Color(
+        hue2rgb(h + 1.0 / 3.0),
+        hue2rgb(h),
+        hue2rgb(h - 1.0 / 3.0),
+        1.0,
+    )
+}
+
+/// Deterministic, muted color per application name matching Electron `appColor`.
+#[allow(dead_code)]
+pub fn app_color(app: &str) -> Color {
+    match app {
+        "Claude Code" | "Claude" => rgb(0xC96442),
+        "Figma" => rgb(0xA259FF),
+        "Google Chrome" | "Chrome" => rgb(0x4C84E8),
+        "Arc" => rgb(0xE0557A),
+        "Safari" | "Microsoft Edge" | "Edge" => rgb(0x2A9BC4),
+        "Slack" => rgb(0x611F69),
+        "Visual Studio Code" | "Code" => rgb(0x2F7EC7),
+        "Cursor" | "Terminal" | "Windows Terminal" | "iTerm2" | "Ghostty" => rgb(0x3B4558),
+        "Notion" => rgb(0x4D5667),
+        "Mail" | "Outlook" => rgb(0x3B7DDD),
+        "Messages" => rgb(0x2FA36B),
+        "Zoom" | "Microsoft Teams" => rgb(0x2D8CFF),
+        "Spotify" => rgb(0x1DB954),
+        "Finder" | "File Explorer" => rgb(0x5B8DEF),
+        "Focus" => rgb(0x1B2230),
+        other => {
+            let mut h: u32 = 0;
+            for ch in other.encode_utf16() {
+                h = h.wrapping_mul(31).wrapping_add(u32::from(ch));
+            }
+            hsl((h % 360) as f32, 58.0, 54.0)
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -279,5 +363,13 @@ mod tests {
         assert_eq!(p.border_width, 1.0);
         assert!(p.shadows);
         assert_ne!(p.accent, p.danger);
+    }
+
+    #[test]
+    fn app_color_and_hex_parser_are_deterministic() {
+        assert_eq!(app_color("Figma"), rgb(0xA259FF));
+        assert_eq!(app_color("CustomApp"), app_color("CustomApp"));
+        assert_eq!(parse_hex_color("#3b7ddd"), Some(PROJECT_COLORS[0]));
+        assert_eq!(parse_hex_color("invalid"), None);
     }
 }

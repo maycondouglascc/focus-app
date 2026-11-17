@@ -1,0 +1,14 @@
+﻿source,screen,first_frame_ms,paints,private_mb,working_set_mb
+db,calendar,233.3,1,23.88,48.98
+db,activity,170.1,1,19.51,45.95
+db,reports,179.4,1,20.99,45.90
+db,projects,185.0,1,19.99,45.09
+db,project,186.6,1,22.27,46.82
+db,settings,252.9,1,17.68,46.82
+demo-fresh,welcome,190.6,1,14.76,43.05
+demo,calendar,264.9,1,30.78,54.51
+demo,activity,239.7,1,29.56,54.05
+demo,reports,242.3,1,23.16,50.38
+demo,projects,221.5,1,22.62,49.04
+demo,project,401.0,1,22.91,49.63
+demo,settings,407.5,1,24.41,52.28

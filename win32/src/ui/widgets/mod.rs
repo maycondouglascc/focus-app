@@ -38,8 +38,23 @@ use super::tree::{A11yInfo, A11yRole, Leaf, Node, Rect, Tree, WidgetId};
 pub mod glyph {
     pub const CHEVRON_DOWN: char = '\u{E70D}';
     pub const CHEVRON_UP: char = '\u{E70E}';
+    pub const CHEVRON_LEFT: char = '\u{E76B}';
+    pub const CHEVRON_RIGHT: char = '\u{E76C}';
     pub const CHECK: char = '\u{E73E}';
     pub const CLOSE: char = '\u{E8BB}';
+    pub const PLAY: char = '\u{E768}';
+    pub const STOP: char = '\u{E71A}';
+    pub const ADD: char = '\u{E710}';
+    pub const CALENDAR: char = '\u{E787}';
+    pub const ACTIVITY: char = '\u{E9D2}';
+    pub const REPORTS: char = '\u{E9D9}';
+    pub const PROJECTS: char = '\u{E8B7}';
+    pub const SETTINGS: char = '\u{E713}';
+    pub const EDIT: char = '\u{E70F}';
+    pub const DELETE: char = '\u{E74D}';
+    pub const DOWNLOAD: char = '\u{E896}';
+    pub const WARNING: char = '\u{E7BA}';
+    pub const CLEAR: char = '\u{E894}';
 }
 
 /// Visual interaction flags computed from pointer state for one control instance.

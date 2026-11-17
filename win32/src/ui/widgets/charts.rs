@@ -4,11 +4,11 @@
 
 use taffy::prelude::*;
 
-use super::add_label;
+use super::{add_label, Interact};
 use crate::ui::text::{Align, Weight};
 use crate::ui::theme::{mix, Color, Palette};
 use crate::ui::tree::{
-    style, A11yInfo, A11yRole, DrawCmd, Leaf, Node, PaintStyle, Rect, Tree, WidgetId,
+    style, A11yInfo, A11yRole, DrawCmd, HitMode, Leaf, Node, PaintStyle, Rect, Tree, WidgetId,
 };
 
 fn figure_a11y(name: &str) -> A11yInfo {
@@ -334,20 +334,94 @@ pub fn share_row(
     color: Color,
     palette: &Palette,
 ) -> (Node, WidgetId) {
+    build_share_row(tree, parent, label, readout, ratio, color, None, palette)
+}
+
+/// Interactive `ShareRow` button (e.g., filtering by app or project) with hover/selected chrome.
+#[allow(clippy::too_many_arguments)]
+pub fn share_row_button(
+    tree: &mut Tree,
+    parent: Node,
+    label: &str,
+    readout: &str,
+    ratio: f32,
+    color: Color,
+    selected: bool,
+    interact: Interact,
+    palette: &Palette,
+) -> (Node, WidgetId) {
+    build_share_row(
+        tree,
+        parent,
+        label,
+        readout,
+        ratio,
+        color,
+        Some((selected, interact)),
+        palette,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_share_row(
+    tree: &mut Tree,
+    parent: Node,
+    label: &str,
+    readout: &str,
+    ratio: f32,
+    color: Color,
+    interactive: Option<(bool, Interact)>,
+    palette: &Palette,
+) -> (Node, WidgetId) {
+    let selected = interactive.is_some_and(|(s, _)| s);
+    let bg = interactive.and_then(|(s, interact)| {
+        if s {
+            Some(palette.accent_bg)
+        } else if interact.pressed {
+            Some(palette.ctl_pressed)
+        } else if interact.hovered {
+            Some(palette.ctl_hover)
+        } else {
+            None
+        }
+    });
+
     let row = tree.add_container(
         parent,
         Style {
             display: Display::Flex,
             flex_direction: FlexDirection::Row,
             align_items: Some(AlignItems::Center),
+            padding: if interactive.is_some() {
+                style::pad(6.0, 2.0, 6.0, 2.0)
+            } else {
+                style::pad(0.0, 0.0, 0.0, 0.0)
+            },
             gap: style::gap(8.0),
             size: Size {
                 width: percent(1.0_f32),
-                height: length(24.0_f32),
+                height: length(if interactive.is_some() {
+                    28.0_f32
+                } else {
+                    24.0_f32
+                }),
             },
             ..Default::default()
         },
     );
+    if let Some(bg) = bg {
+        tree.set_paint(
+            row,
+            PaintStyle {
+                bg: Some(bg),
+                border_color: selected.then_some(palette.accent),
+                border_width: if selected { palette.border_width } else { 0.0 },
+                radius: 6.0,
+                clip: false,
+            },
+        );
+    }
+
     let dot = tree.add_container(
         row,
         Style {
@@ -385,7 +459,11 @@ pub fn share_row(
         12.0,
         Weight::Medium,
         Align::Left,
-        palette.text,
+        if selected {
+            palette.accent
+        } else {
+            palette.text
+        },
     );
 
     let pct = ratio.clamp(0.0, 1.0);
@@ -453,8 +531,76 @@ pub fn share_row(
         palette.muted,
     );
 
-    tree.set_a11y(row, figure_a11y(&format!("{label}, {readout}")));
+    if interactive.is_some() {
+        tree.set_hit(row, HitMode::Interactive);
+        tree.set_focusable(row, true);
+        tree.set_a11y(
+            row,
+            A11yInfo {
+                role: A11yRole::Button,
+                name: format!("{label}, {readout}"),
+                selected: Some(selected),
+                clickable: true,
+                requires_name: true,
+                ..Default::default()
+            },
+        );
+    } else {
+        tree.set_a11y(row, figure_a11y(&format!("{label}, {readout}")));
+    }
     (row, tree.id(row))
+}
+
+/// Maps local DIP coordinates within a `stacked_bars` canvas to the column index `[0..bar_count)`.
+pub fn stacked_bars_hit_index(
+    local_x: f32,
+    local_y: f32,
+    bar_count: usize,
+    width: f32,
+    height: f32,
+) -> Option<usize> {
+    if bar_count == 0
+        || local_x < 0.0
+        || local_y < 0.0
+        || local_x >= width
+        || local_y >= height
+        || width <= 0.0
+    {
+        return None;
+    }
+    let idx = ((local_x / width) * bar_count as f32).floor() as isize;
+    if idx >= 0 && (idx as usize) < bar_count {
+        Some(idx as usize)
+    } else {
+        None
+    }
+}
+
+/// Maps local DIP coordinates within a `heatmap` canvas to `(row, col)`.
+pub fn heatmap_hit_cell(
+    local_x: f32,
+    local_y: f32,
+    rows: usize,
+    cols: usize,
+    cell_and_gap: (f32, f32),
+) -> Option<(usize, usize)> {
+    let (cell, gap) = cell_and_gap;
+    let stride = cell + gap;
+    if rows == 0 || cols == 0 || local_x < 0.0 || local_y < 0.0 || stride <= 0.0 || cell <= 0.0 {
+        return None;
+    }
+    let col = (local_x / stride).floor() as usize;
+    let row = (local_y / stride).floor() as usize;
+    if row >= rows || col >= cols {
+        return None;
+    }
+    let in_x = local_x - col as f32 * stride;
+    let in_y = local_y - row as f32 * stride;
+    if in_x <= cell && in_y <= cell {
+        Some((row, col))
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -517,6 +663,21 @@ mod tests {
             PROJECT_COLORS[0],
             p,
         );
+
+        let _ = share_row_button(
+            &mut tree,
+            root,
+            "Code",
+            "1h 10m",
+            0.4,
+            PROJECT_COLORS[1],
+            true,
+            Interact::default(),
+            p,
+        );
+        assert_eq!(stacked_bars_hit_index(180.0, 40.0, 2, 240.0, 80.0), Some(1));
+        assert_eq!(heatmap_hit_cell(18.0, 1.0, 2, 3, (14.0, 3.0)), Some((0, 1)));
+        assert_eq!(heatmap_hit_cell(15.5, 1.0, 2, 3, (14.0, 3.0)), None);
 
         tree.layout(600.0, 500.0, &text);
         assert_eq!(a11y::validate_tree_names(&tree), Ok(()));

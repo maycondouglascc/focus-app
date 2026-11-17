@@ -173,6 +173,7 @@ pub struct Renderer {
     _target: IDCompositionTarget,
     _visual: IDCompositionVisual,
     first_present: bool,
+    present_sync: bool,
     #[cfg(test)]
     generation: u64,
     next_draw_error: Option<HRESULT>,
@@ -253,11 +254,16 @@ impl Renderer {
                 _target: target,
                 _visual: visual,
                 first_present: true,
+                present_sync: true,
                 #[cfg(test)]
                 generation,
                 next_draw_error: None,
             })
         }
+    }
+
+    pub fn set_present_sync(&mut self, sync: bool) {
+        self.present_sync = sync;
     }
 
     #[cfg(test)]
@@ -378,7 +384,11 @@ impl Renderer {
             let end = self.ctx.EndDraw(None, None);
             self.ctx.SetTarget(None);
             end?;
-            let sync_interval = if self.first_present { 0 } else { 1 };
+            let sync_interval = if self.first_present || !self.present_sync {
+                0
+            } else {
+                1
+            };
             self.swap.Present(sync_interval, DXGI_PRESENT(0)).ok()?;
             self.first_present = false;
         }
@@ -464,7 +474,7 @@ impl Renderer {
                     self.draw_cmd(cmd, rect.x, rect.y);
                 }
             }
-            Leaf::RichTextSlot | Leaf::Box => {}
+            Leaf::RichTextSlot { .. } | Leaf::Box => {}
         }
     }
 
@@ -777,6 +787,30 @@ impl Renderer {
                 _ => {
                     self.line(cx - 5.0, cy - 5.0, cx + 5.0, cy + 5.0, ink);
                     self.line(cx - 5.0, cy + 5.0, cx + 5.0, cy - 5.0, ink);
+                }
+            }
+        }
+    }
+}
+
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        // SAFETY: `self` owns these live COM interfaces; releasing targets and
+        // flushing device state prevents D2D/D3D11/DComp deferred queues from
+        // retaining glyph-atlas or staging allocations across window closes.
+        unsafe {
+            self.ctx.SetTarget(None);
+            if let Ok(d2d) = self.ctx.GetDevice() {
+                d2d.ClearResources(0);
+            }
+            let _ = self._visual.SetContent(None);
+            let _ = self._target.SetRoot(None);
+            let _ = self.gfx.dcomp.Commit();
+            let _ = self.gfx.dcomp.WaitForCommitCompletion();
+            if let Ok(d3d) = self.swap.GetDevice::<ID3D11Device>() {
+                if let Ok(dc) = d3d.GetImmediateContext() {
+                    dc.ClearState();
+                    dc.Flush();
                 }
             }
         }

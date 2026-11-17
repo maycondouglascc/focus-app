@@ -8,9 +8,15 @@
 
 mod appinfo;
 mod claude;
+mod csv_export;
 mod db;
+mod demo;
+mod format;
+mod locale;
 mod presence;
 mod recorder;
+mod stats;
+mod time;
 mod ui;
 
 use std::cell::{Cell, RefCell};
@@ -429,18 +435,48 @@ fn idle_threshold_ms(db: &db::Db) -> u64 {
     (minutes.max(0.0) * 60_000.0) as u64
 }
 
+fn arg_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+}
+
 fn main() {
-    // `--ui-cycle N`: window open/close leak test (F2 gate); no recording.
     {
         let args: Vec<String> = std::env::args().collect();
+        let has = |f: &str| args.iter().any(|a| a == f);
+        let screen = arg_value(&args, "--screen");
+        let db_override = arg_value(&args, "--db").map(PathBuf::from);
+        let demo = has("--demo");
+        let fresh = has("--fresh");
+
+        if has("--diag-drag") {
+            std::process::exit(ui::selftest::diag_drag());
+        }
         if let Some(i) = args.iter().position(|a| a == "--ui-cycle") {
             let n = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(50);
-            std::process::exit(ui::selftest::cycle(n));
+            let all_screens = has("--all-screens");
+            std::process::exit(ui::selftest::cycle(n, all_screens));
         }
         if let Some(i) = args.iter().position(|a| a == "--ui-show") {
             let n = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(10);
-            let gallery = args.iter().any(|a| a == "--gallery");
-            std::process::exit(ui::selftest::show(n, gallery));
+            let gallery = has("--gallery");
+            std::process::exit(ui::selftest::show(
+                n,
+                gallery,
+                demo,
+                fresh,
+                db_override.as_deref(),
+                screen.as_deref(),
+            ));
+        }
+        if demo {
+            std::process::exit(ui::selftest::run_demo(fresh, screen.as_deref()));
+        }
+        if has("--ui") {
+            let db_p = db_override.unwrap_or_else(default_db_path);
+            std::process::exit(ui::selftest::run_db(&db_p, screen.as_deref()));
         }
     }
     let path = db_path_from_args();

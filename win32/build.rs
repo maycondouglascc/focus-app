@@ -13,5 +13,15 @@ fn main() {
             println!("cargo:rustc-link-arg-bin=focus=/DELAYLOAD:{dll}");
         }
         println!("cargo:rustc-link-arg-bin=focus=delayimp.lib");
+        let manifest = std::path::PathBuf::from(
+            std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"),
+        )
+        .join("focus.manifest");
+        println!("cargo:rerun-if-changed=focus.manifest");
+        println!("cargo:rustc-link-arg-bin=focus=/MANIFEST:EMBED");
+        println!(
+            "cargo:rustc-link-arg-bin=focus=/MANIFESTINPUT:{}",
+            manifest.display()
+        );
     }
 }

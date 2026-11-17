@@ -270,6 +270,8 @@ impl PopupDelegate for SelectPopupDelegate {
                         handled: true,
                         dirty: false,
                         close: true,
+                        notify_owner: true,
+                        ..Default::default()
                     };
                 }
                 PopupOutcome::default()
@@ -282,6 +284,8 @@ impl PopupDelegate for SelectPopupDelegate {
                         handled: true,
                         dirty: true,
                         close: false,
+                        notify_owner: false,
+                        ..Default::default()
                     }
                 }
                 KeyCode::Up if !self.item_ids.is_empty() => {
@@ -295,6 +299,8 @@ impl PopupDelegate for SelectPopupDelegate {
                         handled: true,
                         dirty: true,
                         close: false,
+                        notify_owner: false,
+                        ..Default::default()
                     }
                 }
                 KeyCode::Enter | KeyCode::Space if !self.item_ids.is_empty() => {
@@ -303,6 +309,8 @@ impl PopupDelegate for SelectPopupDelegate {
                         handled: true,
                         dirty: false,
                         close: true,
+                        notify_owner: true,
+                        ..Default::default()
                     }
                 }
                 _ => PopupOutcome::default(),
@@ -334,7 +342,7 @@ pub fn open_popup(
     popup::open(
         Some(owner),
         Some(anchor),
-        (width, height.min(280.0)),
+        (width, height.min(440.0)),
         PopupAlign::BelowStart,
         tree,
         Box::new(delegate),
