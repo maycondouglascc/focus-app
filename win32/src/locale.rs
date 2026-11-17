@@ -2,7 +2,6 @@
 //! default currency (`LOCALE_SINTLSYMBOL`), week start (`LOCALE_IFIRSTDAYOFWEEK`),
 //! 24h/12h clock (`LOCALE_ITIME`), and CSV/number separators (`LOCALE_SLIST`,
 //! `LOCALE_SDECIMAL`, `LOCALE_STHOUSAND`).
-#![allow(dead_code)] // wired across F3 screens and CSV writer
 
 use windows::core::PCWSTR;
 use windows::Win32::Globalization::{

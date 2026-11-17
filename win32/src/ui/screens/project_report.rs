@@ -90,9 +90,6 @@ pub struct ProjectReportScreen {
     id_claude_ids: Vec<WidgetId>,
 
     pub back_requested: bool,
-    pub opened_entry: Option<TimeEntry>,
-    on_back: Option<Box<dyn FnMut()>>,
-    on_open_entry: Option<Box<dyn FnMut(TimeEntry)>>,
 }
 
 impl ProjectReportScreen {
@@ -117,20 +114,7 @@ impl ProjectReportScreen {
             id_app_rows: Vec::new(),
             id_claude_ids: Vec::new(),
             back_requested: false,
-            opened_entry: None,
-            on_back: None,
-            on_open_entry: None,
         }
-    }
-
-    pub fn with_on_back(mut self, f: impl FnMut() + 'static) -> Self {
-        self.on_back = Some(Box::new(f));
-        self
-    }
-
-    pub fn with_on_open_entry(mut self, f: impl FnMut(TimeEntry) + 'static) -> Self {
-        self.on_open_entry = Some(Box::new(f));
-        self
     }
 
     fn app_name_of(a: &Activity) -> &str {
@@ -866,9 +850,6 @@ impl ProjectReportScreen {
                 ProjectDialogOutcome::Deleted => {
                     self.edit_dialog = None;
                     self.back_requested = true;
-                    if let Some(cb) = self.on_back.as_mut() {
-                        cb();
-                    }
                 }
                 ProjectDialogOutcome::None => {}
             }
@@ -878,9 +859,6 @@ impl ProjectReportScreen {
         }
         if Some(id) == self.id_back {
             self.back_requested = true;
-            if let Some(cb) = self.on_back.as_mut() {
-                cb();
-            }
             return true;
         }
         if Some(id) == self.id_edit_btn {
@@ -919,11 +897,7 @@ impl ProjectReportScreen {
         }
         let et = self.entry_tree.handle_click(id);
         if let Some(entry) = et.open_entry {
-            self.opened_entry = Some(entry.clone());
             self.entry_editor = Some(EntryEditorState::new(EntryDraft::from_entry(&entry)));
-            if let Some(cb) = self.on_open_entry.as_mut() {
-                cb(entry);
-            }
             return true;
         }
         et.handled

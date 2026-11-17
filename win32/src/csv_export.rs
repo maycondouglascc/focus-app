@@ -3,7 +3,6 @@
 //!   `LOCALE_SDECIMAL` decimal mark (`,` in pt-BR), CRLF line endings.
 //! - Standard CSV dialect: UTF-8, `,` delimiter, `.` decimal mark, CRLF line endings.
 //! - File picker via Win32 `IFileSaveDialog`.
-#![allow(dead_code)] // wired in Reports screen and --demo
 
 use std::collections::HashMap;
 use std::path::Path;

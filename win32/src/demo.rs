@@ -2,7 +2,6 @@
 //! `demoApi.ts` and `demoClock.ts`. Seeds 156 weeks (3 years) of projects,
 //! time entries, app activity, and Claude Code sessions with the clock frozen
 //! at Friday 15:47:00 so the live timer is always 0:47:00.
-#![allow(dead_code)] // wired across F3 screens and --demo CLI
 
 use std::collections::{HashMap, HashSet};
 
@@ -71,10 +70,6 @@ impl DemoStore {
 
     pub fn fresh(locale: SystemLocale) -> Self {
         Self::build(demo_frozen_now(system_now_ms()), locale, true)
-    }
-
-    pub fn with_now(now_ms: i64, locale: SystemLocale, fresh: bool) -> Self {
-        Self::build(now_ms, locale, fresh)
     }
 
     fn alloc_id(&mut self, prefix: &str) -> String {

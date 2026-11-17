@@ -173,6 +173,7 @@ pub struct Renderer {
     _target: IDCompositionTarget,
     _visual: IDCompositionVisual,
     first_present: bool,
+    present_sync: bool,
     #[cfg(test)]
     generation: u64,
     next_draw_error: Option<HRESULT>,
@@ -253,11 +254,16 @@ impl Renderer {
                 _target: target,
                 _visual: visual,
                 first_present: true,
+                present_sync: true,
                 #[cfg(test)]
                 generation,
                 next_draw_error: None,
             })
         }
+    }
+
+    pub fn set_present_sync(&mut self, sync: bool) {
+        self.present_sync = sync;
     }
 
     #[cfg(test)]
@@ -378,7 +384,11 @@ impl Renderer {
             let end = self.ctx.EndDraw(None, None);
             self.ctx.SetTarget(None);
             end?;
-            let sync_interval = if self.first_present { 0 } else { 1 };
+            let sync_interval = if self.first_present || !self.present_sync {
+                0
+            } else {
+                1
+            };
             self.swap.Present(sync_interval, DXGI_PRESENT(0)).ok()?;
             self.first_present = false;
         }

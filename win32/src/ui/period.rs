@@ -1,6 +1,5 @@
 //! Period navigation model (`Day`, `Week`, `Month`, `Year`, `All time`),
 //! adaptive all-time bucket fitting, and the shared `PeriodNav` control bar.
-#![allow(dead_code)] // consumed across F3 screens
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -47,16 +46,6 @@ impl PeriodKind {
 
     pub fn from_index(idx: usize) -> Option<Self> {
         Self::ALL_KINDS.get(idx).copied()
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Day => strings::PERIOD_DAY,
-            Self::Week => strings::PERIOD_WEEK,
-            Self::Month => strings::PERIOD_MONTH,
-            Self::Year => strings::PERIOD_YEAR,
-            Self::All => strings::PERIOD_ALL,
-        }
     }
 }
 

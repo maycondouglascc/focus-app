@@ -100,10 +100,12 @@ impl EntryTreeState {
         }
     }
 
+    #[cfg(test)]
     pub fn row_count(&self) -> usize {
         self.flat.len()
     }
 
+    #[cfg(test)]
     pub fn rendered_len(&self) -> usize {
         self.rendered_rows.len()
     }

@@ -1,8 +1,7 @@
 //! Time, duration, date, clock-input, and currency formatting matching
 //! Electron `format.ts` and Windows locale preferences.
-#![allow(dead_code)] // wired across F3 screens in subsequent commits
 
-use crate::time::{at_minutes, days_in_month, from_local, to_local, DAY, HOUR, MIN};
+use crate::time::{days_in_month, from_local, to_local, DAY, HOUR, MIN};
 
 const MONTHS_SHORT: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -95,6 +94,7 @@ pub fn clock(ms: i64) -> String {
 }
 
 /// `1.5h` · `2h`
+#[cfg(test)]
 pub fn hours(ms: i64, digits: usize) -> String {
     let v = (ms.max(0) as f64) / (HOUR as f64);
     let raw = format!("{v:.digits$}");
@@ -130,12 +130,6 @@ pub fn day_label(epoch_ms: i64) -> String {
         month_short(l.month),
         l.day
     )
-}
-
-/// `Nov 16`
-pub fn short_day(epoch_ms: i64) -> String {
-    let l = to_local(epoch_ms);
-    format!("{} {}", month_short(l.month), l.day)
 }
 
 /// `Nov 16, 2026` / `Nov 16 – 22, 2026` / `Nov 28 – Dec 4, 2026` / `Dec 28, 2026 – Jan 3, 2027`
@@ -260,15 +254,9 @@ pub fn csv_date(epoch_ms: i64) -> String {
 }
 
 /// Computes local day + minutes timestamp helper for tests & screens.
+#[cfg(test)]
 pub fn local_day_at(year: i32, month: u8, day: u8, minutes: i32) -> i64 {
-    at_minutes(from_local(year, month, day, 0, 0, 0, 0), minutes)
-}
-
-/// Checks if two timestamps fall in the same local calendar day.
-pub fn same_local_day(a: i64, b: i64) -> bool {
-    let la = to_local(a);
-    let lb = to_local(b);
-    (la.year, la.month, la.day) == (lb.year, lb.month, lb.day)
+    crate::time::at_minutes(from_local(year, month, day, 0, 0, 0, 0), minutes)
 }
 
 pub const ALL_CURRENCIES: [&str; 10] = [

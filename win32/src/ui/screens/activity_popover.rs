@@ -26,6 +26,7 @@ use super::calendar_layout::{session_label, ActivitySession};
 pub struct LogSessionRequest {
     pub session: ActivitySession,
     pub description: String,
+    #[allow(dead_code)] // anchor retained for callers inspecting origin rect
     pub anchor_dip: Rect,
 }
 

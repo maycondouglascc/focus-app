@@ -77,6 +77,7 @@ enum GridDrag {
     },
     Resize {
         entry: TimeEntry,
+        #[allow(dead_code)]
         day_idx: usize,
         cur_end_min: f64,
         moved: bool,
@@ -90,7 +91,7 @@ enum GridDrag {
 
 #[derive(Clone, Debug)]
 pub enum GridAction {
-    OpenEntry(EntryDraft, Rect),
+    OpenEntry(EntryDraft, #[allow(dead_code)] Rect),
     UpdateEntry { id: String, patch: EntryPatch },
     OpenActivity(ActivitySession, Rect),
 }

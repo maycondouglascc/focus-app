@@ -1,5 +1,4 @@
 //! Day column overlap layout and activity session grouping matching Electron `layout.ts`.
-#![allow(dead_code)] // consumed by WeekGrid, ActivityPopover, and CalendarScreen
 
 use std::collections::HashMap;
 

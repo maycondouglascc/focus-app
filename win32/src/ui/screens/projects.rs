@@ -741,6 +741,7 @@ impl ProjectsScreen {
         }
     }
 
+    #[cfg(test)]
     pub fn with_on_open_project(mut self, f: impl FnMut(String) + 'static) -> Self {
         self.on_open_project = Some(Box::new(f));
         self
@@ -1012,7 +1013,7 @@ impl ProjectsScreen {
             .map(|dlg| dlg.build(tree, overlay_root, env))
     }
 
-    fn open_new_dialog(&mut self) {
+    pub fn open_new_dialog(&mut self) {
         let st = self.store.borrow();
         let default_cur = st
             .get_settings()

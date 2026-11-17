@@ -44,7 +44,7 @@ pub struct CalendarScreen {
     id_empty_new_proj: Option<WidgetId>,
 
     cached_projects: Vec<Project>,
-    on_new_project: Option<Box<dyn FnMut()>>,
+    pub new_project_requested: bool,
 }
 
 impl CalendarScreen {
@@ -63,13 +63,25 @@ impl CalendarScreen {
             id_mode_ids: Vec::new(),
             id_empty_new_proj: None,
             cached_projects: Vec::new(),
-            on_new_project: None,
+            new_project_requested: false,
         }
     }
 
-    pub fn with_on_new_project(mut self, f: impl FnMut() + 'static) -> Self {
-        self.on_new_project = Some(Box::new(f));
-        self
+    pub fn open_new_entry_at_now(&mut self) {
+        let now_ms = self.store.borrow().now_ms();
+        let rounded_min = ((crate::time::minutes_of_day(now_ms) / 15.0).floor() as i32) * 15;
+        let day = crate::time::start_of_day(now_ms);
+        let start = crate::time::at_minutes(day, rounded_min);
+        self.anchor_ms = now_ms;
+        self.editor = Some(EntryEditorState::new(EntryDraft {
+            id: None,
+            project_id: None,
+            description: String::new(),
+            start,
+            end: Some(start + 30 * crate::time::MIN),
+            billable: false,
+            source: "manual".into(),
+        }));
     }
 
     fn apply_grid_action(&mut self, action: GridAction, palette: &Palette) {
@@ -457,9 +469,7 @@ impl CalendarScreen {
             return true;
         }
         if Some(id) == self.id_empty_new_proj {
-            if let Some(cb) = self.on_new_project.as_mut() {
-                cb();
-            }
+            self.new_project_requested = true;
             return true;
         }
         false

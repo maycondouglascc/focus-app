@@ -2,6 +2,7 @@
 //! is created on open and destroyed on close, with all of its resources.
 
 pub mod a11y;
+pub mod app;
 pub mod chrome;
 pub mod focus;
 pub mod frame;

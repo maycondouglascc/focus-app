@@ -2,7 +2,6 @@
 //! conversions (`SystemTimeToTzSpecificLocalTime` / `TzSpecificLocalTimeToSystemTime`),
 //! matching the Electron `time.ts` contract for day/week/month/year boundaries
 //! including 23-hour and 25-hour DST transition days.
-#![allow(dead_code)] // wired across F3 screens and calendar layout
 
 use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
 use windows::Win32::System::Time::{

@@ -1,6 +1,5 @@
 //! Pure aggregation helpers for time entries and activity intervals,
 //! matching Electron `src/renderer/lib/stats.ts`.
-#![allow(dead_code)] // wired across F3 screens in subsequent commits
 
 use std::collections::HashMap;
 

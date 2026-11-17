@@ -48,6 +48,7 @@ impl WelcomeScreen {
         }
     }
 
+    #[cfg(test)]
     pub fn with_on_complete(mut self, f: impl FnMut() + 'static) -> Self {
         self.on_complete = Some(Box::new(f));
         self
@@ -176,18 +177,16 @@ impl WelcomeScreen {
     }
 }
 
-impl Screen for WelcomeScreen {
-    fn build(&mut self, env: &ScreenEnv<'_>) -> BuiltScreen {
+impl WelcomeScreen {
+    pub fn build_content(&mut self, tree: &mut Tree, root: Node, env: &ScreenEnv<'_>) {
         self.viewport_h = env.height_dip;
         let p = env.palette;
-        let mut tree = screen_root_tree(env);
-        let root = tree.root();
 
-        let (_vp, col) = build_scroll_page(&mut tree, root, 620.0, 28.0, 0.0, self.scroll_y);
-        let card = build_card(&mut tree, col, 28.0, 16.0, p);
+        let (_vp, col) = build_scroll_page(tree, root, 620.0, 28.0, 0.0, self.scroll_y);
+        let card = build_card(tree, col, 28.0, 16.0, p);
 
         add_label(
-            &mut tree,
+            tree,
             card,
             strings::APP_NAME,
             13.0,
@@ -244,7 +243,7 @@ impl Screen for WelcomeScreen {
         );
 
         self.id_monitor = Some(Self::build_source_row(
-            &mut tree,
+            tree,
             sources,
             glyph::CALENDAR,
             strings::WELCOME_SRC_APPS_TITLE,
@@ -254,11 +253,11 @@ impl Screen for WelcomeScreen {
             self.id_monitor,
             env,
         ));
-        build_hairline(&mut tree, sources, p);
+        build_hairline(tree, sources, p);
 
         let br_disabled = !self.monitor_enabled;
         self.id_browser = Some(Self::build_source_row(
-            &mut tree,
+            tree,
             sources,
             glyph::ACTIVITY,
             strings::WELCOME_SRC_BROWSER_TITLE,
@@ -268,10 +267,10 @@ impl Screen for WelcomeScreen {
             self.id_browser,
             env,
         ));
-        build_hairline(&mut tree, sources, p);
+        build_hairline(tree, sources, p);
 
         self.id_claude = Some(Self::build_source_row(
-            &mut tree,
+            tree,
             sources,
             glyph::PROJECTS,
             strings::WELCOME_SRC_CLAUDE_TITLE,
@@ -312,9 +311,16 @@ impl Screen for WelcomeScreen {
         let mut start_props = ButtonProps::new(strings::WELCOME_START_BTN);
         start_props.variant = ButtonVariant::Primary;
         start_props.interact = Interact::from_state(self.id_start, env.hover, env.pressed, false);
-        let (_, start_id) = button::build(&mut tree, foot, &start_props, p);
+        let (_, start_id) = button::build(tree, foot, &start_props, p);
         self.id_start = Some(start_id);
+    }
+}
 
+impl Screen for WelcomeScreen {
+    fn build(&mut self, env: &ScreenEnv<'_>) -> BuiltScreen {
+        let mut tree = screen_root_tree(env);
+        let root = tree.root();
+        self.build_content(&mut tree, root, env);
         BuiltScreen {
             tree,
             modal_root: None,

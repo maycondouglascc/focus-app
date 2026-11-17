@@ -2,7 +2,7 @@
 //! user closes it. Custom frame (see `frame.rs`), no standard non-client area,
 //! drawn through a DirectComposition swap chain (see `render.rs`).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -86,6 +86,8 @@ struct Ui {
 
 thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
+    static CUR_HWND: Cell<isize> = const { Cell::new(0) };
+    static RECT_CACHE: RefCell<Vec<(WidgetId, Rect)>> = const { RefCell::new(Vec::new()) };
 }
 
 fn with_ui<R>(f: impl FnOnce(&mut Ui) -> R) -> Option<R> {
@@ -93,7 +95,23 @@ fn with_ui<R>(f: impl FnOnce(&mut Ui) -> R) -> Option<R> {
 }
 
 fn current() -> Option<HWND> {
+    let h = CUR_HWND.get();
+    if h != 0 {
+        return Some(HWND(h as *mut core::ffi::c_void));
+    }
     UI.with(|u| u.try_borrow().ok().and_then(|g| g.as_ref().map(|u| u.hwnd)))
+}
+
+fn sync_rect_cache(tree: Option<&Tree>) {
+    RECT_CACHE.with(|c| {
+        let mut v = c.borrow_mut();
+        v.clear();
+        if let Some(t) = tree {
+            for n in t.all_nodes() {
+                v.push((t.id(n), t.rect(n)));
+            }
+        }
+    });
 }
 
 #[allow(dead_code)] // used by Select popups, RichEdit screens, and tests
@@ -102,14 +120,21 @@ pub fn hwnd() -> Option<HWND> {
 }
 
 /// Returns the laid-out client DIP rectangle of a widget in the active tree, if mounted.
-#[allow(dead_code)]
 pub fn widget_rect(id: WidgetId) -> Option<Rect> {
-    with_ui(|u| {
+    if let Some(res) = with_ui(|u| {
         let tree = active_tree(u)?;
         let node = tree.node_by_id(id)?;
         Some(tree.rect(node))
+    }) {
+        return res;
+    }
+    // Re-entrant lookup while `with_ui` holds `UI` borrowed mutably (e.g. `on_click`, `on_pointer_down`).
+    RECT_CACHE.with(|c| {
+        c.borrow()
+            .iter()
+            .find(|(wid, _)| *wid == id)
+            .map(|(_, r)| *r)
     })
-    .flatten()
 }
 
 pub fn paint_count() -> u64 {
@@ -144,6 +169,7 @@ pub fn set_screen(screen: Box<dyn Screen>) -> bool {
             text,
         };
         let host = ScreenHost::mount(screen, &env, &mut u.focus);
+        sync_rect_cache(Some(host.tree()));
         u.screen = Some(host);
         u.screen_capturing = false;
         sync_rich_fields(u);
@@ -160,6 +186,186 @@ pub fn set_screen(screen: Box<dyn Screen>) -> bool {
         }
     }
     mounted
+}
+
+/// Invokes a click on the first active clickable widget matching `name`.
+pub fn click_by_name(name: &str) -> bool {
+    let Some(hwnd) = current() else {
+        return false;
+    };
+    let changed = with_ui(|u| {
+        let target = active_tree(u).and_then(|t| {
+            t.all_nodes().into_iter().find_map(|n| {
+                let d = t.data(n)?;
+                let matched = d.a11y.name == name
+                    || (d.a11y.name.starts_with(name)
+                        && d.a11y.name[name.len()..].starts_with(", "));
+                (d.a11y.clickable && !d.disabled && matched).then_some(d.id)
+            })
+        })?;
+        let h = u.screen.as_mut()?;
+        if h.on_click(target) {
+            rebuild_screen_if_dirty(u, hwnd);
+            sync_timers(u, hwnd, false);
+            Some(true)
+        } else {
+            Some(false)
+        }
+    })
+    .flatten()
+    .unwrap_or(false);
+    if changed {
+        // SAFETY: `hwnd` is live on this thread.
+        unsafe {
+            sync_a11y(hwnd);
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
+    }
+    changed
+}
+
+#[derive(Clone, Debug)]
+pub struct DragBenchMetrics {
+    pub frames: u32,
+    pub res_w_px: u32,
+    pub res_h_px: u32,
+    pub dpi: u32,
+    pub elapsed_ms: f64,
+    pub avg_ms: f64,
+    pub p95_ms: f64,
+    pub max_ms: f64,
+    pub fps: f64,
+}
+
+/// Lays out the active Calendar screen at 1920x1080 DIPs (`200%` DPI -> `3840x2160` px),
+/// executes `frames` continuous week-grid drag + `sync_drag_tree` + Direct2D draws without
+/// vsync blocking, and reports timing percentiles.
+pub fn bench_drag_4k(frames: u32) -> Result<DragBenchMetrics, String> {
+    let setup = with_ui(|u| -> Result<(WidgetId, Rect), String> {
+        let palette = u.palette;
+        {
+            let r = u
+                .renderer
+                .as_mut()
+                .ok_or_else(|| "no renderer".to_string())?;
+            r.resize(3840, 2160).map_err(|e| format!("{e:?}"))?;
+            r.set_present_sync(false);
+        }
+        let text = u.renderer.as_ref().unwrap().text();
+        let host = u
+            .screen
+            .as_mut()
+            .ok_or_else(|| "no mounted screen".to_string())?;
+        let env = ScreenEnv {
+            width_dip: 1920.0,
+            height_dip: 1080.0,
+            hover: None,
+            pressed: None,
+            focused: None,
+            palette: &palette,
+            text,
+        };
+        host.mark_dirty();
+        host.rebuild_if_dirty(&env, &mut u.focus);
+        sync_rect_cache(Some(host.tree()));
+        let t = host.tree();
+        let node = t
+            .all_nodes()
+            .into_iter()
+            .find(|&n| {
+                t.data(n)
+                    .is_some_and(|d| d.a11y.name == strings::CAL_GRID_LABEL)
+            })
+            .ok_or_else(|| "calendar grid canvas node not found".to_string())?;
+        let canvas_id = t.id(node);
+        let vp_rect = t
+            .parent(node)
+            .map(|p| t.rect(p))
+            .unwrap_or_else(|| t.rect(node));
+        Ok((canvas_id, vp_rect))
+    })
+    .ok_or_else(|| "ui unavailable".to_string())??;
+
+    let (canvas_id, vp_rect) = setup;
+    let start_x = vp_rect.x + 120.0;
+    let start_y = vp_rect.y + 40.0;
+
+    let (mut frame_ms, elapsed_ms) = with_ui(|u| -> Result<(Vec<f64>, f64), String> {
+        let palette = u.palette;
+        let host = u
+            .screen
+            .as_mut()
+            .ok_or_else(|| "no mounted screen".to_string())?;
+        let r = u
+            .renderer
+            .as_mut()
+            .ok_or_else(|| "no renderer".to_string())?;
+        let down = host.on_pointer_down(canvas_id, start_x, start_y, KeyModifiers::default());
+        if !down.dragging {
+            return Err("pointer_down did not start grid drag".into());
+        }
+        let _ = host.on_pointer_move(start_x + 20.0, start_y + 15.0, KeyModifiers::default());
+        host.sync_drag_tree();
+        r.draw_frame(FrameOpts {
+            dpi: 192,
+            w: 1920.0,
+            h: 1080.0,
+            hover: Hover::None,
+            palette: &palette,
+            mica: false,
+            show_title_bar: true,
+            tree: Some(host.tree()),
+            focus_ring: None,
+        })
+        .map_err(|e| format!("{e:?}"))?;
+
+        let mut samples = Vec::with_capacity(frames as usize);
+        let t_all = std::time::Instant::now();
+        for f in 0..frames {
+            let tf = std::time::Instant::now();
+            let y = vp_rect.y + 40.0 + ((f % 160) as f32) * 1.5;
+            let x = vp_rect.x + 120.0 + (((f / 30) % 5) as f32) * 140.0;
+            let _ = host.on_pointer_move(x, y, KeyModifiers::default());
+            host.sync_drag_tree();
+            r.draw_frame(FrameOpts {
+                dpi: 192,
+                w: 1920.0,
+                h: 1080.0,
+                hover: Hover::None,
+                palette: &palette,
+                mica: false,
+                show_title_bar: true,
+                tree: Some(host.tree()),
+                focus_ring: None,
+            })
+            .map_err(|e| format!("{e:?}"))?;
+            samples.push(tf.elapsed().as_secs_f64() * 1000.0);
+        }
+        let elapsed = t_all.elapsed().as_secs_f64() * 1000.0;
+        let _ = host.on_pointer_cancel();
+        r.set_present_sync(true);
+        Ok((samples, elapsed))
+    })
+    .ok_or_else(|| "ui unavailable".to_string())??;
+
+    frame_ms.sort_by(|a, b| a.total_cmp(b));
+    let n = frame_ms.len().max(1);
+    let avg_ms = elapsed_ms / (n as f64);
+    let p95_idx = ((n * 95) / 100).min(n - 1);
+    let p95_ms = frame_ms[p95_idx];
+    let max_ms = frame_ms[n - 1];
+    let fps = (n as f64) * 1000.0 / elapsed_ms.max(0.001);
+    Ok(DragBenchMetrics {
+        frames,
+        res_w_px: 3840,
+        res_h_px: 2160,
+        dpi: 192,
+        elapsed_ms,
+        avg_ms,
+        p95_ms,
+        max_ms,
+        fps,
+    })
 }
 
 fn active_tree(ui: &Ui) -> Option<&Tree> {
@@ -187,6 +393,7 @@ fn rebuild_screen_if_dirty(ui: &mut Ui, hwnd: HWND) -> bool {
     };
     let rebuilt = host.rebuild_if_dirty(&env, &mut ui.focus);
     if rebuilt {
+        sync_rect_cache(Some(host.tree()));
         sync_rich_fields(ui);
         sync_rich_focus(ui);
         sync_timers(ui, hwnd, false);
@@ -217,6 +424,8 @@ pub fn open() -> bool {
 /// Destroys the window and every graphics resource if it is open.
 pub fn close() {
     super::popup::close();
+    CUR_HWND.set(0);
+    RECT_CACHE.with(|c| c.borrow_mut().clear());
     // Take the state out first: dropping the renderer releases the swap chain,
     // and WM_DESTROY must not find the state borrowed.
     let ui = UI.with(|u| u.borrow_mut().take());
@@ -327,6 +536,7 @@ unsafe fn create() -> Option<HWND> {
             syncing_rich: false,
         })
     });
+    CUR_HWND.set(hwnd.0 as isize);
     let _ = ShowWindow(hwnd, SW_SHOW);
     Some(hwnd)
 }
@@ -1024,6 +1234,7 @@ unsafe fn on_size(hwnd: HWND, size_type: u32) {
                 } else if let Some(tree) = u.tree.as_mut() {
                     tree.layout(w_dip, h_dip, r.text());
                 }
+                sync_rect_cache(active_tree(u));
             }
             sync_rich_fields(u);
         }
@@ -1412,6 +1623,8 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_DESTROY => {
             super::popup::close();
+            CUR_HWND.set(0);
+            RECT_CACHE.with(|c| c.borrow_mut().clear());
             // Closed by the user (or by `close`, which already took the state):
             // drop the renderer with the window.
             let ui = UI.with(|u| {
