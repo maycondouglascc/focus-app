@@ -1,0 +1,4 @@
+﻿diag_drag checks: esc_cancel=true alt_nosnap=true autoscroll=true
+diag_drag res=3840x2160 dpi=200% frames=180 elapsed_ms=1778.09 avg_ms=9.878 p95_ms=12.758 max_ms=33.010 fps=101.23
+OK
+

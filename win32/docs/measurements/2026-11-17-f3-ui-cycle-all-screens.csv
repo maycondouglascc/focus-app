@@ -1,0 +1,2 @@
+﻿date,version,mode,cycles,elapsed_s,first_open_ms,baseline_mb,start_mb,end_mb,growth_mb,window_left_open,result
+2026-11-17,0.3.0,all-screens,50,115.5,2223.7,7.07,11.59,10.83,-0.76,false,OK
