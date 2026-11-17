@@ -29,6 +29,26 @@ pub struct BuiltScreen {
     pub modal_root: Option<Node>,
 }
 
+/// Modifier keys active during a pointer event.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeyModifiers {
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+}
+
+/// Response returned by screen-level pointer handlers (e.g., WeekGrid drag).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PointerReply {
+    pub handled: bool,
+    pub capture: bool,
+    pub dragging: bool,
+    /// Rebuild the retained UI tree from `Screen::build` and repaint.
+    pub rebuild: bool,
+    /// Update drag canvas/scroll directly on the existing `Tree` via `Screen::sync_drag_tree` without relayout.
+    pub fast_redraw: bool,
+}
+
 /// Trait implemented by each Win32 Focus view/screen.
 #[allow(dead_code)] // F3 screens implement all methods
 pub trait Screen {
@@ -42,7 +62,50 @@ pub trait Screen {
     fn on_wheel(&mut self, _delta_dip: f32) -> bool {
         false
     }
+    fn on_wheel_at(&mut self, _x_dip: f32, _y_dip: f32, _dx_dip: f32, dy_dip: f32) -> bool {
+        self.on_wheel(dy_dip)
+    }
     fn on_escape(&mut self) -> bool {
+        false
+    }
+    fn on_text_change(&mut self, _key: &str, _value: &str) -> bool {
+        false
+    }
+    fn on_text_submit(&mut self, _key: &str, _value: &str) -> bool {
+        false
+    }
+    fn on_pointer_down(
+        &mut self,
+        _id: WidgetId,
+        _x_dip: f32,
+        _y_dip: f32,
+        _mods: KeyModifiers,
+    ) -> PointerReply {
+        PointerReply::default()
+    }
+    fn on_pointer_move(&mut self, _x_dip: f32, _y_dip: f32, _mods: KeyModifiers) -> PointerReply {
+        PointerReply::default()
+    }
+    fn on_pointer_up(&mut self, _x_dip: f32, _y_dip: f32, _mods: KeyModifiers) -> PointerReply {
+        PointerReply::default()
+    }
+    fn on_pointer_cancel(&mut self) -> bool {
+        false
+    }
+    fn sync_drag_tree(&mut self, _tree: &mut Tree) {}
+    fn wants_tick(&self) -> bool {
+        false
+    }
+    fn on_tick(&mut self) -> bool {
+        false
+    }
+    fn wants_autoscroll(&self) -> bool {
+        false
+    }
+    fn on_autoscroll(&mut self) -> PointerReply {
+        PointerReply::default()
+    }
+    fn on_popup_poll(&mut self) -> bool {
         false
     }
 }
@@ -129,8 +192,113 @@ impl ScreenHost {
         (handled, handled)
     }
 
+    #[allow(dead_code)]
     pub fn on_wheel(&mut self, delta_dip: f32) -> bool {
         if self.screen.on_wheel(delta_dip) {
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn on_wheel_at(&mut self, x_dip: f32, y_dip: f32, dx_dip: f32, dy_dip: f32) -> bool {
+        if self.screen.on_wheel_at(x_dip, y_dip, dx_dip, dy_dip) {
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn on_text_change(&mut self, key: &str, value: &str) -> bool {
+        if self.screen.on_text_change(key, value) {
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn on_text_submit(&mut self, key: &str, value: &str) -> bool {
+        if self.screen.on_text_submit(key, value) {
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn on_pointer_down(
+        &mut self,
+        id: WidgetId,
+        x_dip: f32,
+        y_dip: f32,
+        mods: KeyModifiers,
+    ) -> PointerReply {
+        let reply = self.screen.on_pointer_down(id, x_dip, y_dip, mods);
+        if reply.rebuild {
+            self.dirty = true;
+        }
+        reply
+    }
+
+    pub fn on_pointer_move(&mut self, x_dip: f32, y_dip: f32, mods: KeyModifiers) -> PointerReply {
+        let reply = self.screen.on_pointer_move(x_dip, y_dip, mods);
+        if reply.rebuild {
+            self.dirty = true;
+        }
+        reply
+    }
+
+    pub fn on_pointer_up(&mut self, x_dip: f32, y_dip: f32, mods: KeyModifiers) -> PointerReply {
+        let reply = self.screen.on_pointer_up(x_dip, y_dip, mods);
+        if reply.rebuild {
+            self.dirty = true;
+        }
+        reply
+    }
+
+    pub fn on_pointer_cancel(&mut self) -> bool {
+        if self.screen.on_pointer_cancel() {
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn sync_drag_tree(&mut self) {
+        self.screen.sync_drag_tree(&mut self.tree);
+    }
+
+    pub fn wants_tick(&self) -> bool {
+        self.screen.wants_tick()
+    }
+
+    pub fn on_tick(&mut self) -> bool {
+        if self.screen.on_tick() {
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn wants_autoscroll(&self) -> bool {
+        self.screen.wants_autoscroll()
+    }
+
+    pub fn on_autoscroll(&mut self) -> PointerReply {
+        let reply = self.screen.on_autoscroll();
+        if reply.rebuild {
+            self.dirty = true;
+        }
+        reply
+    }
+
+    pub fn on_popup_poll(&mut self) -> bool {
+        if self.screen.on_popup_poll() {
             self.dirty = true;
             true
         } else {
@@ -307,13 +475,16 @@ impl Screen for WidgetGalleryScreen {
             &mut tree,
             root,
             &TextFieldProps {
+                key: "gallery.notes",
                 aria_label: "Notes",
+                placeholder: "Notes",
                 value: "",
                 multiline: false,
                 min_height: 32.0,
                 focused: env.focused.is_some() && env.focused == self.text_field_id,
                 error: false,
                 disabled: false,
+                sync_rev: 0,
             },
             p,
         );

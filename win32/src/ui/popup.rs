@@ -27,7 +27,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, IsWindow, LoadCursorW,
     PostMessageW, RegisterClassW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, IDC_ARROW,
     PT_PEN, PT_TOUCH, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, WA_INACTIVE,
-    WINDOW_EX_STYLE, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
+    WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
     WM_ERASEBKGND, WM_GETOBJECT, WM_KEYDOWN, WM_KILLFOCUS, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_PAINT,
     WM_POINTERCAPTURECHANGED, WM_POINTERDOWN, WM_POINTERENTER, WM_POINTERHWHEEL, WM_POINTERLEAVE,
     WM_POINTERUP, WM_POINTERUPDATE, WM_POINTERWHEEL, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE,
@@ -47,6 +47,8 @@ use super::tree::{Tree, WidgetId};
 
 /// `WM_MOUSELEAVE`
 const WM_MOUSELEAVE: u32 = 0x02A3;
+/// Posted to the popup owner window when a popup updates state or closes.
+pub const WM_POPUP_NOTIFY: u32 = WM_APP + 5;
 
 /// Physical screen-space rectangle (`left/top/right/bottom` in virtual desktop pixels).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,11 +172,13 @@ pub enum PopupEvent {
 
 /// Outcome returned by [`PopupDelegate::on_event`] so popups never close reentrantly
 /// while `POPUP` is mutably borrowed.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PopupOutcome {
     pub handled: bool,
     pub dirty: bool,
     pub close: bool,
+    pub notify_owner: bool,
+    pub resize_h_dip: Option<f32>,
 }
 
 pub trait PopupDelegate {
@@ -198,6 +202,8 @@ struct ActivePopup {
     a11y_queue: A11yActionQueue,
     a11y: Adapter,
     delegate: Box<dyn PopupDelegate>,
+    anchor_screen: Option<ScreenRect>,
+    align: PopupAlign,
     size_dip: (f32, f32),
     dismissing: bool,
 }
@@ -328,6 +334,8 @@ pub fn open(
                 a11y_queue,
                 a11y,
                 delegate,
+                anchor_screen,
+                align,
                 size_dip,
                 dismissing: false,
             });
@@ -360,20 +368,58 @@ pub fn close() {
         if let Some(ow) = owner {
             if IsWindow(Some(ow)).as_bool() {
                 let _ = SetFocus(Some(ow));
+                let _ = PostMessageW(Some(ow), WM_POPUP_NOTIFY, WPARAM(0), LPARAM(0));
             }
         }
     }
 }
 
-/// Updates the active popup's tree after its controller mutated state.
+/// Updates the active popup's tree and optional height, keeping it clamped inside `rcWork`.
 #[allow(dead_code)] // used by Select and Popover
 pub fn refresh_layout() {
-    let hwnd = POPUP.with(|p| p.try_borrow().ok().and_then(|g| g.as_ref().map(|a| a.hwnd)));
-    let Some(hwnd) = hwnd else {
+    refresh_layout_with_height(None);
+}
+
+#[allow(dead_code)]
+pub fn refresh_layout_with_height(desired_h_dip: Option<f32>) {
+    let info = POPUP.with(|p| {
+        p.try_borrow().ok().and_then(|g| {
+            g.as_ref()
+                .map(|a| (a.hwnd, a.size_dip, a.anchor_screen, a.align))
+        })
+    });
+    let Some((hwnd, mut size_dip, anchor, align)) = info else {
         return;
     };
     // SAFETY: `hwnd` is a live popup owned by this thread.
     unsafe {
+        if let Some(new_h) = desired_h_dip {
+            let dpi = GetDpiForWindow(hwnd);
+            let scale = frame::scale(dpi);
+            let work = monitor_work_area(anchor);
+            let max_h_dip = (work.height() as f32 / scale - 16.0).max(80.0);
+            let clamped_h = new_h.clamp(48.0, max_h_dip);
+            if (clamped_h - size_dip.1).abs() > 0.5 {
+                size_dip.1 = clamped_h;
+                let size_px = (
+                    (size_dip.0 * scale).ceil().max(48.0) as i32,
+                    (size_dip.1 * scale).ceil().max(32.0) as i32,
+                );
+                let (x, y) = place_popup(anchor, size_px, work, align);
+                with_popup(|p| {
+                    p.size_dip = size_dip;
+                });
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    x,
+                    y,
+                    size_px.0,
+                    size_px.1,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+        }
         let dpi = GetDpiForWindow(hwnd);
         let scale = frame::scale(dpi);
         let (cw, ch) = client_size(hwnd);
@@ -506,21 +552,34 @@ unsafe fn on_pointer_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
             let Some((pid, _, _, x, y)) = query_pointer(hwnd, wparam) else {
                 return false;
             };
-            let (release_capture, clicked, dirty, should_close) = with_popup(|p| {
-                let hit = p.tree.hit_test(x, y);
-                let out = p.pointer.on_up(pid, PointerButton::Primary, hit, x, y);
-                let mut dirty = out.visual_changed;
-                let mut should_close = false;
-                if let Some(id) = out.clicked {
-                    let ev_out =
-                        p.delegate
-                            .on_event(PopupEvent::Click(id), &mut p.tree, &mut p.focus);
-                    dirty |= ev_out.dirty;
-                    should_close |= ev_out.close;
-                }
-                (out.release_capture, out.clicked, dirty, should_close)
-            })
-            .unwrap_or((false, None, false, false));
+            let (release_capture, clicked, dirty, should_close, notify_owner, resize_h, owner) =
+                with_popup(|p| {
+                    let hit = p.tree.hit_test(x, y);
+                    let out = p.pointer.on_up(pid, PointerButton::Primary, hit, x, y);
+                    let mut dirty = out.visual_changed;
+                    let mut should_close = false;
+                    let mut notify_owner = false;
+                    let mut resize_h = None;
+                    if let Some(id) = out.clicked {
+                        let ev_out =
+                            p.delegate
+                                .on_event(PopupEvent::Click(id), &mut p.tree, &mut p.focus);
+                        dirty |= ev_out.dirty;
+                        should_close |= ev_out.close;
+                        notify_owner |= ev_out.notify_owner;
+                        resize_h = ev_out.resize_h_dip;
+                    }
+                    (
+                        out.release_capture,
+                        out.clicked,
+                        dirty,
+                        should_close,
+                        notify_owner,
+                        resize_h,
+                        p.owner,
+                    )
+                })
+                .unwrap_or((false, None, false, false, false, None, None));
             if release_capture {
                 let _ = ReleaseCapture();
             }
@@ -528,11 +587,24 @@ unsafe fn on_pointer_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
                 close();
                 return true;
             }
+            if notify_owner {
+                if let Some(ow) = owner {
+                    let _ = PostMessageW(Some(ow), WM_POPUP_NOTIFY, WPARAM(0), LPARAM(0));
+                }
+            }
+            if resize_h.is_some() || dirty {
+                if resize_h.is_some() || clicked.is_some() {
+                    refresh_layout_with_height(resize_h);
+                } else {
+                    if clicked.is_some() {
+                        sync_a11y(hwnd);
+                    }
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+                return true;
+            }
             if clicked.is_some() {
                 sync_a11y(hwnd);
-            }
-            if dirty {
-                let _ = InvalidateRect(Some(hwnd), None, false);
             }
             true
         }
@@ -608,31 +680,52 @@ unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
         close();
         return true;
     }
-    let (handled, focus_changed, dirty, should_close) = with_popup(|p| match ev.key {
-        KeyCode::Tab if !ev.ctrl && !ev.alt => {
-            let prev = p.focus.focused();
-            let prev_vis = p.focus.is_focus_visible();
-            let next = p.focus.tab(ev.shift);
-            (
-                true,
-                next != prev,
-                next != prev || p.focus.is_focus_visible() != prev_vis,
-                false,
-            )
-        }
-        _ => {
-            let prev = p.focus.focused();
-            let out = p
-                .delegate
-                .on_event(PopupEvent::Key(ev), &mut p.tree, &mut p.focus);
-            (out.handled, p.focus.focused() != prev, out.dirty, out.close)
-        }
-    })
-    .unwrap_or((false, false, false, false));
+    let (handled, focus_changed, dirty, should_close, notify_owner, resize_h, owner) =
+        with_popup(|p| match ev.key {
+            KeyCode::Tab if !ev.ctrl && !ev.alt => {
+                let prev = p.focus.focused();
+                let prev_vis = p.focus.is_focus_visible();
+                let next = p.focus.tab(ev.shift);
+                (
+                    true,
+                    next != prev,
+                    next != prev || p.focus.is_focus_visible() != prev_vis,
+                    false,
+                    false,
+                    None,
+                    p.owner,
+                )
+            }
+            _ => {
+                let prev = p.focus.focused();
+                let out = p
+                    .delegate
+                    .on_event(PopupEvent::Key(ev), &mut p.tree, &mut p.focus);
+                (
+                    out.handled,
+                    p.focus.focused() != prev,
+                    out.dirty,
+                    out.close,
+                    out.notify_owner,
+                    out.resize_h_dip,
+                    p.owner,
+                )
+            }
+        })
+        .unwrap_or((false, false, false, false, false, None, None));
 
     if should_close {
         close();
         return true;
+    }
+    if notify_owner {
+        if let Some(ow) = owner {
+            let _ = PostMessageW(Some(ow), WM_POPUP_NOTIFY, WPARAM(0), LPARAM(0));
+        }
+    }
+    if resize_h.is_some() {
+        refresh_layout_with_height(resize_h);
+        return handled;
     }
     if focus_changed {
         sync_a11y(hwnd);
@@ -839,9 +932,10 @@ unsafe extern "system" fn popup_wnd_proc(
                         .and_then(|g| g.as_ref().map(|a| a.a11y_queue.drain()))
                 })
                 .unwrap_or_default();
-            let (dirty, should_close) = with_popup(|p| {
+            let (dirty, should_close, notify_owner, owner) = with_popup(|p| {
                 let mut dirty = false;
                 let mut should_close = false;
+                let mut notify_owner = false;
                 for req in requests {
                     let id = a11y::widget_id(req.target_node);
                     match req.action {
@@ -854,16 +948,22 @@ unsafe extern "system" fn popup_wnd_proc(
                             );
                             dirty |= out.dirty;
                             should_close |= out.close;
+                            notify_owner |= out.notify_owner;
                         }
                         _ => {}
                     }
                 }
-                (dirty, should_close)
+                (dirty, should_close, notify_owner, p.owner)
             })
-            .unwrap_or((false, false));
+            .unwrap_or((false, false, false, None));
             if should_close {
                 close();
                 return LRESULT(0);
+            }
+            if notify_owner {
+                if let Some(ow) = owner {
+                    let _ = PostMessageW(Some(ow), WM_POPUP_NOTIFY, WPARAM(0), LPARAM(0));
+                }
             }
             if dirty {
                 sync_a11y(hwnd);

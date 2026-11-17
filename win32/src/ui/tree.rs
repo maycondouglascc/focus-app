@@ -93,9 +93,28 @@ pub enum Leaf {
     },
     Canvas(Vec<DrawCmd>),
     /// Placeholder rectangle for a child `RICHEDIT50W` window positioned by the tree.
-    RichTextSlot,
+    RichTextSlot {
+        key: String,
+        placeholder: String,
+        value: String,
+        multiline: bool,
+        sync_rev: u64,
+    },
     /// Fixed-size or flexible box; its size comes from its style alone.
     Box,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RichTextSlotSpec {
+    pub id: WidgetId,
+    pub key: String,
+    pub placeholder: String,
+    pub value: String,
+    pub multiline: bool,
+    pub sync_rev: u64,
+    pub disabled: bool,
+    pub rect: Rect,
+    pub hidden: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -398,6 +417,12 @@ impl Tree {
         }
     }
 
+    pub fn replace_canvas(&mut self, node: Node, cmds: Vec<DrawCmd>) {
+        if let Some(d) = self.data_mut(node) {
+            d.leaf = Some(Leaf::Canvas(cmds));
+        }
+    }
+
     pub fn set_a11y(&mut self, node: Node, a11y: A11yInfo) {
         if let Some(d) = self.data_mut(node) {
             d.a11y = a11y;
@@ -489,7 +514,7 @@ impl Tree {
                             height: known.height.unwrap_or(scaled),
                         }
                     }
-                    Leaf::Canvas(_) | Leaf::RichTextSlot | Leaf::Box => Size {
+                    Leaf::Canvas(_) | Leaf::RichTextSlot { .. } | Leaf::Box => Size {
                         width: known.width.unwrap_or(0.0),
                         height: known.height.unwrap_or(0.0),
                     },
@@ -649,8 +674,8 @@ impl Tree {
         }
     }
 
-    /// Returns `(id, rect, hidden_or_clipped)` for every `RichTextSlot` leaf.
-    pub fn rich_text_slots(&self) -> Vec<(WidgetId, Rect, bool)> {
+    /// Returns specs and rects for every `RichTextSlot` leaf.
+    pub fn rich_text_slots(&self) -> Vec<RichTextSlotSpec> {
         let mut out = Vec::new();
         self.collect_slots(self.root, 0.0, 0.0, false, None, &mut out);
         out
@@ -663,7 +688,7 @@ impl Tree {
         oy: f32,
         ancestor_hidden: bool,
         clip: Option<Rect>,
-        out: &mut Vec<(WidgetId, Rect, bool)>,
+        out: &mut Vec<RichTextSlotSpec>,
     ) {
         let Some(data) = self.taffy.get_node_context(id) else {
             return;
@@ -678,9 +703,26 @@ impl Tree {
             w: l.size.width,
             h: l.size.height,
         };
-        if matches!(data.leaf, Some(Leaf::RichTextSlot)) {
+        if let Some(Leaf::RichTextSlot {
+            key,
+            placeholder,
+            value,
+            multiline,
+            sync_rev,
+        }) = &data.leaf
+        {
             let clipped_out = clip.is_some_and(|c| rect.intersect(c).is_none());
-            out.push((data.id, rect, hidden || clipped_out));
+            out.push(RichTextSlotSpec {
+                id: data.id,
+                key: key.clone(),
+                placeholder: placeholder.clone(),
+                value: value.clone(),
+                multiline: *multiline,
+                sync_rev: *sync_rev,
+                disabled: data.disabled,
+                rect,
+                hidden: hidden || clipped_out,
+            });
         }
         let next_clip = match (clip, data.paint.clip) {
             (Some(c), true) => c.intersect(rect),

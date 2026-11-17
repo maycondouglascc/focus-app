@@ -12,27 +12,27 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TME_NONCLIENT,
-    TRACKMOUSEEVENT, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT,
-    VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    GetFocus, GetKeyState, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE,
+    TME_NONCLIENT, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME,
+    VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::Input::Pointer::{
     GetPointerInfo, POINTER_FLAG_FIRSTBUTTON, POINTER_FLAG_SECONDBUTTON, POINTER_INFO,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, IsWindow,
-    IsZoomed, LoadCursorW, PeekMessageW, RegisterClassW, SetForegroundWindow, SetWindowPos,
-    ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, HTBOTTOM, HTBOTTOMLEFT,
-    HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTCLOSE, HTLEFT, HTMAXBUTTON, HTMINBUTTON, HTRIGHT, HTTOP,
-    HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, PT_PEN, PT_TOUCH,
-    SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SM_CYSIZEFRAME, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
-    WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_GETOBJECT, WM_KEYDOWN, WM_KILLFOCUS, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_NCCALCSIZE,
-    WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_PAINT,
+    IsZoomed, KillTimer, LoadCursorW, PeekMessageW, RegisterClassW, SetForegroundWindow, SetTimer,
+    SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, HTBOTTOM,
+    HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTCLOSE, HTLEFT, HTMAXBUTTON, HTMINBUTTON,
+    HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, PT_PEN,
+    PT_TOUCH, SIZE_MINIMIZED, SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SM_CYSIZEFRAME, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
+    SW_SHOW, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_COMMAND, WM_DESTROY, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_GETOBJECT, WM_KEYDOWN, WM_KILLFOCUS, WM_MOUSEHWHEEL, WM_MOUSEWHEEL,
+    WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_PAINT,
     WM_POINTERCAPTURECHANGED, WM_POINTERDOWN, WM_POINTERENTER, WM_POINTERHWHEEL, WM_POINTERLEAVE,
     WM_POINTERUP, WM_POINTERUPDATE, WM_POINTERWHEEL, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE,
-    WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED, WNDCLASSW, WS_CLIPCHILDREN,
+    WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED, WM_TIMER, WNDCLASSW, WS_CLIPCHILDREN,
     WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
 
@@ -40,13 +40,16 @@ use super::a11y::{self, A11yActionQueue, StaticActivation, WM_A11Y_ACTION};
 use super::focus::{EscapeOutcome, FocusModel};
 use super::frame::{self, Hit};
 use super::input::{KeyCode, KeyEvent, PointerButton, PointerKind, PointerState};
+use super::popup::WM_POPUP_NOTIFY;
 use super::prefs::{self, SystemPrefs};
 use super::render::{reset_shared, DrawError, FrameOpts, Hover, Renderer};
-use super::screen::{Screen, ScreenEnv, ScreenHost};
+use super::screen::{KeyModifiers, Screen, ScreenEnv, ScreenHost};
 use super::strings;
 use super::theme::Palette;
-use super::tree::Tree;
-use super::widgets::text_field::{RichEditField, WM_RICHEDIT_BLUR, WM_RICHEDIT_FOCUS};
+use super::tree::{Rect, Tree, WidgetId};
+use super::widgets::text_field::{
+    RichEditField, WM_RICHEDIT_BLUR, WM_RICHEDIT_FOCUS, WM_RICHEDIT_SUBMIT,
+};
 
 use accesskit::Action;
 use accesskit_windows::Adapter;
@@ -55,6 +58,9 @@ use accesskit_windows::Adapter;
 const WM_NCMOUSELEAVE: u32 = 0x02A2;
 /// `WM_MOUSELEAVE`
 const WM_MOUSELEAVE: u32 = 0x02A3;
+const EN_CHANGE: u16 = 0x0300;
+const TIMER_TICK_ID: usize = 1;
+const TIMER_AUTOSCROLL_ID: usize = 2;
 
 struct Ui {
     hwnd: HWND,
@@ -72,6 +78,10 @@ struct Ui {
     a11y: Adapter,
     rich_fields: Vec<RichEditField>,
     paint_count: u64,
+    screen_capturing: bool,
+    tick_timer_on: bool,
+    autoscroll_timer_on: bool,
+    syncing_rich: bool,
 }
 
 thread_local! {
@@ -89,6 +99,17 @@ fn current() -> Option<HWND> {
 #[allow(dead_code)] // used by Select popups, RichEdit screens, and tests
 pub fn hwnd() -> Option<HWND> {
     current()
+}
+
+/// Returns the laid-out client DIP rectangle of a widget in the active tree, if mounted.
+#[allow(dead_code)]
+pub fn widget_rect(id: WidgetId) -> Option<Rect> {
+    with_ui(|u| {
+        let tree = active_tree(u)?;
+        let node = tree.node_by_id(id)?;
+        Some(tree.rect(node))
+    })
+    .flatten()
 }
 
 pub fn paint_count() -> u64 {
@@ -124,7 +145,10 @@ pub fn set_screen(screen: Box<dyn Screen>) -> bool {
         };
         let host = ScreenHost::mount(screen, &env, &mut u.focus);
         u.screen = Some(host);
+        u.screen_capturing = false;
         sync_rich_fields(u);
+        sync_rich_focus(u);
+        sync_timers(u, hwnd, false);
         true
     })
     .unwrap_or(false);
@@ -164,6 +188,8 @@ fn rebuild_screen_if_dirty(ui: &mut Ui, hwnd: HWND) -> bool {
     let rebuilt = host.rebuild_if_dirty(&env, &mut ui.focus);
     if rebuilt {
         sync_rich_fields(ui);
+        sync_rich_focus(ui);
+        sync_timers(ui, hwnd, false);
     }
     rebuilt
 }
@@ -295,6 +321,10 @@ unsafe fn create() -> Option<HWND> {
             a11y,
             rich_fields: Vec::new(),
             paint_count: 0,
+            screen_capturing: false,
+            tick_timer_on: false,
+            autoscroll_timer_on: false,
+            syncing_rich: false,
         })
     });
     let _ = ShowWindow(hwnd, SW_SHOW);
@@ -420,18 +450,45 @@ unsafe fn on_pointer_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
             if kind == PointerKind::Mouse {
                 track_client_leave(hwnd);
             }
-            let changed = with_ui(|u| {
-                let hit = active_tree(u).and_then(|t| t.hit_test(x, y));
-                let dirty = u.pointer.on_move(hit, x, y).visual_changed;
-                if dirty {
-                    if let Some(h) = u.screen.as_mut() {
-                        h.mark_dirty();
-                        rebuild_screen_if_dirty(u, hwnd);
+            let mods = current_modifiers();
+            let (changed, sync_a11y_needed) = with_ui(|u| {
+                let mut repaint = false;
+                let mut a11y = false;
+                if u.screen_capturing {
+                    u.pointer.last_dip = Some((x, y));
+                    let reply = u
+                        .screen
+                        .as_mut()
+                        .map(|h| h.on_pointer_move(x, y, mods))
+                        .unwrap_or_default();
+                    u.focus.set_dragging(reply.dragging);
+                    if reply.rebuild {
+                        a11y |= rebuild_screen_if_dirty(u, hwnd);
+                        repaint = true;
+                    } else if reply.fast_redraw {
+                        if let Some(h) = u.screen.as_mut() {
+                            h.sync_drag_tree();
+                        }
+                        repaint = true;
+                    }
+                    sync_timers(u, hwnd, false);
+                } else {
+                    let hit = active_tree(u).and_then(|t| t.hit_test(x, y));
+                    let dirty = u.pointer.on_move(hit, x, y).visual_changed;
+                    if dirty {
+                        if let Some(h) = u.screen.as_mut() {
+                            h.mark_dirty();
+                            rebuild_screen_if_dirty(u, hwnd);
+                        }
+                        repaint = true;
                     }
                 }
-                dirty
+                (repaint, a11y)
             })
-            .unwrap_or(false);
+            .unwrap_or((false, false));
+            if sync_a11y_needed {
+                sync_a11y(hwnd);
+            }
             if changed {
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
@@ -441,6 +498,7 @@ unsafe fn on_pointer_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
             let Some((pid, kind, btn, x, y)) = query_pointer(hwnd, wparam) else {
                 return false;
             };
+            let mods = current_modifiers();
             let (request_capture, focus_changed, visual_changed) = with_ui(|u| {
                 let hit = active_tree(u).and_then(|t| t.hit_test(x, y));
                 let out = u.pointer.on_down(pid, btn, hit, x, y);
@@ -448,14 +506,35 @@ unsafe fn on_pointer_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
                     Some(id) => u.focus.focus_pointer(id),
                     None => u.focus.clear_focus(),
                 };
-                let dirty = out.visual_changed || focus_changed;
-                if dirty {
-                    if let Some(h) = u.screen.as_mut() {
-                        h.mark_dirty();
-                        rebuild_screen_if_dirty(u, hwnd);
+                if focus_changed {
+                    sync_rich_focus(u);
+                }
+                let mut screen_capture = false;
+                let mut screen_dirty = false;
+                if btn == PointerButton::Primary {
+                    if let (Some(id), Some(h)) = (hit, u.screen.as_mut()) {
+                        let reply = h.on_pointer_down(id, x, y, mods);
+                        if reply.capture {
+                            u.screen_capturing = true;
+                            screen_capture = true;
+                        }
+                        u.focus.set_dragging(reply.dragging);
+                        if reply.fast_redraw && !reply.rebuild {
+                            h.sync_drag_tree();
+                            screen_dirty = true;
+                        }
+                        screen_dirty |= reply.rebuild;
                     }
                 }
-                (out.request_capture, focus_changed, dirty)
+                let dirty = out.visual_changed || focus_changed || screen_dirty;
+                if out.visual_changed || focus_changed {
+                    if let Some(h) = u.screen.as_mut() {
+                        h.mark_dirty();
+                    }
+                }
+                rebuild_screen_if_dirty(u, hwnd);
+                sync_timers(u, hwnd, false);
+                (out.request_capture || screen_capture, focus_changed, dirty)
             })
             .unwrap_or((false, false, false));
             if request_capture && kind == PointerKind::Mouse {
@@ -470,27 +549,47 @@ unsafe fn on_pointer_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
             true
         }
         WM_POINTERUP => {
-            let Some((pid, _, _, x, y)) = query_pointer(hwnd, wparam) else {
+            let Some((pid, _, btn, x, y)) = query_pointer(hwnd, wparam) else {
                 return false;
             };
+            let mods = current_modifiers();
             // On pointer-up, FIRSTBUTTON is cleared in pointerFlags; treat release as primary completion.
             let (release_capture, tree_changed, visual_changed) = with_ui(|u| {
                 let hit = active_tree(u).and_then(|t| t.hit_test(x, y));
-                let out = u.pointer.on_up(pid, PointerButton::Primary, hit, x, y);
-                let mut tree_changed = false;
-                if let Some(id) = out.clicked {
+                let was_screen_cap = u.screen_capturing && btn != PointerButton::Secondary;
+                let mut screen_handled = false;
+                let mut screen_dirty = false;
+                if was_screen_cap {
+                    u.screen_capturing = false;
+                    u.focus.set_dragging(false);
                     if let Some(h) = u.screen.as_mut() {
-                        tree_changed = h.on_click(id);
+                        let reply = h.on_pointer_up(x, y, mods);
+                        screen_handled = reply.handled;
+                        screen_dirty = reply.rebuild;
+                        if reply.fast_redraw && !reply.rebuild {
+                            h.sync_drag_tree();
+                            screen_dirty = true;
+                        }
+                    }
+                }
+                let out = u.pointer.on_up(pid, PointerButton::Primary, hit, x, y);
+                let mut tree_changed = screen_dirty;
+                if !screen_handled {
+                    if let Some(id) = out.clicked {
+                        if let Some(h) = u.screen.as_mut() {
+                            tree_changed |= h.on_click(id);
+                        }
                     }
                 }
                 let dirty = out.visual_changed || tree_changed;
-                if dirty {
+                if out.visual_changed {
                     if let Some(h) = u.screen.as_mut() {
                         h.mark_dirty();
-                        rebuild_screen_if_dirty(u, hwnd);
                     }
                 }
-                (out.release_capture, tree_changed, dirty)
+                rebuild_screen_if_dirty(u, hwnd);
+                sync_timers(u, hwnd, false);
+                (out.release_capture || was_screen_cap, tree_changed, dirty)
             })
             .unwrap_or((false, false, false));
             if release_capture {
@@ -506,6 +605,9 @@ unsafe fn on_pointer_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
         }
         WM_POINTERLEAVE | WM_MOUSELEAVE => {
             let changed = with_ui(|u| {
+                if u.screen_capturing {
+                    return false;
+                }
                 let dirty = u.pointer.on_leave().visual_changed;
                 if dirty {
                     if let Some(h) = u.screen.as_mut() {
@@ -523,13 +625,22 @@ unsafe fn on_pointer_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
         }
         WM_POINTERCAPTURECHANGED | WM_CAPTURECHANGED => {
             let changed = with_ui(|u| {
-                let dirty = u.pointer.on_capture_lost().visual_changed;
+                let mut screen_changed = false;
+                if u.screen_capturing {
+                    u.screen_capturing = false;
+                    u.focus.set_dragging(false);
+                    if let Some(h) = u.screen.as_mut() {
+                        screen_changed = h.on_pointer_cancel();
+                    }
+                }
+                let dirty = u.pointer.on_capture_lost().visual_changed || screen_changed;
                 if dirty {
                     if let Some(h) = u.screen.as_mut() {
                         h.mark_dirty();
                         rebuild_screen_if_dirty(u, hwnd);
                     }
                 }
+                sync_timers(u, hwnd, false);
                 dirty
             })
             .unwrap_or(false);
@@ -546,13 +657,17 @@ unsafe fn on_wheel_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
     let delta = (wparam.0 >> 16) as i16;
     let horizontal = msg == WM_MOUSEHWHEEL || msg == WM_POINTERHWHEEL;
     let (scrolled, changed) = with_ui(|u| {
-        let dip = if horizontal {
-            u.pointer.wheel.push_horizontal_dip(delta, 48.0)
+        let (dx, dy) = if horizontal {
+            (u.pointer.wheel.push_horizontal_dip(delta, 48.0), 0.0)
         } else {
-            u.pointer.wheel.push_vertical_dip(delta, 48.0)
+            (0.0, u.pointer.wheel.push_vertical_dip(delta, 48.0))
         };
-        if !horizontal && dip.abs() > 0.01 {
-            let dirty = u.screen.as_mut().is_some_and(|h| h.on_wheel(dip));
+        if dx.abs() > 0.01 || dy.abs() > 0.01 {
+            let (px, py) = u.pointer.last_dip.unwrap_or((0.0, 0.0));
+            let dirty = u
+                .screen
+                .as_mut()
+                .is_some_and(|h| h.on_wheel_at(px, py, dx, dy));
             if dirty {
                 rebuild_screen_if_dirty(u, hwnd);
                 return (true, true);
@@ -568,6 +683,17 @@ unsafe fn on_wheel_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
         let _ = InvalidateRect(Some(hwnd), None, false);
     }
     msg == WM_POINTERWHEEL || msg == WM_POINTERHWHEEL
+}
+
+fn current_modifiers() -> KeyModifiers {
+    // SAFETY: `GetKeyState` queries the calling thread's modifier key state.
+    unsafe {
+        KeyModifiers {
+            shift: GetKeyState(VK_SHIFT.0 as i32) < 0,
+            ctrl: GetKeyState(VK_CONTROL.0 as i32) < 0,
+            alt: GetKeyState(VK_MENU.0 as i32) < 0,
+        }
+    }
 }
 
 fn translate_key(wparam: WPARAM) -> KeyEvent {
@@ -662,6 +788,10 @@ unsafe fn on_a11y_action_msg(hwnd: HWND) {
                             focus_changed = true;
                         }
                     }
+                    if focus_changed {
+                        sync_rich_focus(u);
+                        sync_timers(u, hwnd, false);
+                    }
                     visual_changed = true;
                 }
                 _ => {}
@@ -678,7 +808,7 @@ unsafe fn on_a11y_action_msg(hwnd: HWND) {
 
 unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
     let ev = translate_key(wparam);
-    let (handled, focus_changed, changed) = with_ui(|u| match ev.key {
+    let (handled, focus_changed, changed, release_cap) = with_ui(|u| match ev.key {
         KeyCode::Tab if !ev.ctrl && !ev.alt => {
             let prev = u.focus.focused();
             let prev_vis = u.focus.is_focus_visible();
@@ -689,36 +819,72 @@ unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
                     h.mark_dirty();
                     rebuild_screen_if_dirty(u, hwnd);
                 }
+                sync_rich_focus(u);
             }
-            (true, next != prev, dirty)
+            (true, next != prev, dirty, false)
         }
         KeyCode::Escape => {
+            let mut release_cap = false;
+            if u.screen_capturing {
+                u.screen_capturing = false;
+                release_cap = true;
+            }
             if let Some(h) = u.screen.as_mut() {
                 let prev = u.focus.focused();
                 let (handled, dirty) = h.on_key(ev, &mut u.focus);
                 if dirty {
                     rebuild_screen_if_dirty(u, hwnd);
-                    return (handled, u.focus.focused() != prev, true);
+                    sync_rich_focus(u);
+                    sync_timers(u, hwnd, false);
+                    return (handled, u.focus.focused() != prev, true, release_cap);
                 }
             }
             let prev = u.focus.focused();
             let out = u.focus.on_escape();
             let changed = out != EscapeOutcome::None;
-            (changed, u.focus.focused() != prev, changed)
+            if changed {
+                sync_rich_focus(u);
+            }
+            sync_timers(u, hwnd, false);
+            (changed, u.focus.focused() != prev, changed, release_cap)
         }
         _ => {
             let prev = u.focus.focused();
             if let Some(h) = u.screen.as_mut() {
-                let (handled, dirty) = h.on_key(ev, &mut u.focus);
+                let (mut handled, mut dirty) = h.on_key(ev, &mut u.focus);
+                if !handled
+                    && !ev.ctrl
+                    && !ev.alt
+                    && !ev.shift
+                    && matches!(ev.key, KeyCode::Enter | KeyCode::Space)
+                {
+                    if let Some(fid) = u.focus.focused() {
+                        let is_rich = u.rich_fields.iter().any(|f| f.slot_id() == fid);
+                        let is_clickable = !is_rich
+                            && h.tree()
+                                .node_by_id(fid)
+                                .and_then(|n| h.tree().data(n))
+                                .is_some_and(|d| !d.disabled && d.a11y.clickable);
+                        if is_clickable && h.on_click(fid) {
+                            handled = true;
+                            dirty = true;
+                        }
+                    }
+                }
                 if dirty {
                     rebuild_screen_if_dirty(u, hwnd);
+                    sync_rich_focus(u);
+                    sync_timers(u, hwnd, false);
                 }
-                return (handled, u.focus.focused() != prev, dirty);
+                return (handled, u.focus.focused() != prev, dirty, false);
             }
-            (false, false, false)
+            (false, false, false, false)
         }
     })
-    .unwrap_or((false, false, false));
+    .unwrap_or((false, false, false, false));
+    if release_cap {
+        let _ = ReleaseCapture();
+    }
     if focus_changed {
         sync_a11y(hwnd);
     }
@@ -728,46 +894,145 @@ unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
     handled
 }
 
-fn sync_rich_fields(ui: &Ui) {
-    let Some(tree) = active_tree(ui) else {
+fn sync_rich_fields(ui: &mut Ui) {
+    let Some(slots) = active_tree(ui).map(|t| t.rich_text_slots()) else {
         return;
     };
-    let slots = tree.rich_text_slots();
-    for field in &ui.rich_fields {
-        if let Some((_, rect, hidden)) = slots.iter().find(|(id, _, _)| *id == field.slot_id()) {
-            field.sync_bounds(*rect, *hidden);
+    ui.syncing_rich = true;
+    ui.rich_fields
+        .retain(|f| slots.iter().any(|s| s.key == f.key()));
+
+    // SAFETY: `ui.hwnd` is our thread-owned window handle.
+    let dpi = unsafe { GetDpiForWindow(ui.hwnd) };
+    let text_scale = ui
+        .renderer
+        .as_ref()
+        .map(|r| r.text().text_scale())
+        .unwrap_or(1.0);
+    let palette = ui.palette;
+
+    for spec in slots {
+        if let Some(field) = ui.rich_fields.iter_mut().find(|f| f.key() == spec.key) {
+            field.sync_spec(
+                spec.id,
+                &spec.value,
+                &spec.placeholder,
+                spec.sync_rev,
+                spec.disabled,
+                &palette,
+            );
+            field.sync_bounds(spec.rect, spec.hidden);
+        } else if let Some(mut field) = RichEditField::create(
+            ui.hwnd,
+            spec.id,
+            &spec.key,
+            spec.sync_rev,
+            spec.multiline,
+            &spec.placeholder,
+            &palette,
+            dpi,
+            text_scale,
+        ) {
+            if !spec.value.is_empty() {
+                field.set_text(&spec.value);
+            }
+            field.sync_spec(
+                spec.id,
+                &spec.value,
+                &spec.placeholder,
+                spec.sync_rev,
+                spec.disabled,
+                &palette,
+            );
+            field.sync_bounds(spec.rect, spec.hidden);
+            ui.rich_fields.push(field);
+        }
+    }
+    ui.syncing_rich = false;
+}
+
+fn sync_rich_focus(ui: &Ui) {
+    // SAFETY: queries and transfers Win32 child focus only within our own active window.
+    unsafe {
+        let cur = GetFocus();
+        let ours = cur == ui.hwnd || ui.rich_fields.iter().any(|f| f.hwnd() == cur);
+        if !ours {
+            return;
+        }
+        if let Some(fid) = ui.focus.focused() {
+            if let Some(field) = ui.rich_fields.iter().find(|f| f.slot_id() == fid) {
+                let disabled = active_tree(ui)
+                    .and_then(|t| t.node_by_id(fid).and_then(|n| t.data(n)))
+                    .is_none_or(|d| d.disabled || d.hidden);
+                if !disabled && cur != field.hwnd() {
+                    let _ = SetFocus(Some(field.hwnd()));
+                }
+                return;
+            }
+        }
+        if ui.rich_fields.iter().any(|f| f.hwnd() == cur) {
+            let _ = SetFocus(Some(ui.hwnd));
         }
     }
 }
 
-unsafe fn on_size(hwnd: HWND) {
+fn sync_timers(ui: &mut Ui, hwnd: HWND, minimized: bool) {
+    let want_tick = !minimized && ui.screen.as_ref().is_some_and(|h| h.wants_tick());
+    let want_auto = !minimized && ui.screen.as_ref().is_some_and(|h| h.wants_autoscroll());
+    // SAFETY: `hwnd` is owned by this thread.
+    unsafe {
+        if want_tick && !ui.tick_timer_on {
+            let _ = SetTimer(Some(hwnd), TIMER_TICK_ID, 1000, None);
+            ui.tick_timer_on = true;
+        } else if !want_tick && ui.tick_timer_on {
+            let _ = KillTimer(Some(hwnd), TIMER_TICK_ID);
+            ui.tick_timer_on = false;
+        }
+
+        if want_auto && !ui.autoscroll_timer_on {
+            let _ = SetTimer(Some(hwnd), TIMER_AUTOSCROLL_ID, 16, None);
+            ui.autoscroll_timer_on = true;
+        } else if !want_auto && ui.autoscroll_timer_on {
+            let _ = KillTimer(Some(hwnd), TIMER_AUTOSCROLL_ID);
+            ui.autoscroll_timer_on = false;
+        }
+    }
+}
+
+unsafe fn on_size(hwnd: HWND, size_type: u32) {
+    let minimized = size_type == SIZE_MINIMIZED;
     let (w, h) = client_size(hwnd);
     let dpi = GetDpiForWindow(hwnd);
     let scale = frame::scale(dpi);
     with_ui(|u| {
-        if let Some(r) = u.renderer.as_mut() {
-            match r.resize(w as u32, h as u32) {
-                Ok(()) => {}
-                // Rebuilt by the next paint.
-                Err(_) => {
-                    u.renderer = None;
-                    reset_shared();
+        if !minimized {
+            if let Some(r) = u.renderer.as_mut() {
+                match r.resize(w as u32, h as u32) {
+                    Ok(()) => {}
+                    // Rebuilt by the next paint.
+                    Err(_) => {
+                        u.renderer = None;
+                        reset_shared();
+                    }
                 }
             }
-        }
-        if let Some(r) = u.renderer.as_ref() {
-            let w_dip = w as f32 / scale;
-            let h_dip = h as f32 / scale;
-            if let Some(host) = u.screen.as_mut() {
-                host.relayout(w_dip, h_dip, r.text());
-            } else if let Some(tree) = u.tree.as_mut() {
-                tree.layout(w_dip, h_dip, r.text());
+            if let Some(r) = u.renderer.as_ref() {
+                let w_dip = w as f32 / scale;
+                let h_dip = h as f32 / scale;
+                if let Some(host) = u.screen.as_mut() {
+                    host.relayout(w_dip, h_dip, r.text());
+                } else if let Some(tree) = u.tree.as_mut() {
+                    tree.layout(w_dip, h_dip, r.text());
+                }
             }
+            sync_rich_fields(u);
         }
-        sync_rich_fields(u);
+        sync_timers(u, hwnd, minimized);
     });
-    sync_a11y(hwnd);
-    let _ = InvalidateRect(Some(hwnd), None, false);
+    if !minimized {
+        sync_a11y(hwnd);
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
 }
 
 unsafe fn on_paint(hwnd: HWND) {
@@ -909,7 +1174,7 @@ unsafe extern "system" fn wnd_proc(
             }
             _ => {}
         },
-        WM_SIZE => on_size(hwnd),
+        WM_SIZE => on_size(hwnd, wparam.0 as u32),
         WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE => {
             on_system_prefs_changed(hwnd);
         }
@@ -992,6 +1257,117 @@ unsafe extern "system" fn wnd_proc(
             on_a11y_action_msg(hwnd);
             return LRESULT(0);
         }
+        WM_COMMAND => {
+            let code = ((wparam.0 >> 16) & 0xFFFF) as u16;
+            if code == EN_CHANGE {
+                let child = HWND(lparam.0 as *mut core::ffi::c_void);
+                let changed = with_ui(|u| {
+                    if u.syncing_rich {
+                        return false;
+                    }
+                    let payload = u
+                        .rich_fields
+                        .iter()
+                        .find(|f| f.hwnd() == child)
+                        .map(|f| (f.key().to_string(), f.text()));
+                    let Some((key, val)) = payload else {
+                        return false;
+                    };
+                    if let Some(h) = u.screen.as_mut() {
+                        if h.on_text_change(&key, &val) {
+                            return rebuild_screen_if_dirty(u, hwnd);
+                        }
+                    }
+                    false
+                })
+                .unwrap_or(false);
+                if changed {
+                    sync_a11y(hwnd);
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+                return LRESULT(0);
+            }
+        }
+        m if m == WM_RICHEDIT_SUBMIT => {
+            let child = HWND(wparam.0 as *mut core::ffi::c_void);
+            let changed = with_ui(|u| {
+                let payload = u
+                    .rich_fields
+                    .iter()
+                    .find(|f| f.hwnd() == child)
+                    .map(|f| (f.key().to_string(), f.text()));
+                let Some((key, val)) = payload else {
+                    return false;
+                };
+                if let Some(h) = u.screen.as_mut() {
+                    if h.on_text_submit(&key, &val) {
+                        return rebuild_screen_if_dirty(u, hwnd);
+                    }
+                }
+                false
+            })
+            .unwrap_or(false);
+            if changed {
+                sync_a11y(hwnd);
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            return LRESULT(0);
+        }
+        m if m == WM_POPUP_NOTIFY => {
+            let changed = with_ui(|u| {
+                if let Some(h) = u.screen.as_mut() {
+                    if h.on_popup_poll() {
+                        rebuild_screen_if_dirty(u, hwnd);
+                        sync_timers(u, hwnd, false);
+                        return true;
+                    }
+                }
+                false
+            })
+            .unwrap_or(false);
+            if changed {
+                sync_a11y(hwnd);
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            return LRESULT(0);
+        }
+        WM_TIMER => {
+            let id = wparam.0;
+            let (repaint, a11y) = with_ui(|u| {
+                let mut repaint = false;
+                let mut a11y = false;
+                if id == TIMER_TICK_ID {
+                    if let Some(h) = u.screen.as_mut() {
+                        if h.on_tick() {
+                            a11y = rebuild_screen_if_dirty(u, hwnd);
+                            repaint = true;
+                        }
+                    }
+                    sync_timers(u, hwnd, false);
+                } else if id == TIMER_AUTOSCROLL_ID {
+                    if let Some(h) = u.screen.as_mut() {
+                        let reply = h.on_autoscroll();
+                        if reply.rebuild {
+                            a11y = rebuild_screen_if_dirty(u, hwnd);
+                            repaint = true;
+                        } else if reply.fast_redraw {
+                            h.sync_drag_tree();
+                            repaint = true;
+                        }
+                    }
+                    sync_timers(u, hwnd, false);
+                }
+                (repaint, a11y)
+            })
+            .unwrap_or((false, false));
+            if a11y {
+                sync_a11y(hwnd);
+            }
+            if repaint {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            return LRESULT(0);
+        }
         m if m == WM_RICHEDIT_FOCUS || m == WM_RICHEDIT_BLUR => {
             let child = HWND(wparam.0 as *mut core::ffi::c_void);
             let focused_slot = with_ui(|u| {
@@ -1003,13 +1379,24 @@ unsafe extern "system" fn wnd_proc(
             .flatten();
             if let Some(slot_id) = focused_slot {
                 let changed = with_ui(|u| {
-                    if m == WM_RICHEDIT_FOCUS {
-                        u.focus.focus_pointer(slot_id)
+                    let dirty = if m == WM_RICHEDIT_FOCUS {
+                        if u.focus.focused() != Some(slot_id) {
+                            u.focus.focus_pointer(slot_id)
+                        } else {
+                            false
+                        }
                     } else if u.focus.focused() == Some(slot_id) {
                         u.focus.clear_focus()
                     } else {
                         false
+                    };
+                    if dirty {
+                        if let Some(h) = u.screen.as_mut() {
+                            h.mark_dirty();
+                            rebuild_screen_if_dirty(u, hwnd);
+                        }
                     }
+                    dirty
                 })
                 .unwrap_or(false);
                 if changed {
@@ -1272,6 +1659,207 @@ mod tests {
                 assert_eq!(cur.bottom - cur.top, suggested.bottom - suggested.top);
             }
         }
+
+        close();
+        pump();
+        reset_shared();
+        assert!(!is_open());
+    }
+
+    #[test]
+    fn rich_text_slots_auto_sync_and_preserve_text_across_rebuilds() {
+        use super::super::screen::BuiltScreen;
+        use super::super::widgets::button::{self, ButtonProps};
+        use super::super::widgets::text_field::{self, TextFieldProps};
+        use taffy::prelude::*;
+
+        struct RichScreen {
+            show_extra: bool,
+            rev: u64,
+            val_main: String,
+            val_extra: String,
+            submitted: bool,
+            toggle_btn: Option<WidgetId>,
+        }
+
+        impl Screen for RichScreen {
+            fn build(&mut self, env: &ScreenEnv<'_>) -> BuiltScreen {
+                let mut tree = Tree::new(Style {
+                    size: super::super::tree::style::size(env.width_dip, env.height_dip),
+                    gap: super::super::tree::style::gap(8.0),
+                    padding: super::super::tree::style::pad(12.0, 12.0, 12.0, 12.0),
+                    ..super::super::tree::style::column()
+                });
+                let root = tree.root();
+                let mut tf = TextFieldProps::simple("main.field", "Main note", &self.val_main);
+                tf.sync_rev = self.rev;
+                text_field::build_tree_node(&mut tree, root, &tf, env.palette);
+                if self.show_extra {
+                    let tf2 = TextFieldProps::simple("extra.field", "Extra note", &self.val_extra);
+                    text_field::build_tree_node(&mut tree, root, &tf2, env.palette);
+                }
+                let (_btn, bid) = button::build(
+                    &mut tree,
+                    root,
+                    &ButtonProps::new("Toggle extra"),
+                    env.palette,
+                );
+                self.toggle_btn = Some(bid);
+                BuiltScreen {
+                    tree,
+                    modal_root: None,
+                }
+            }
+
+            fn on_click(&mut self, id: WidgetId) -> bool {
+                if Some(id) == self.toggle_btn {
+                    self.show_extra = !self.show_extra;
+                    return true;
+                }
+                false
+            }
+
+            fn on_text_change(&mut self, key: &str, value: &str) -> bool {
+                if key == "main.field" {
+                    self.val_main = value.to_string();
+                } else if key == "extra.field" {
+                    self.val_extra = value.to_string();
+                }
+                false
+            }
+
+            fn on_text_submit(&mut self, key: &str, _value: &str) -> bool {
+                if key == "main.field" {
+                    self.submitted = true;
+                    self.rev += 1;
+                    self.val_main = "submitted".into();
+                    return true;
+                }
+                false
+            }
+        }
+
+        super::super::init();
+        assert!(open());
+        assert!(set_screen(Box::new(RichScreen {
+            show_extra: true,
+            rev: 0,
+            val_main: "Initial".into(),
+            val_extra: "Second".into(),
+            submitted: false,
+            toggle_btn: None,
+        })));
+        pump_until_painted(1);
+
+        let hwnd = hwnd().expect("live hwnd");
+        let (count, main_hwnd, main_text) = with_ui(|u| {
+            let f = u
+                .rich_fields
+                .iter()
+                .find(|f| f.key() == "main.field")
+                .unwrap();
+            (u.rich_fields.len(), f.hwnd(), f.text())
+        })
+        .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(main_text, "Initial");
+
+        // User edits text in child RichEdit: rebuilding screen without bumping sync_rev must preserve user text.
+        with_ui(|u| {
+            let f = u
+                .rich_fields
+                .iter()
+                .find(|f| f.hwnd() == main_hwnd)
+                .unwrap();
+            f.set_text("User typed");
+        });
+        // Trigger EN_CHANGE + toggle extra field off (rebuilds tree, destroys dead slot).
+        let toggle_id = with_ui(|u| {
+            let t = active_tree(u).unwrap();
+            t.all_nodes()
+                .into_iter()
+                .filter_map(|n| t.data(n))
+                .find(|d| d.a11y.name == "Toggle extra")
+                .unwrap()
+                .id
+        })
+        .unwrap();
+        // SAFETY: sends WM_COMMAND(EN_CHANGE) for our test child HWND and triggers screen click.
+        unsafe {
+            let wp = WPARAM(((EN_CHANGE as usize) << 16) | 1);
+            let _ = SendMessageW(
+                hwnd,
+                WM_COMMAND,
+                Some(wp),
+                Some(LPARAM(main_hwnd.0 as isize)),
+            );
+        }
+        with_ui(|u| {
+            assert!(u.screen.as_mut().unwrap().on_click(toggle_id));
+            assert!(rebuild_screen_if_dirty(u, hwnd));
+        });
+        pump();
+
+        let (count2, preserved) = with_ui(|u| {
+            let f = u
+                .rich_fields
+                .iter()
+                .find(|f| f.key() == "main.field")
+                .unwrap();
+            (u.rich_fields.len(), f.text())
+        })
+        .unwrap();
+        assert_eq!(count2, 1, "hidden/removed slot should be destroyed");
+        assert_eq!(preserved, "User typed");
+
+        // Submit bumps sync_rev -> child text syncs to updated model value.
+        // SAFETY: sends WM_RICHEDIT_SUBMIT for our test child HWND.
+        unsafe {
+            let _ = SendMessageW(
+                hwnd,
+                WM_RICHEDIT_SUBMIT,
+                Some(WPARAM(main_hwnd.0 as usize)),
+                Some(LPARAM(0)),
+            );
+        }
+        pump();
+        let after_submit = with_ui(|u| u.rich_fields[0].text()).unwrap();
+        assert_eq!(after_submit, "submitted");
+
+        close();
+        pump();
+        reset_shared();
+        assert!(!is_open());
+    }
+
+    #[test]
+    fn keyboard_enter_and_space_activate_focused_clickable_widget() {
+        super::super::init();
+        assert!(open());
+        assert!(set_screen(Box::new(
+            super::super::screen::WidgetGalleryScreen::new()
+        )));
+        pump_until_painted(1);
+        let hwnd = hwnd().expect("live hwnd");
+
+        // Focus first widget ("Open dialog" button) via Tab, then activate with Enter.
+        // SAFETY: sends WM_KEYDOWN messages directly to our live window.
+        unsafe {
+            let _ = SendMessageW(hwnd, WM_KEYDOWN, Some(WPARAM(VK_TAB.0 as usize)), None);
+            let _ = SendMessageW(hwnd, WM_KEYDOWN, Some(WPARAM(VK_RETURN.0 as usize)), None);
+        }
+        pump();
+        let scope_after_enter = with_ui(|u| u.focus.active_scope()).unwrap();
+        assert!(matches!(scope_after_enter, FocusScope::Modal(_)));
+
+        // Escape dismisses modal cleanly back to Main scope.
+        // SAFETY: sends WM_KEYDOWN(VK_ESCAPE) to our live window.
+        unsafe {
+            let _ = SendMessageW(hwnd, WM_KEYDOWN, Some(WPARAM(VK_ESCAPE.0 as usize)), None);
+        }
+        pump();
+        let scope_after_esc = with_ui(|u| u.focus.active_scope()).unwrap();
+        assert_eq!(scope_after_esc, FocusScope::Main);
 
         close();
         pump();

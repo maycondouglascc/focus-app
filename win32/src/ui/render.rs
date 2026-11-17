@@ -464,7 +464,7 @@ impl Renderer {
                     self.draw_cmd(cmd, rect.x, rect.y);
                 }
             }
-            Leaf::RichTextSlot | Leaf::Box => {}
+            Leaf::RichTextSlot { .. } | Leaf::Box => {}
         }
     }
 

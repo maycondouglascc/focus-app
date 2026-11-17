@@ -20,7 +20,7 @@ use windows::Win32::UI::Controls::RichEdit::{
     MSFTEDIT_CLASS, SCF_ALL, SCF_DEFAULT,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{VK_ESCAPE, VK_TAB};
+use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, VK_ESCAPE, VK_RETURN, VK_TAB};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, GetClientRect, GetParent, GetWindowLongW, GetWindowTextLengthW,
@@ -32,6 +32,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 pub const WM_RICHEDIT_FOCUS: u32 = WM_APP + 2;
 pub const WM_RICHEDIT_BLUR: u32 = WM_APP + 3;
+pub const WM_RICHEDIT_SUBMIT: u32 = WM_APP + 4;
+const EM_SETREADONLY: u32 = 0x00CF;
 
 use super::interactive_a11y;
 use crate::ui::frame;
@@ -74,6 +76,19 @@ unsafe extern "system" fn richedit_subclass_proc(
             if vk == VK_TAB.0 || vk == VK_ESCAPE.0 {
                 if let Ok(parent) = GetParent(hwnd) {
                     return SendMessageW(parent, WM_KEYDOWN, Some(wparam), Some(lparam));
+                }
+            } else if vk == VK_RETURN.0 && ref_data != 0 {
+                let state = &*(ref_data as *const SubclassData);
+                if !state.multiline {
+                    if let Ok(parent) = GetParent(hwnd) {
+                        let _ = SendMessageW(
+                            parent,
+                            WM_RICHEDIT_SUBMIT,
+                            Some(WPARAM(hwnd.0 as usize)),
+                            Some(lparam),
+                        );
+                    }
+                    return LRESULT(0);
                 }
             }
         }
@@ -143,13 +158,33 @@ unsafe extern "system" fn richedit_subclass_proc(
 
 #[derive(Clone, Debug)]
 pub struct TextFieldProps<'a> {
+    pub key: &'a str,
     pub aria_label: &'a str,
+    pub placeholder: &'a str,
     pub value: &'a str,
     pub multiline: bool,
     pub min_height: f32,
     pub focused: bool,
     pub error: bool,
     pub disabled: bool,
+    pub sync_rev: u64,
+}
+
+impl<'a> TextFieldProps<'a> {
+    pub fn simple(key: &'a str, aria_label: &'a str, value: &'a str) -> Self {
+        Self {
+            key,
+            aria_label,
+            placeholder: "",
+            value,
+            multiline: false,
+            min_height: 32.0,
+            focused: false,
+            error: false,
+            disabled: false,
+            sync_rev: 0,
+        }
+    }
 }
 
 /// Builds the outer bordered container and its inner `Leaf::RichTextSlot` in `tree`.
@@ -181,7 +216,7 @@ pub fn build_tree_node(
                 height: auto(),
             },
             min_size: Size {
-                width: length(120.0_f32),
+                width: length(80.0_f32),
                 height: length(min_h),
             },
             ..Default::default()
@@ -230,7 +265,13 @@ pub fn build_tree_node(
             },
             ..Default::default()
         },
-        Leaf::RichTextSlot,
+        Leaf::RichTextSlot {
+            key: props.key.into(),
+            placeholder: props.placeholder.into(),
+            value: props.value.into(),
+            multiline: props.multiline,
+            sync_rev: props.sync_rev,
+        },
     );
     tree.set_hit(slot, HitMode::Interactive);
     tree.set_focusable(slot, true);
@@ -246,14 +287,20 @@ pub fn build_tree_node(
 pub struct RichEditField {
     hwnd: HWND,
     slot_id: WidgetId,
+    key: String,
+    sync_rev: u64,
+    disabled: bool,
     font: HFONT,
     subclass_ptr: *mut SubclassData,
 }
 
 impl RichEditField {
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         parent: HWND,
         slot_id: WidgetId,
+        key: impl Into<String>,
+        sync_rev: u64,
         multiline: bool,
         placeholder: &str,
         palette: &Palette,
@@ -320,6 +367,9 @@ impl RichEditField {
             let mut field = Self {
                 hwnd,
                 slot_id,
+                key: key.into(),
+                sync_rev,
+                disabled: false,
                 font: HFONT::default(),
                 subclass_ptr,
             };
@@ -334,6 +384,59 @@ impl RichEditField {
 
     pub fn slot_id(&self) -> WidgetId {
         self.slot_id
+    }
+
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub fn sync_spec(
+        &mut self,
+        slot_id: WidgetId,
+        value: &str,
+        placeholder: &str,
+        sync_rev: u64,
+        disabled: bool,
+        palette: &Palette,
+    ) {
+        self.slot_id = slot_id;
+        if sync_rev != self.sync_rev {
+            self.sync_rev = sync_rev;
+            self.set_text(value);
+        }
+        if !self.subclass_ptr.is_null() {
+            // SAFETY: `subclass_ptr` stays alive until `WM_NCDESTROY` during `DestroyWindow` in `Drop`.
+            unsafe {
+                let want: Vec<u16> = placeholder.encode_utf16().collect();
+                if (*self.subclass_ptr).placeholder != want {
+                    (*self.subclass_ptr).placeholder = want;
+                }
+            }
+        }
+        if disabled != self.disabled {
+            self.disabled = disabled;
+            // SAFETY: `self.hwnd` is our owned child window.
+            unsafe {
+                let _ = SendMessageW(
+                    self.hwnd,
+                    EM_SETREADONLY,
+                    Some(WPARAM(usize::from(disabled))),
+                    None,
+                );
+                let _ = EnableWindow(self.hwnd, !disabled);
+                let bg = if disabled {
+                    palette.disabled_bg
+                } else {
+                    palette.ctl_bg
+                };
+                let _ = SendMessageW(
+                    self.hwnd,
+                    EM_SETBKGNDCOLOR,
+                    Some(WPARAM(0)),
+                    Some(LPARAM(to_colorref(bg) as isize)),
+                );
+            }
+        }
     }
 
     /// Repositions and shows/hides the native `RICHEDIT50W` window to match the tree slot.
@@ -503,13 +606,16 @@ mod tests {
             &mut tree,
             root,
             &TextFieldProps {
+                key: "test.note",
                 aria_label: "Task note",
+                placeholder: "Write a short note…",
                 value: "",
                 multiline: false,
                 min_height: 32.0,
                 focused: true,
                 error: false,
                 disabled: false,
+                sync_rev: 0,
             },
             &Palette::LIGHT,
         );
@@ -518,9 +624,9 @@ mod tests {
 
         let slots = tree.rich_text_slots();
         assert_eq!(slots.len(), 1);
-        assert_eq!(slots[0].0, slot_id);
-        assert!(!slots[0].2);
-        assert!(slots[0].1.w > 100.0);
+        assert_eq!(slots[0].id, slot_id);
+        assert!(!slots[0].hidden);
+        assert!(slots[0].rect.w > 100.0);
 
         let owner = window::hwnd().expect("main window hwnd");
         // SAFETY: `owner` is our live test window owned by this thread.
@@ -528,6 +634,8 @@ mod tests {
         let field = RichEditField::create(
             owner,
             slot_id,
+            "test.note",
+            0,
             false,
             "Write a short note…",
             &Palette::LIGHT,
@@ -545,7 +653,7 @@ mod tests {
             "IMF_SPELLCHECKING must be enabled"
         );
 
-        field.sync_bounds(slots[0].1, slots[0].2);
+        field.sync_bounds(slots[0].rect, slots[0].hidden);
         field.set_text("Focus review");
         assert_eq!(field.text(), "Focus review");
 
