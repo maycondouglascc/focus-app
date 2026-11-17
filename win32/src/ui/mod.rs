@@ -9,6 +9,7 @@ pub mod input;
 pub mod popup;
 pub mod prefs;
 pub mod render;
+pub mod screen;
 pub mod selftest;
 pub mod strings;
 pub mod text;

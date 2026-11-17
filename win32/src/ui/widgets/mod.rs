@@ -5,13 +5,23 @@
 #[allow(dead_code)] // widget modules wired progressively across F2/F3
 pub mod button;
 #[allow(dead_code)]
+pub mod charts;
+#[allow(dead_code)]
+pub mod dialog;
+#[allow(dead_code)]
+pub mod popover;
+#[allow(dead_code)]
 pub mod segmented;
 #[allow(dead_code)]
 pub mod select;
 #[allow(dead_code)]
+pub mod table;
+#[allow(dead_code)]
 pub mod text_field;
 #[allow(dead_code)]
 pub mod toggle;
+#[allow(dead_code)]
+pub mod virtual_list;
 
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::Graphics::Gdi::ClientToScreen;

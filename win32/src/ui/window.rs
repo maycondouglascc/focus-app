@@ -42,6 +42,7 @@ use super::frame::{self, Hit};
 use super::input::{KeyCode, KeyEvent, PointerButton, PointerKind, PointerState};
 use super::prefs::{self, SystemPrefs};
 use super::render::{reset_shared, DrawError, FrameOpts, Hover, Renderer};
+use super::screen::{Screen, ScreenEnv, ScreenHost};
 use super::strings;
 use super::theme::Palette;
 use super::tree::Tree;
@@ -63,6 +64,7 @@ struct Ui {
     prefs: SystemPrefs,
     palette: Palette,
     mica: bool,
+    screen: Option<ScreenHost>,
     tree: Option<Tree>,
     focus: FocusModel,
     pointer: PointerState,
@@ -87,6 +89,74 @@ fn current() -> Option<HWND> {
 #[allow(dead_code)] // used by Select popups, RichEdit screens, and tests
 pub fn hwnd() -> Option<HWND> {
     current()
+}
+
+/// Mounts a retained screen onto the open window and schedules a single paint.
+#[allow(dead_code)] // wired to F3 screens and verified by F2 gallery tests
+pub fn set_screen(screen: Box<dyn Screen>) -> bool {
+    let Some(hwnd) = current() else {
+        return false;
+    };
+    // SAFETY: `hwnd` is owned by this thread.
+    let (dpi, (w, h)) = unsafe { (GetDpiForWindow(hwnd), client_size(hwnd)) };
+    let scale = frame::scale(dpi);
+    let mounted = with_ui(|u| {
+        let Some(text) = u.renderer.as_ref().map(|r| r.text()) else {
+            return false;
+        };
+        let env = ScreenEnv {
+            width_dip: w as f32 / scale,
+            height_dip: h as f32 / scale,
+            hover: u.pointer.hovered,
+            pressed: u.pointer.pressed,
+            focused: u.focus.focused(),
+            palette: &u.palette,
+            text,
+        };
+        let host = ScreenHost::mount(screen, &env, &mut u.focus);
+        u.screen = Some(host);
+        sync_rich_fields(u);
+        true
+    })
+    .unwrap_or(false);
+    if mounted {
+        // SAFETY: `hwnd` is live on this thread.
+        unsafe {
+            sync_a11y(hwnd);
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
+    }
+    mounted
+}
+
+fn active_tree(ui: &Ui) -> Option<&Tree> {
+    ui.screen.as_ref().map(|h| h.tree()).or(ui.tree.as_ref())
+}
+
+fn rebuild_screen_if_dirty(ui: &mut Ui, hwnd: HWND) -> bool {
+    let Some(host) = ui.screen.as_mut() else {
+        return false;
+    };
+    let Some(text) = ui.renderer.as_ref().map(|r| r.text()) else {
+        return false;
+    };
+    // SAFETY: `hwnd` is owned by this thread.
+    let (dpi, (w, h)) = unsafe { (GetDpiForWindow(hwnd), client_size(hwnd)) };
+    let scale = frame::scale(dpi);
+    let env = ScreenEnv {
+        width_dip: w as f32 / scale,
+        height_dip: h as f32 / scale,
+        hover: ui.pointer.hovered,
+        pressed: ui.pointer.pressed,
+        focused: ui.focus.focused(),
+        palette: &ui.palette,
+        text,
+    };
+    let rebuilt = host.rebuild_if_dirty(&env, &mut ui.focus);
+    if rebuilt {
+        sync_rich_fields(ui);
+    }
+    rebuilt
 }
 
 pub fn is_open() -> bool {
@@ -208,6 +278,7 @@ unsafe fn create() -> Option<HWND> {
             prefs: sys_prefs,
             palette,
             mica,
+            screen: None,
             tree: None,
             focus: FocusModel::new(),
             pointer: PointerState::default(),
@@ -341,8 +412,15 @@ unsafe fn on_pointer_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
                 track_client_leave(hwnd);
             }
             let changed = with_ui(|u| {
-                let hit = u.tree.as_ref().and_then(|t| t.hit_test(x, y));
-                u.pointer.on_move(hit, x, y).visual_changed
+                let hit = active_tree(u).and_then(|t| t.hit_test(x, y));
+                let dirty = u.pointer.on_move(hit, x, y).visual_changed;
+                if dirty {
+                    if let Some(h) = u.screen.as_mut() {
+                        h.mark_dirty();
+                        rebuild_screen_if_dirty(u, hwnd);
+                    }
+                }
+                dirty
             })
             .unwrap_or(false);
             if changed {
@@ -355,17 +433,20 @@ unsafe fn on_pointer_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
                 return false;
             };
             let (request_capture, focus_changed, visual_changed) = with_ui(|u| {
-                let hit = u.tree.as_ref().and_then(|t| t.hit_test(x, y));
+                let hit = active_tree(u).and_then(|t| t.hit_test(x, y));
                 let out = u.pointer.on_down(pid, btn, hit, x, y);
                 let focus_changed = match hit {
                     Some(id) => u.focus.focus_pointer(id),
                     None => u.focus.clear_focus(),
                 };
-                (
-                    out.request_capture,
-                    focus_changed,
-                    out.visual_changed || focus_changed,
-                )
+                let dirty = out.visual_changed || focus_changed;
+                if dirty {
+                    if let Some(h) = u.screen.as_mut() {
+                        h.mark_dirty();
+                        rebuild_screen_if_dirty(u, hwnd);
+                    }
+                }
+                (out.request_capture, focus_changed, dirty)
             })
             .unwrap_or((false, false, false));
             if request_capture && kind == PointerKind::Mouse {
@@ -384,28 +465,65 @@ unsafe fn on_pointer_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
                 return false;
             };
             // On pointer-up, FIRSTBUTTON is cleared in pointerFlags; treat release as primary completion.
-            let outcome = with_ui(|u| {
-                let hit = u.tree.as_ref().and_then(|t| t.hit_test(x, y));
-                u.pointer.on_up(pid, PointerButton::Primary, hit, x, y)
+            let (release_capture, tree_changed, visual_changed) = with_ui(|u| {
+                let hit = active_tree(u).and_then(|t| t.hit_test(x, y));
+                let out = u.pointer.on_up(pid, PointerButton::Primary, hit, x, y);
+                let mut tree_changed = false;
+                if let Some(id) = out.clicked {
+                    if let Some(h) = u.screen.as_mut() {
+                        tree_changed = h.on_click(id);
+                    }
+                }
+                let dirty = out.visual_changed || tree_changed;
+                if dirty {
+                    if let Some(h) = u.screen.as_mut() {
+                        h.mark_dirty();
+                        rebuild_screen_if_dirty(u, hwnd);
+                    }
+                }
+                (out.release_capture, tree_changed, dirty)
             })
-            .unwrap_or_default();
-            if outcome.release_capture {
+            .unwrap_or((false, false, false));
+            if release_capture {
                 let _ = ReleaseCapture();
             }
-            if outcome.visual_changed {
+            if tree_changed {
+                sync_a11y(hwnd);
+            }
+            if visual_changed {
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             true
         }
         WM_POINTERLEAVE | WM_MOUSELEAVE => {
-            let changed = with_ui(|u| u.pointer.on_leave().visual_changed).unwrap_or(false);
+            let changed = with_ui(|u| {
+                let dirty = u.pointer.on_leave().visual_changed;
+                if dirty {
+                    if let Some(h) = u.screen.as_mut() {
+                        h.mark_dirty();
+                        rebuild_screen_if_dirty(u, hwnd);
+                    }
+                }
+                dirty
+            })
+            .unwrap_or(false);
             if changed {
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             true
         }
         WM_POINTERCAPTURECHANGED | WM_CAPTURECHANGED => {
-            let changed = with_ui(|u| u.pointer.on_capture_lost().visual_changed).unwrap_or(false);
+            let changed = with_ui(|u| {
+                let dirty = u.pointer.on_capture_lost().visual_changed;
+                if dirty {
+                    if let Some(h) = u.screen.as_mut() {
+                        h.mark_dirty();
+                        rebuild_screen_if_dirty(u, hwnd);
+                    }
+                }
+                dirty
+            })
+            .unwrap_or(false);
             if changed {
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
@@ -418,16 +536,25 @@ unsafe fn on_pointer_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
 unsafe fn on_wheel_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
     let delta = (wparam.0 >> 16) as i16;
     let horizontal = msg == WM_MOUSEHWHEEL || msg == WM_POINTERHWHEEL;
-    let changed = with_ui(|u| {
+    let (scrolled, changed) = with_ui(|u| {
         let dip = if horizontal {
             u.pointer.wheel.push_horizontal_dip(delta, 48.0)
         } else {
             u.pointer.wheel.push_vertical_dip(delta, 48.0)
         };
-        let _ = dip;
-        false
+        if !horizontal && dip.abs() > 0.01 {
+            let dirty = u.screen.as_mut().is_some_and(|h| h.on_wheel(dip));
+            if dirty {
+                rebuild_screen_if_dirty(u, hwnd);
+                return (true, true);
+            }
+        }
+        (false, false)
     })
-    .unwrap_or(false);
+    .unwrap_or((false, false));
+    if scrolled {
+        sync_a11y(hwnd);
+    }
     if changed {
         let _ = InvalidateRect(Some(hwnd), None, false);
     }
@@ -476,11 +603,15 @@ unsafe fn sync_a11y(hwnd: HWND) {
             return None;
         };
         let ui = g.as_mut()?;
-        let tree = ui.tree.as_ref();
         let focused = ui.focus.focused();
-        ui.a11y.update_if_active(|| {
-            a11y::build_tree_update(tree, focused, scale, client_px, strings::APP_NAME)
-        })
+        let update = a11y::build_tree_update(
+            active_tree(ui),
+            focused,
+            scale,
+            client_px,
+            strings::APP_NAME,
+        );
+        ui.a11y.update_if_active(|| update)
     });
     // Raise outside any borrow of `UI` because UIA may synchronously send `WM_GETOBJECT`.
     if let Some(ev) = queued {
@@ -510,12 +641,17 @@ unsafe fn on_a11y_action_msg(hwnd: HWND) {
                     visual_changed = true;
                 }
                 Action::Click => {
-                    if u.tree
-                        .as_ref()
+                    if active_tree(u)
                         .and_then(|t| t.node_by_id(target).and_then(|n| t.data(n)))
                         .is_some_and(|d| d.focusable && !d.disabled)
                     {
                         focus_changed |= u.focus.focus_keyboard(target);
+                    }
+                    if let Some(h) = u.screen.as_mut() {
+                        if h.on_click(target) {
+                            rebuild_screen_if_dirty(u, hwnd);
+                            focus_changed = true;
+                        }
                     }
                     visual_changed = true;
                 }
@@ -538,19 +674,40 @@ unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
             let prev = u.focus.focused();
             let prev_vis = u.focus.is_focus_visible();
             let next = u.focus.tab(ev.shift);
-            (
-                true,
-                next != prev,
-                next != prev || u.focus.is_focus_visible() != prev_vis,
-            )
+            let dirty = next != prev || u.focus.is_focus_visible() != prev_vis;
+            if dirty {
+                if let Some(h) = u.screen.as_mut() {
+                    h.mark_dirty();
+                    rebuild_screen_if_dirty(u, hwnd);
+                }
+            }
+            (true, next != prev, dirty)
         }
         KeyCode::Escape => {
+            if let Some(h) = u.screen.as_mut() {
+                let prev = u.focus.focused();
+                let (handled, dirty) = h.on_key(ev, &mut u.focus);
+                if dirty {
+                    rebuild_screen_if_dirty(u, hwnd);
+                    return (handled, u.focus.focused() != prev, true);
+                }
+            }
             let prev = u.focus.focused();
             let out = u.focus.on_escape();
             let changed = out != EscapeOutcome::None;
             (changed, u.focus.focused() != prev, changed)
         }
-        _ => (false, false, false),
+        _ => {
+            let prev = u.focus.focused();
+            if let Some(h) = u.screen.as_mut() {
+                let (handled, dirty) = h.on_key(ev, &mut u.focus);
+                if dirty {
+                    rebuild_screen_if_dirty(u, hwnd);
+                }
+                return (handled, u.focus.focused() != prev, dirty);
+            }
+            (false, false, false)
+        }
     })
     .unwrap_or((false, false, false));
     if focus_changed {
@@ -563,7 +720,7 @@ unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
 }
 
 fn sync_rich_fields(ui: &Ui) {
-    let Some(tree) = ui.tree.as_ref() else {
+    let Some(tree) = active_tree(ui) else {
         return;
     };
     let slots = tree.rich_text_slots();
@@ -589,8 +746,14 @@ unsafe fn on_size(hwnd: HWND) {
                 }
             }
         }
-        if let (Some(tree), Some(r)) = (u.tree.as_mut(), u.renderer.as_ref()) {
-            tree.layout(w as f32 / scale, h as f32 / scale, r.text());
+        if let Some(r) = u.renderer.as_ref() {
+            let w_dip = w as f32 / scale;
+            let h_dip = h as f32 / scale;
+            if let Some(host) = u.screen.as_mut() {
+                host.relayout(w_dip, h_dip, r.text());
+            } else if let Some(tree) = u.tree.as_mut() {
+                tree.layout(w_dip, h_dip, r.text());
+            }
         }
         sync_rich_fields(u);
     });
@@ -617,8 +780,8 @@ unsafe fn on_paint(hwnd: HWND) {
         let hover = u.hover;
         let palette = u.palette;
         let mica = u.mica;
-        let tree = u.tree.take();
-        let focus_ring = tree.as_ref().and_then(|t| u.focus.focus_ring_rect(t));
+        let tree_ref = u.screen.as_ref().map(|h| h.tree()).or(u.tree.as_ref());
+        let focus_ring = tree_ref.and_then(|t| u.focus.focus_ring_rect(t));
         let res = match u.renderer.as_mut() {
             Some(r) => r.draw_frame(FrameOpts {
                 dpi,
@@ -628,12 +791,11 @@ unsafe fn on_paint(hwnd: HWND) {
                 palette: &palette,
                 mica,
                 show_title_bar: true,
-                tree: tree.as_ref(),
+                tree: tree_ref,
                 focus_ring,
             }),
             None => return false,
         };
-        u.tree = tree;
         match res {
             Ok(()) => {
                 u.paint_count += 1;
@@ -673,6 +835,12 @@ unsafe fn on_system_prefs_changed(hwnd: HWND) {
         u.palette = palette;
         for field in &mut u.rich_fields {
             field.sync_theme(&palette, dpi, new_prefs.text_scale);
+        }
+        if changed {
+            if let Some(h) = u.screen.as_mut() {
+                h.mark_dirty();
+                rebuild_screen_if_dirty(u, hwnd);
+            }
         }
         changed
     })
@@ -784,7 +952,7 @@ unsafe extern "system" fn wnd_proc(
                 };
                 let ui = g.as_mut()?;
                 let update = a11y::build_tree_update(
-                    ui.tree.as_ref(),
+                    active_tree(ui),
                     ui.focus.focused(),
                     scale,
                     client_px,
@@ -989,6 +1157,34 @@ mod tests {
         // SAFETY: `hwnd` is live on this thread.
         unsafe { sync_a11y(hwnd) };
         pump();
+
+        close();
+        pump();
+        reset_shared();
+        assert!(!is_open());
+    }
+
+    #[test]
+    fn idle_window_with_screen_does_not_redraw_in_a_loop() {
+        super::super::init();
+        assert!(open());
+        pump_until_painted(1);
+
+        let gallery = super::super::screen::WidgetGalleryScreen::new();
+        assert!(set_screen(Box::new(gallery)));
+        let paints_before = snapshot().unwrap().2;
+        pump_until_painted(paints_before + 1);
+        let paints_after_mount = snapshot().unwrap().2;
+        assert!(paints_after_mount > paints_before);
+
+        // Idle period with no input/events: paint count must remain completely flat (0% idle CPU).
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        pump();
+        let paints_after_idle = snapshot().unwrap().2;
+        assert_eq!(
+            paints_after_idle, paints_after_mount,
+            "idle window must not run a continuous redraw loop"
+        );
 
         close();
         pump();
