@@ -8,7 +8,9 @@
 
 mod appinfo;
 mod claude;
+mod csv_export;
 mod db;
+mod demo;
 mod format;
 mod locale;
 mod presence;
