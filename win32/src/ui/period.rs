@@ -8,8 +8,8 @@ use taffy::prelude::*;
 
 use crate::format::{month_long, month_short, range_label, weekday_short};
 use crate::time::{
-    add_days, add_days_start, add_months, iso_week, start_of_day, start_of_month,
-    start_of_week_with_first, start_of_year, to_local, HOUR,
+    add_days, add_days_start, add_months, start_of_day, start_of_month, start_of_week_with_first,
+    start_of_year, to_local, week_iso_number, HOUR,
 };
 use crate::ui::screen::ScreenEnv;
 use crate::ui::strings;
@@ -271,7 +271,7 @@ pub fn period_title(p: &Period, now_ms: i64) -> String {
             }
         }
         PeriodKind::Week => {
-            let w = iso_week(p.from);
+            let w = week_iso_number(p.from);
             if current {
                 format!("{} · W{w}", strings::PERIOD_THIS_WEEK_PREFIX)
             } else {
@@ -574,6 +574,16 @@ mod tests {
         let sun_week = build_period(PeriodKind::Week, now, now, 6);
         assert_eq!(sun_week.buckets.len(), 7);
         assert_eq!(sun_week.buckets[0].label, "Sun");
+        assert_eq!(period_title(&sun_week, now), "This week · W47");
+
+        // Past Sunday-start week around year boundary: Sun 2025-12-28..Sat 2026-01-03 -> W1 (Thu 2026-01-01).
+        let ny_sun = from_local(2025, 12, 29, 12, 0, 0, 0);
+        let ny_week = build_period(PeriodKind::Week, ny_sun, now, 6);
+        assert!(
+            period_title(&ny_week, now).ends_with("W1"),
+            "got {}",
+            period_title(&ny_week, now)
+        );
 
         let month = build_period(PeriodKind::Month, now, now, 0);
         assert_eq!(month.buckets.len(), 30);

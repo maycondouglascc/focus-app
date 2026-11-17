@@ -323,6 +323,17 @@ pub fn iso_week(t: i64) -> u32 {
     (1 + (thu_days - jan4_thu_days) / 7) as u32
 }
 
+/// ISO week number for a 7-day calendar week starting at `week_start`. Uses the Thursday
+/// falling inside `[week_start, week_start + 7d)` so Sunday/Saturday-start weeks report the
+/// ISO week containing their weekdays (e.g. Sun 2026-11-15..Sat 2026-11-21 -> W47, not W46).
+pub fn week_iso_number(week_start: i64) -> u32 {
+    let thu = (0..7)
+        .map(|d| add_days_start(week_start, d))
+        .find(|&ts| to_local(ts).weekday_mon0() == 3)
+        .unwrap_or_else(|| add_days_start(week_start, 3));
+    iso_week(thu)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

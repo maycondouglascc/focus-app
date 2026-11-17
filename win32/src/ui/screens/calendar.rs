@@ -11,7 +11,7 @@ use taffy::prelude::*;
 use crate::db::{Project, SharedStore, TimeEntry};
 use crate::format::{hm, money, range_label};
 use crate::stats::{earnings_by_currency, entry_ms};
-use crate::time::{add_days, add_days_start, iso_week, start_of_week_with_first};
+use crate::time::{add_days, add_days_start, start_of_week_with_first, week_iso_number};
 use crate::ui::input::KeyEvent;
 use crate::ui::screen::{BuiltScreen, KeyModifiers, PointerReply, Screen, ScreenEnv, TickReply};
 use crate::ui::strings;
@@ -290,14 +290,11 @@ impl CalendarScreen {
         let (nnode, _) = button::build(tree, nav_left, &next_p, p);
         self.id_next_week = Some(tree.set_key(nnode, "cal.next"));
 
+        let w = week_iso_number(week_start);
         let week_title = if this_week {
-            format!("{} · W{}", strings::CAL_THIS_WEEK, iso_week(week_start))
+            format!("{} · W{w}", strings::CAL_THIS_WEEK)
         } else {
-            format!(
-                "{} · W{}",
-                range_label(week_start, week_end),
-                iso_week(week_start)
-            )
+            format!("{} · W{w}", range_label(week_start, week_end))
         };
         add_label(
             tree,
