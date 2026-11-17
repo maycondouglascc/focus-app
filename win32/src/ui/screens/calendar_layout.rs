@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::db::{Activity, TimeEntry};
 use crate::stats::union_ms;
-use crate::time::{add_days, overlap};
+use crate::time::{add_days_start, overlap};
 
 pub const HOUR_DIP: f32 = 52.0;
 pub const SNAP_MIN: i32 = 15;
@@ -24,10 +24,10 @@ pub struct EntrySeg {
     pub clipped_bottom: bool,
 }
 
-/// Splits entries into one segment per day `[day_start, add_days(day_start, 1))`
+/// Splits entries into one segment per day `[day_start, add_days_start(day_start, 1))`
 /// and places mutually overlapping clusters side by side cleanly.
 pub fn layout_day(entries: &[TimeEntry], day_start: i64, now_ms: i64) -> Vec<EntrySeg> {
-    let day_end = add_days(day_start, 1);
+    let day_end = add_days_start(day_start, 1);
     let mut segs: Vec<EntrySeg> = entries
         .iter()
         .filter_map(|e| {
@@ -135,7 +135,7 @@ pub fn activity_sessions(
     gap_ms: i64,
     min_ms: i64,
 ) -> Vec<ActivitySession> {
-    let day_end = add_days(day_start, 1);
+    let day_end = add_days_start(day_start, 1);
     let mut rows: Vec<(&Activity, i64, i64)> = items
         .iter()
         .filter_map(|a| {
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn layout_day_clusters_overlaps_and_clips_across_midnight() {
         let day = from_local(2026, 11, 18, 0, 0, 0, 0);
-        let next = add_days(day, 1);
+        let next = add_days_start(day, 1);
 
         // Cluster 1: A (9-11), B (9:30-10:30), C (10-12) -> 3 columns.
         // Non-overlapping D (14-15) -> 1 column.

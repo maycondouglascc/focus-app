@@ -12,7 +12,9 @@ use crate::db::{
 };
 use crate::locale::SystemLocale;
 use crate::stats::{earned, entry_ms, union_ms_sorted};
-use crate::time::{add_days, at_minutes, overlap, start_of_day, start_of_week, to_local, MIN};
+use crate::time::{
+    add_days, add_days_start, at_minutes, overlap, start_of_day, start_of_week, to_local, MIN,
+};
 
 struct Rng(u64);
 
@@ -286,7 +288,7 @@ impl DemoStore {
         ];
 
         for d in 0..(WEEKS + 1) * 7 {
-            let day = add_days(week0, d);
+            let day = add_days_start(week0, d);
             let dow = to_local(day).weekday_mon0();
             let weeks_ago = WEEKS - d / 7;
             if dow > 4

@@ -778,7 +778,7 @@ impl ProjectsScreen {
             let st = self.store.borrow();
             let now = st.now_ms();
             let month_from = start_of_month(now);
-            let month_to = crate::time::add_months(month_from, 1);
+            let month_to = crate::time::start_of_day(crate::time::add_months(month_from, 1));
             let projs = st.list_projects().unwrap_or_default();
             let sums = st
                 .project_summaries(month_from, month_to)

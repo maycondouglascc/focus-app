@@ -9,7 +9,9 @@ use taffy::prelude::*;
 use crate::db::{Activity, EntryPatch, Project, TimeEntry};
 use crate::format::{self, duration, weekday_short};
 use crate::stats::{entry_ms, union_ms};
-use crate::time::{add_days, at_minutes, minutes_of_day, same_day, start_of_day, to_local, MIN};
+use crate::time::{
+    add_days_start, at_minutes, minutes_of_day, same_day, start_of_day, to_local, MIN,
+};
 use crate::ui::input::KeyCode;
 use crate::ui::screen::{KeyModifiers, PointerReply, ScreenEnv};
 use crate::ui::strings;
@@ -403,7 +405,7 @@ impl WeekGridState {
         let show_ent = self.mode != CalendarMode::Activity;
 
         for (di, &day) in self.week_days.iter().enumerate() {
-            let day_end = add_days(day, 1);
+            let day_end = add_days_start(day, 1);
 
             // Activity sessions (behind entries in Mix mode; full width in Activity mode)
             if show_act {
@@ -676,7 +678,7 @@ impl WeekGridState {
         self.entries = entries.to_vec();
 
         for i in 0..7 {
-            self.week_days[i] = add_days(week_start, i as i32);
+            self.week_days[i] = add_days_start(week_start, i as i32);
             self.sessions_by_day[i] = if self.mode != CalendarMode::Time {
                 activity_sessions(activity, self.week_days[i], 5 * MIN, 3 * MIN)
             } else {
@@ -762,7 +764,7 @@ impl WeekGridState {
             },
         );
         for (di, &day) in self.week_days.iter().enumerate() {
-            let day_end = add_days(day, 1);
+            let day_end = add_days_start(day, 1);
             let l = to_local(day);
             let today = same_day(day, now_ms);
             let day_box = tree.add_container(
@@ -912,7 +914,7 @@ impl WeekGridState {
             return PointerReply::default();
         }
         let day = self.week_days[day_idx];
-        let day_end = add_days(day, 1);
+        let day_end = add_days_start(day, 1);
 
         // 1. Check activity session tiles / strip
         if self.mode != CalendarMode::Time {

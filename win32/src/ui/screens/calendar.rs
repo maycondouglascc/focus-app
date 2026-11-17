@@ -11,7 +11,7 @@ use taffy::prelude::*;
 use crate::db::{Project, SharedStore, TimeEntry};
 use crate::format::{hm, money, range_label};
 use crate::stats::{earnings_by_currency, entry_ms};
-use crate::time::{add_days, iso_week, start_of_week_with_first};
+use crate::time::{add_days, add_days_start, iso_week, start_of_week_with_first};
 use crate::ui::input::KeyCode;
 use crate::ui::screen::{BuiltScreen, KeyModifiers, PointerReply, Screen, ScreenEnv};
 use crate::ui::strings;
@@ -141,7 +141,7 @@ impl CalendarScreen {
             let first_day_mon0 = settings.first_day_of_week.resolve_mon0(&loc);
             let is_24h = settings.time_format.is_24h(&loc);
             let week_start = start_of_week_with_first(self.anchor_ms, first_day_mon0);
-            let week_end = add_days(week_start, 7);
+            let week_end = add_days_start(week_start, 7);
             let projects = st.list_projects().unwrap_or_default();
             let entries = st.list_entries(week_start, week_end).unwrap_or_default();
             let activity = if self.grid.mode != CalendarMode::Time {
