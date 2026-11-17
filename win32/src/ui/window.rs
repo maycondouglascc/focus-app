@@ -12,22 +12,32 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    TrackMouseEvent, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
+    GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TME_NONCLIENT,
+    TRACKMOUSEEVENT, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT,
+    VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+};
+use windows::Win32::UI::Input::Pointer::{
+    GetPointerInfo, POINTER_FLAG_FIRSTBUTTON, POINTER_FLAG_SECONDBUTTON, POINTER_INFO,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, IsWindow,
     IsZoomed, LoadCursorW, PeekMessageW, RegisterClassW, SetForegroundWindow, SetWindowPos,
     ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, HTBOTTOM, HTBOTTOMLEFT,
     HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTCLOSE, HTLEFT, HTMAXBUTTON, HTMINBUTTON, HTRIGHT, HTTOP,
-    HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, SM_CXPADDEDBORDER,
-    SM_CXSIZEFRAME, SM_CYSIZEFRAME, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, WINDOW_EX_STYLE, WM_DESTROY,
-    WM_DPICHANGED, WM_ERASEBKGND, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
-    WM_NCMOUSEMOVE, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
+    HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, PT_PEN, PT_TOUCH,
+    SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SM_CYSIZEFRAME, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
+    WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
+    WM_KEYDOWN, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+    WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_PAINT, WM_POINTERCAPTURECHANGED, WM_POINTERDOWN,
+    WM_POINTERENTER, WM_POINTERHWHEEL, WM_POINTERLEAVE, WM_POINTERUP, WM_POINTERUPDATE,
+    WM_POINTERWHEEL, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED,
     WNDCLASSW, WS_CLIPCHILDREN, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
 
+use super::focus::{EscapeOutcome, FocusModel};
 use super::frame::{self, Hit};
+use super::input::{KeyCode, KeyEvent, PointerButton, PointerKind, PointerState};
 use super::prefs::{self, SystemPrefs};
 use super::render::{reset_shared, DrawError, FrameOpts, Hover, Renderer};
 use super::theme::Palette;
@@ -35,6 +45,8 @@ use super::tree::Tree;
 
 /// `WM_NCMOUSELEAVE`
 const WM_NCMOUSELEAVE: u32 = 0x02A2;
+/// `WM_MOUSELEAVE`
+const WM_MOUSELEAVE: u32 = 0x02A3;
 
 struct Ui {
     hwnd: HWND,
@@ -45,6 +57,8 @@ struct Ui {
     palette: Palette,
     mica: bool,
     tree: Option<Tree>,
+    focus: FocusModel,
+    pointer: PointerState,
     paint_count: u64,
 }
 
@@ -176,6 +190,8 @@ unsafe fn create() -> Option<HWND> {
             palette,
             mica,
             tree: None,
+            focus: FocusModel::new(),
+            pointer: PointerState::default(),
             paint_count: 0,
         })
     });
@@ -252,6 +268,199 @@ unsafe fn set_hover(hwnd: HWND, hover: Hover) {
     }
 }
 
+unsafe fn query_pointer(
+    hwnd: HWND,
+    wparam: WPARAM,
+) -> Option<(u32, PointerKind, PointerButton, f32, f32)> {
+    let pointer_id = (wparam.0 & 0xFFFF) as u32;
+    let mut info = POINTER_INFO::default();
+    GetPointerInfo(pointer_id, &mut info).ok()?;
+    let mut pt = info.ptPixelLocation;
+    let _ = ScreenToClient(hwnd, &mut pt);
+    let scale = frame::scale(GetDpiForWindow(hwnd));
+    let kind = match info.pointerType {
+        PT_TOUCH => PointerKind::Touch,
+        PT_PEN => PointerKind::Pen,
+        _ => PointerKind::Mouse,
+    };
+    let button = if (info.pointerFlags.0 & POINTER_FLAG_FIRSTBUTTON.0) != 0 {
+        PointerButton::Primary
+    } else if (info.pointerFlags.0 & POINTER_FLAG_SECONDBUTTON.0) != 0 {
+        PointerButton::Secondary
+    } else {
+        PointerButton::Other
+    };
+    Some((
+        pointer_id,
+        kind,
+        button,
+        pt.x as f32 / scale,
+        pt.y as f32 / scale,
+    ))
+}
+
+unsafe fn track_client_leave(hwnd: HWND) {
+    let mut t = TRACKMOUSEEVENT {
+        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: TME_LEAVE,
+        hwndTrack: hwnd,
+        dwHoverTime: 0,
+    };
+    let _ = TrackMouseEvent(&mut t);
+}
+
+unsafe fn on_pointer_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
+    match msg {
+        WM_POINTERENTER | WM_POINTERUPDATE => {
+            let Some((_, kind, _, x, y)) = query_pointer(hwnd, wparam) else {
+                return false;
+            };
+            if kind == PointerKind::Mouse {
+                track_client_leave(hwnd);
+            }
+            let changed = with_ui(|u| {
+                let hit = u.tree.as_ref().and_then(|t| t.hit_test(x, y));
+                u.pointer.on_move(hit, x, y).visual_changed
+            })
+            .unwrap_or(false);
+            if changed {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            true
+        }
+        WM_POINTERDOWN => {
+            let Some((pid, kind, btn, x, y)) = query_pointer(hwnd, wparam) else {
+                return false;
+            };
+            let outcome = with_ui(|u| {
+                let hit = u.tree.as_ref().and_then(|t| t.hit_test(x, y));
+                let mut out = u.pointer.on_down(pid, btn, hit, x, y);
+                let focus_changed = match hit {
+                    Some(id) => u.focus.focus_pointer(id),
+                    None => u.focus.clear_focus(),
+                };
+                out.visual_changed |= focus_changed;
+                out
+            })
+            .unwrap_or_default();
+            if outcome.request_capture && kind == PointerKind::Mouse {
+                SetCapture(hwnd);
+            }
+            if outcome.visual_changed {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            true
+        }
+        WM_POINTERUP => {
+            let Some((pid, _, _, x, y)) = query_pointer(hwnd, wparam) else {
+                return false;
+            };
+            // On pointer-up, FIRSTBUTTON is cleared in pointerFlags; treat release as primary completion.
+            let outcome = with_ui(|u| {
+                let hit = u.tree.as_ref().and_then(|t| t.hit_test(x, y));
+                u.pointer.on_up(pid, PointerButton::Primary, hit, x, y)
+            })
+            .unwrap_or_default();
+            if outcome.release_capture {
+                let _ = ReleaseCapture();
+            }
+            if outcome.visual_changed {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            true
+        }
+        WM_POINTERLEAVE | WM_MOUSELEAVE => {
+            let changed = with_ui(|u| u.pointer.on_leave().visual_changed).unwrap_or(false);
+            if changed {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            true
+        }
+        WM_POINTERCAPTURECHANGED | WM_CAPTURECHANGED => {
+            let changed = with_ui(|u| u.pointer.on_capture_lost().visual_changed).unwrap_or(false);
+            if changed {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+unsafe fn on_wheel_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
+    let delta = (wparam.0 >> 16) as i16;
+    let horizontal = msg == WM_MOUSEHWHEEL || msg == WM_POINTERHWHEEL;
+    let changed = with_ui(|u| {
+        let dip = if horizontal {
+            u.pointer.wheel.push_horizontal_dip(delta, 48.0)
+        } else {
+            u.pointer.wheel.push_vertical_dip(delta, 48.0)
+        };
+        let _ = dip;
+        false
+    })
+    .unwrap_or(false);
+    if changed {
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+    msg == WM_POINTERWHEEL || msg == WM_POINTERHWHEEL
+}
+
+fn translate_key(wparam: WPARAM) -> KeyEvent {
+    let vk = VIRTUAL_KEY(wparam.0 as u16);
+    let key = match vk {
+        VK_TAB => KeyCode::Tab,
+        VK_ESCAPE => KeyCode::Escape,
+        VK_RETURN => KeyCode::Enter,
+        VK_SPACE => KeyCode::Space,
+        VK_LEFT => KeyCode::Left,
+        VK_RIGHT => KeyCode::Right,
+        VK_UP => KeyCode::Up,
+        VK_DOWN => KeyCode::Down,
+        VK_HOME => KeyCode::Home,
+        VK_END => KeyCode::End,
+        VK_PRIOR => KeyCode::PageUp,
+        VK_NEXT => KeyCode::PageDown,
+        other => KeyCode::Other(other.0),
+    };
+    // SAFETY: `GetKeyState` queries the current thread's keyboard state.
+    let (shift, ctrl, alt) = unsafe {
+        (
+            GetKeyState(VK_SHIFT.0 as i32) < 0,
+            GetKeyState(VK_CONTROL.0 as i32) < 0,
+            GetKeyState(VK_MENU.0 as i32) < 0,
+        )
+    };
+    KeyEvent {
+        key,
+        shift,
+        ctrl,
+        alt,
+    }
+}
+
+unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
+    let ev = translate_key(wparam);
+    let (handled, changed) = with_ui(|u| match ev.key {
+        KeyCode::Tab if !ev.ctrl && !ev.alt => {
+            let prev = u.focus.focused();
+            let prev_vis = u.focus.is_focus_visible();
+            let next = u.focus.tab(ev.shift);
+            (true, next != prev || u.focus.is_focus_visible() != prev_vis)
+        }
+        KeyCode::Escape => {
+            let out = u.focus.on_escape();
+            (out != EscapeOutcome::None, out != EscapeOutcome::None)
+        }
+        _ => (false, false),
+    })
+    .unwrap_or((false, false));
+    if changed {
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+    handled
+}
+
 unsafe fn on_size(hwnd: HWND) {
     let (w, h) = client_size(hwnd);
     with_ui(|u| {
@@ -289,6 +498,7 @@ unsafe fn on_paint(hwnd: HWND) {
         let palette = u.palette;
         let mica = u.mica;
         let tree = u.tree.take();
+        let focus_ring = tree.as_ref().and_then(|t| u.focus.focus_ring_rect(t));
         let res = match u.renderer.as_mut() {
             Some(r) => r.draw_frame(FrameOpts {
                 dpi,
@@ -299,7 +509,7 @@ unsafe fn on_paint(hwnd: HWND) {
                 mica,
                 show_title_bar: true,
                 tree: tree.as_ref(),
-                focus_ring: None,
+                focus_ring,
             }),
             None => return false,
         };
@@ -416,6 +626,29 @@ unsafe extern "system" fn wnd_proc(
             return LRESULT(0);
         }
         WM_ERASEBKGND => return LRESULT(1),
+        WM_POINTERENTER
+        | WM_POINTERLEAVE
+        | WM_POINTERDOWN
+        | WM_POINTERUPDATE
+        | WM_POINTERUP
+        | WM_POINTERCAPTURECHANGED
+        | WM_CAPTURECHANGED
+        | WM_MOUSELEAVE => {
+            if on_pointer_msg(hwnd, msg, wparam) {
+                return LRESULT(0);
+            }
+        }
+        WM_POINTERWHEEL | WM_POINTERHWHEEL | WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
+            if on_wheel_msg(hwnd, msg, wparam) {
+                return LRESULT(0);
+            }
+        }
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            if on_key_msg(hwnd, wparam) {
+                return LRESULT(0);
+            }
+        }
+        WM_CHAR => {}
         WM_PAINT => {
             on_paint(hwnd);
             return LRESULT(0);
