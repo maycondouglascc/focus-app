@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use windows::core::{w, HSTRING, PCWSTR};
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{ERROR_CANCELLED, HWND};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
     COINIT_APARTMENTTHREADED,
@@ -142,8 +142,24 @@ pub fn format_entries_csv(
     out.into_bytes()
 }
 
+/// Converts the Win32 `IFileSaveDialog` outcome: user cancellation maps to `Ok(None)`,
+/// whereas COM/dialog errors propagate as `Err(message)` so callers never silence failures.
+pub fn classify_save_dialog_result(
+    res: windows::core::Result<std::path::PathBuf>,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let cancel_hr = ERROR_CANCELLED.to_hresult();
+    match res {
+        Ok(p) => Ok(Some(p)),
+        Err(e) if e.code() == cancel_hr => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Opens the native Windows Save File dialog for exporting CSV.
-pub fn pick_csv_save_path(owner: HWND, suggested_name: &str) -> Option<std::path::PathBuf> {
+pub fn pick_csv_save_path(
+    owner: HWND,
+    suggested_name: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
     // SAFETY: STA COM initialization paired with `CoUninitialize` when `S_OK`/`S_FALSE` succeeded.
     unsafe {
         let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -171,7 +187,7 @@ pub fn pick_csv_save_path(owner: HWND, suggested_name: &str) -> Option<std::path
         if need_uninit {
             CoUninitialize();
         }
-        res.ok()
+        classify_save_dialog_result(res)
     }
 }
 
@@ -248,5 +264,14 @@ mod tests {
         assert!(lines[0].contains("\",\""));
         assert!(lines[1].contains("\"1.50\""));
         assert!(lines[1].contains("\"225.00\""));
+    }
+
+    #[test]
+    fn classify_save_dialog_result_distinguishes_cancel_from_failure() {
+        let canceled = windows::core::Error::from(ERROR_CANCELLED.to_hresult());
+        assert_eq!(classify_save_dialog_result(Err(canceled)), Ok(None));
+
+        let failed = windows::core::Error::from(windows::Win32::Foundation::E_FAIL);
+        assert!(classify_save_dialog_result(Err(failed)).is_err());
     }
 }

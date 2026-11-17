@@ -647,8 +647,7 @@ impl ProjectDialogState {
     pub fn on_text_change(&mut self, key: &str, value: &str) -> bool {
         if key == KEY_PROJ_NAME {
             self.name = value.to_string();
-            self.error = None;
-            return false;
+            return self.error.take().is_some();
         }
         if key == KEY_PROJ_CLIENT {
             self.client = value.to_string();
@@ -656,8 +655,7 @@ impl ProjectDialogState {
         }
         if key == KEY_PROJ_RATE {
             self.rate = value.to_string();
-            self.error = None;
-            return false;
+            return self.error.take().is_some();
         }
         false
     }
@@ -1265,9 +1263,10 @@ mod tests {
         assert!(host.rebuild_if_dirty(&env, &mut focus));
         assert!(matches!(focus.active_scope(), FocusScope::Modal(_)));
 
-        // Fill name + rate and save.
-        host.on_text_change(KEY_PROJ_NAME, "Telemetry Portal");
-        host.on_text_change(KEY_PROJ_RATE, "180");
+        // Typing into Name clears the validation error AND marks dirty to redraw it away.
+        assert!(host.on_text_change(KEY_PROJ_NAME, "Telemetry Portal"));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        assert!(!host.on_text_change(KEY_PROJ_RATE, "180"));
         let save_id2 = host
             .tree()
             .all_nodes()

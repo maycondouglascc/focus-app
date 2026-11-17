@@ -28,6 +28,7 @@ const KEY_EXCL_TITLES: &str = "settings.excluded_titles";
 pub struct SettingsScreen {
     store: SharedStore,
     confirm_clear: bool,
+    error: Option<String>,
     scroll: PageScroll,
     draft_apps: String,
     draft_titles: String,
@@ -61,6 +62,7 @@ impl SettingsScreen {
         Self {
             store,
             confirm_clear: false,
+            error: None,
             scroll: PageScroll::default(),
             draft_apps: s.excluded_apps.join(", "),
             draft_titles: s.excluded_title_patterns.join(", "),
@@ -90,8 +92,18 @@ impl SettingsScreen {
             .unwrap_or_else(|_| Settings::defaults_for(b.system_locale()))
     }
 
-    fn save(&self, patch: SettingsPatch) {
-        let _ = self.store.borrow_mut().save_settings(patch);
+    fn save(&mut self, patch: SettingsPatch) -> bool {
+        let had_err = self.error.is_some();
+        match self.store.borrow_mut().save_settings(patch) {
+            Ok(_) => {
+                self.error = None;
+                had_err
+            }
+            Err(e) => {
+                self.error = Some(e);
+                true
+            }
+        }
     }
 
     fn currency_options(cur: &str) -> Vec<String> {
@@ -293,6 +305,9 @@ impl SettingsScreen {
             Align::Left,
             p.text,
         );
+        if let Some(ref err) = self.error {
+            add_label(tree, col, err, 12.5, Weight::Medium, Align::Left, p.danger);
+        }
 
         // 1. Activity monitor
         build_section_title(tree, col, strings::SETTINGS_SEC_MONITOR, p);
@@ -630,7 +645,10 @@ impl SettingsScreen {
             return true;
         }
         if Some(id) == self.id_delete_confirm {
-            let _ = self.store.borrow_mut().clear_activity();
+            match self.store.borrow_mut().clear_activity() {
+                Ok(_) => self.error = None,
+                Err(e) => self.error = Some(e),
+            }
             self.confirm_clear = false;
             return true;
         }
@@ -766,20 +784,18 @@ impl SettingsScreen {
         if key == KEY_EXCL_APPS {
             self.draft_apps = value.to_string();
             let list = format::parse_csv_tags(value);
-            self.save(SettingsPatch {
+            return self.save(SettingsPatch {
                 excluded_apps: Some(list),
                 ..Default::default()
             });
-            return false;
         }
         if key == KEY_EXCL_TITLES {
             self.draft_titles = value.to_string();
             let list = format::parse_csv_tags(value);
-            self.save(SettingsPatch {
+            return self.save(SettingsPatch {
                 excluded_title_patterns: Some(list),
                 ..Default::default()
             });
-            return false;
         }
         false
     }
@@ -827,6 +843,7 @@ impl SettingsScreen {
 
     pub fn reset_transient(&mut self) {
         self.confirm_clear = false;
+        self.error = None;
         self.scroll.reset();
         self.sel_idle.clear();
         self.sel_currency.clear();

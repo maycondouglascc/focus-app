@@ -18,6 +18,7 @@ pub struct WelcomeScreen {
     monitor_enabled: bool,
     browser_tabs: bool,
     claude_sessions: bool,
+    error: Option<String>,
     scroll: PageScroll,
     id_monitor: Option<WidgetId>,
     id_browser: Option<WidgetId>,
@@ -37,6 +38,7 @@ impl WelcomeScreen {
             monitor_enabled: s.monitor_enabled,
             browser_tabs: s.browser_tabs,
             claude_sessions: s.claude_sessions,
+            error: None,
             scroll: PageScroll::default(),
             id_monitor: None,
             id_browser: None,
@@ -291,6 +293,10 @@ impl WelcomeScreen {
             },
         );
 
+        if let Some(ref err) = self.error {
+            add_label(tree, card, err, 12.0, Weight::Medium, Align::Left, p.danger);
+        }
+
         let foot = tree.add_container(
             card,
             Style {
@@ -345,9 +351,14 @@ impl Screen for WelcomeScreen {
                 onboarded: Some(true),
                 ..Default::default()
             };
-            let _ = self.store.borrow_mut().save_settings(patch);
-            if let Some(cb) = self.on_complete.as_mut() {
-                cb();
+            match self.store.borrow_mut().save_settings(patch) {
+                Ok(_) => {
+                    self.error = None;
+                    if let Some(cb) = self.on_complete.as_mut() {
+                        cb();
+                    }
+                }
+                Err(e) => self.error = Some(e),
             }
             return true;
         }

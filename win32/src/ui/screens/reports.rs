@@ -135,7 +135,7 @@ impl ReportsScreen {
             })
             .collect();
         let default_name = format!("focus-{}.csv", clean_title.trim_matches('-'));
-        let Some(path) = pick_csv_save_path(hwnd, &default_name) else {
+        let Some(path) = pick_csv_save_path(hwnd, &default_name)? else {
             return Ok(false);
         };
         let bytes = {
