@@ -742,6 +742,7 @@ impl ReportsScreen {
         }
         let now_ms = self.store.borrow().now_ms();
         if self.period_nav.on_click(id, now_ms, palette) {
+            self.export_notice = None;
             return true;
         }
         if Some(id) == self.sel_filter.trigger_id {
@@ -892,11 +893,17 @@ impl Screen for ReportsScreen {
 
     fn on_popup_poll(&mut self) -> bool {
         let mut changed = self.period_nav.poll_popup();
+        if changed {
+            self.export_notice = None;
+        }
         if let Some(res) = self.sel_filter.poll() {
             if let Some(idx) = res {
                 let opts = Self::filter_options(&self.cached_projects);
                 if let Some((f, _)) = opts.get(idx) {
-                    self.filter = f.clone();
+                    if &self.filter != f {
+                        self.filter = f.clone();
+                        self.export_notice = None;
+                    }
                 }
             }
             changed = true;
@@ -976,5 +983,54 @@ mod tests {
         assert!(dirty);
         assert!(host.rebuild_if_dirty(&env, &mut focus));
         assert_eq!(focus.active_scope(), FocusScope::Main);
+    }
+
+    #[test]
+    fn export_notice_clears_when_period_changes() {
+        let text = TextSystem::new().expect("dwrite");
+        let palette = Palette::LIGHT;
+        let env = ScreenEnv {
+            width_dip: 1200.0,
+            height_dip: 800.0,
+            hover: None,
+            pressed: None,
+            focused: None,
+            palette: &palette,
+            text: &text,
+        };
+        let store = shared_store(Box::new(DemoStore::new(SystemLocale::en_us())));
+        let mut screen = ReportsScreen::new(Rc::clone(&store));
+        screen.export_notice = Some("Exported 5 rows".into());
+        let mut focus = FocusModel::new();
+        let mut host = ScreenHost::mount(Box::new(screen), &env, &mut focus);
+        assert!(host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .any(|d| matches!(
+                &d.leaf,
+                Some(crate::ui::tree::Leaf::StyledText { text, .. }) if text == "Exported 5 rows"
+            )));
+
+        let prev_btn = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == strings::PERIOD_PREV_LABEL && d.a11y.clickable)
+            .unwrap()
+            .id;
+        assert!(host.on_click(prev_btn));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        assert!(!host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .any(|d| matches!(
+                &d.leaf,
+                Some(crate::ui::tree::Leaf::StyledText { text, .. }) if text == "Exported 5 rows"
+            )));
     }
 }
