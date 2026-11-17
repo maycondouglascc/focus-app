@@ -1,0 +1,9 @@
+date,step,cycles,first_open_ms,private_mb_start,private_mb_end
+2026-11-16,bare-window-gdi-placeholder,50,48.0,4.61,4.69
+2026-11-16,d3d11-device-only,3,,4.22,11.63
+2026-11-16,d3d11-swapchain,3,,4.22,11.74
+2026-11-16,d2d-context-no-dcomp,3,,4.23,21.12
+2026-11-16,full-renderer,50,89.8,22.29,22.74
+2026-11-16,full-renderer-after-decision-0004,50,95.3,21.07,21.74
+2026-11-16,renderer-with-directwrite-after-100-warmup-cycles,50,110.0,24.24,24.49
+2026-11-16,renderer-with-taffy-layout-5-runs,50,99.8,26.94,27.18
