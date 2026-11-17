@@ -101,8 +101,23 @@ impl AppShell {
         }
     }
 
+    fn reset_leaving_section(&mut self) {
+        crate::ui::popup::close();
+        match self.section {
+            Section::Calendar => self.calendar.reset_transient(),
+            Section::Activity => self.activity.reset_transient(),
+            Section::Reports => self.reports.reset_transient(),
+            Section::Projects => self.projects.reset_transient(),
+            Section::Project(_) => self.project_report = None,
+            Section::Settings => self.settings.reset_transient(),
+        }
+    }
+
     pub fn navigate(&mut self, section: Section) {
         self.welcome_override = false;
+        if self.section != section {
+            self.reset_leaving_section();
+        }
         match section {
             Section::Project(pid) => {
                 let resolved = if pid.is_empty() {
@@ -1197,5 +1212,120 @@ mod tests {
         let first = crate::ui::screens::projects::ProjectDialogState::for_new("USD", &[]);
         let second = crate::ui::screens::projects::ProjectDialogState::for_new("USD", &[]);
         assert!(second.sync_rev() > first.sync_rev());
+    }
+
+    #[test]
+    fn navigating_away_resets_transient_dialogs_and_confirmations() {
+        let text = TextSystem::new().expect("dwrite");
+        let palette = Palette::LIGHT;
+        let env = ScreenEnv {
+            width_dip: 1280.0,
+            height_dip: 820.0,
+            hover: None,
+            pressed: None,
+            focused: None,
+            palette: &palette,
+            text: &text,
+        };
+        let store = shared_store(Box::new(DemoStore::new(SystemLocale::en_us())));
+        let mut shell = AppShell::new(Rc::clone(&store));
+        shell.navigate(Section::Projects);
+        let mut focus = FocusModel::new();
+        let mut host = ScreenHost::mount(Box::new(shell), &env, &mut focus);
+
+        // Open New project dialog on Projects.
+        let new_id = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == crate::ui::strings::PROJECTS_NEW_BTN)
+            .unwrap()
+            .id;
+        assert!(host.on_click(new_id));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        assert!(matches!(focus.active_scope(), FocusScope::Modal(_)));
+
+        // Navigate to Settings via sidebar button, arm Delete activity history, then leave and come back.
+        let settings_nav_id = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == crate::ui::strings::NAV_SETTINGS)
+            .unwrap()
+            .id;
+        assert!(host.on_click(settings_nav_id));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        assert_eq!(focus.active_scope(), FocusScope::Main);
+
+        // Go back to Projects: modal must no longer be open.
+        let projects_nav_id = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == crate::ui::strings::NAV_PROJECTS)
+            .unwrap()
+            .id;
+        assert!(host.on_click(projects_nav_id));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        assert_eq!(focus.active_scope(), FocusScope::Main);
+
+        // Now navigate to Settings, click Delete activity history, navigate to Calendar, return to Settings.
+        let settings_nav_id2 = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == crate::ui::strings::NAV_SETTINGS)
+            .unwrap()
+            .id;
+        assert!(host.on_click(settings_nav_id2));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        let del_btn_id = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == crate::ui::strings::SETTINGS_DELETE_BTN)
+            .unwrap()
+            .id;
+        assert!(host.on_click(del_btn_id));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        assert!(host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .any(|d| d.a11y.name == crate::ui::strings::SETTINGS_DELETE_CONFIRM_BTN));
+
+        let cal_nav_id = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == crate::ui::strings::NAV_CALENDAR)
+            .unwrap()
+            .id;
+        assert!(host.on_click(cal_nav_id));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+
+        let settings_nav_id3 = host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .find(|d| d.a11y.name == crate::ui::strings::NAV_SETTINGS)
+            .unwrap()
+            .id;
+        assert!(host.on_click(settings_nav_id3));
+        assert!(host.rebuild_if_dirty(&env, &mut focus));
+        assert!(!host
+            .tree()
+            .all_nodes()
+            .into_iter()
+            .filter_map(|n| host.tree().data(n))
+            .any(|d| d.a11y.name == crate::ui::strings::SETTINGS_DELETE_CONFIRM_BTN));
     }
 }

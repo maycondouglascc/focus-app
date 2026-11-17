@@ -872,6 +872,11 @@ impl ActivityScreen {
         let max_scroll = (1150.0 - self.viewport_h).max(0.0);
         scroll_wheel_step(&mut self.scroll_y, delta_dip, max_scroll)
     }
+
+    pub fn reset_transient(&mut self) {
+        self.scroll_y = 0.0;
+        self.period_nav.clear_popup();
+    }
 }
 
 impl Screen for ActivityScreen {

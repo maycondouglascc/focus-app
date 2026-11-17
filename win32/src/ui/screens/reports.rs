@@ -104,6 +104,16 @@ impl ReportsScreen {
         self.csv_dialog.is_some() || self.entry_editor.is_some()
     }
 
+    pub fn reset_transient(&mut self) {
+        self.entry_editor = None;
+        self.csv_dialog = None;
+        self.export_notice = None;
+        self.sel_filter.clear();
+        self.period_nav.clear_popup();
+        self.go_timer_requested = false;
+        self.scroll_y = 0.0;
+    }
+
     fn filter_options(projects: &[Project]) -> Vec<(ProjectFilter, String)> {
         let mut out = Vec::with_capacity(projects.len() + 2);
         out.push((ProjectFilter::All, strings::REP_ALL_PROJECTS.to_string()));

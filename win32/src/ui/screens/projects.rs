@@ -758,6 +758,12 @@ impl ProjectsScreen {
         self.dialog.is_some()
     }
 
+    pub fn reset_transient(&mut self) {
+        self.dialog = None;
+        self.opened_project = None;
+        self.scroll_y = 0.0;
+    }
+
     #[cfg(test)]
     pub fn with_on_open_project(mut self, f: impl FnMut(String) + 'static) -> Self {
         self.on_open_project = Some(Box::new(f));

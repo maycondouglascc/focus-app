@@ -806,6 +806,16 @@ impl SettingsScreen {
         let max_scroll = (1150.0 - self.viewport_h).max(0.0);
         scroll_wheel_step(&mut self.scroll_y, delta_dip, max_scroll)
     }
+
+    pub fn reset_transient(&mut self) {
+        self.confirm_clear = false;
+        self.scroll_y = 0.0;
+        self.sel_idle.clear();
+        self.sel_currency.clear();
+        self.sel_day_start.clear();
+        self.sel_first_day.clear();
+        self.sel_time_format.clear();
+    }
 }
 
 impl Screen for SettingsScreen {

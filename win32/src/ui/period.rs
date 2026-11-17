@@ -308,6 +308,10 @@ impl PeriodNavState {
         }
     }
 
+    pub fn clear_popup(&mut self) {
+        self.popup_result = None;
+    }
+
     pub fn period(&self, now_ms: i64, first_day_mon0: u8) -> Period {
         build_period(self.kind, self.anchor_ms, now_ms, first_day_mon0)
     }

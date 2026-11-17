@@ -40,6 +40,10 @@ impl PopupSelectSlot {
         self.result.is_some()
     }
 
+    pub fn clear(&mut self) {
+        self.result = None;
+    }
+
     pub fn open(&mut self, options: &[&str], selected: Option<usize>, palette: &Palette) -> bool {
         let Some(id) = self.trigger_id else {
             return false;

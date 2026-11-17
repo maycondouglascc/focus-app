@@ -71,6 +71,13 @@ impl CalendarScreen {
         self.editor.is_some()
     }
 
+    pub fn reset_transient(&mut self) {
+        self.editor = None;
+        self.act_log_slot = None;
+        self.new_project_requested = false;
+        let _ = self.grid.cancel_drag();
+    }
+
     pub fn open_new_entry_at_now(&mut self) {
         let now_ms = self.store.borrow().now_ms();
         let rounded_min = ((crate::time::minutes_of_day(now_ms) / 15.0).floor() as i32) * 15;
