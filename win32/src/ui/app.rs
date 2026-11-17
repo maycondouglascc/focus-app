@@ -525,11 +525,6 @@ impl AppShell {
         } else {
             for pr in active_projects.iter().take(12) {
                 let is_sel = matches!(&self.section, Section::Project(cur) if cur == &pr.id);
-                let prev_id = self
-                    .id_side_projects
-                    .iter()
-                    .find(|(_, pid)| pid == &pr.id)
-                    .map(|(id, _)| *id);
                 let row = tree.add_container(
                     proj_list,
                     Style {
@@ -547,7 +542,7 @@ impl AppShell {
                     },
                 );
                 let rid = tree.set_key(row, &format!("nav.proj.{}", pr.id));
-                let interact = Interact::from_state(prev_id, env.hover, env.pressed, false);
+                let interact = Interact::from_state(Some(rid), env.hover, env.pressed, false);
                 let bg = if is_sel {
                     Some(p.accent_bg)
                 } else if interact.hovered {
@@ -1385,5 +1380,19 @@ mod tests {
             .into_iter()
             .filter_map(|n| host.tree().data(n))
             .any(|d| d.a11y.name == crate::ui::strings::SETTINGS_DELETE_CONFIRM_BTN));
+
+        // Sidebar project items resolve hover from their stable key after id_side_projects resets.
+        let proj_wid = crate::ui::tree::keyed_widget_id("nav.proj.p1");
+        assert!(host.tree().node_by_id(proj_wid).is_some());
+        let mut env_hover = env;
+        env_hover.hover = Some(proj_wid);
+        host.mark_dirty();
+        assert!(host.rebuild_if_dirty(&env_hover, &mut focus));
+        let hovered_bg = host
+            .tree()
+            .node_by_id(proj_wid)
+            .and_then(|n| host.tree().data(n))
+            .and_then(|d| d.paint.bg);
+        assert_eq!(hovered_bg, Some(palette.ctl_hover));
     }
 }
