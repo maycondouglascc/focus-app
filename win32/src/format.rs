@@ -275,6 +275,18 @@ pub const ALL_CURRENCIES: [&str; 10] = [
     "BRL", "USD", "EUR", "GBP", "PLN", "CHF", "SEK", "NOK", "DKK", "CZK",
 ];
 
+/// Splits a comma- or newline-separated exclusion list into trimmed unique non-empty items.
+pub fn parse_csv_tags(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for part in raw.split([',', '\n', ';']) {
+        let trimmed = part.trim();
+        if !trimmed.is_empty() && !out.iter().any(|s: &String| s.eq_ignore_ascii_case(trimmed)) {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
+
 /// Unused `DAY` silence check helper if needed externally; keep constants accessible.
 pub const _DAY_CHECK: i64 = DAY;
 
@@ -324,5 +336,9 @@ mod tests {
         let a = from_local(2026, 11, 16, 0, 0, 0, 0);
         let b = from_local(2026, 11, 23, 0, 0, 0, 0);
         assert_eq!(range_label(a, b), "Nov 16 – 22, 2026");
+        assert_eq!(
+            parse_csv_tags("1Password, bitwarden , 1password , , KeePass "),
+            vec!["1Password", "bitwarden", "KeePass"]
+        );
     }
 }

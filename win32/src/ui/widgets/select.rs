@@ -342,7 +342,7 @@ pub fn open_popup(
     popup::open(
         Some(owner),
         Some(anchor),
-        (width, height.min(280.0)),
+        (width, height.min(440.0)),
         PopupAlign::BelowStart,
         tree,
         Box::new(delegate),
