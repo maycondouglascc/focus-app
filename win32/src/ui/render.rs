@@ -1,20 +1,26 @@
-//! Direct3D + DirectComposition + Direct2D surface for the main window.
-//! Created when the window opens, dropped (all COM objects released) when it
+//! Direct3D + DirectComposition + Direct2D surface for windows and popups.
+//! Created when a window opens, dropped (all COM objects released) when it
 //! closes. Drawing coordinates are DIPs: the device context carries the DPI.
 
 use std::cell::RefCell;
 use std::rc::Rc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use windows::core::{Interface, Result};
+use windows::core::{Interface, Result, HRESULT};
 use windows::Win32::Foundation::{E_FAIL, HMODULE, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN,
+    D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_F,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1SolidColorBrush,
-    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
-    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1CreateFactory, ID2D1Device, ID2D1DeviceContext, ID2D1Factory, ID2D1Factory1,
+    ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT,
+    D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_CAP_STYLE_ROUND,
+    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_ELLIPSE,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES,
+    D2D1_SWEEP_DIRECTION_CLOCKWISE,
 };
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::{
@@ -38,11 +44,15 @@ use windows_numerics::Vector2;
 use super::chrome::{Chrome, TITLE_SIZE};
 use super::frame::{BUTTON_DIP, TITLE_BAR_DIP};
 use super::strings;
-use super::text::{TextSystem, Weight};
+use super::text::{Align, TextFont, TextSystem, Weight, Wrap};
 use super::theme::{Color, Palette};
+use super::tree::{DrawCmd, Leaf, PaintStep, Rect, Tree};
 
 /// `D2DERR_RECREATE_TARGET`
-const D2DERR_RECREATE_TARGET: i32 = 0x8899000Cu32 as i32;
+pub const D2DERR_RECREATE_TARGET: HRESULT = HRESULT(0x8899000Cu32 as i32);
+
+#[cfg(test)]
+static RENDERER_GEN: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 pub enum DrawError {
@@ -57,7 +67,7 @@ impl From<windows::core::Error> for DrawError {
         let c = e.code();
         if c == DXGI_ERROR_DEVICE_REMOVED
             || c == DXGI_ERROR_DEVICE_RESET
-            || c.0 == D2DERR_RECREATE_TARGET
+            || c == D2DERR_RECREATE_TARGET
         {
             DrawError::DeviceLost
         } else {
@@ -75,15 +85,27 @@ pub enum Hover {
     Close,
 }
 
-/// Device-level objects shared by every window of this process. They are kept
-/// after the window closes (decision 0005): the graphics stack retains its
-/// memory anyway, and creating and destroying devices over and over leaks a
-/// little each time. Dropped only when the device is lost.
+/// Parameters for rendering a single frame.
+pub struct FrameOpts<'a> {
+    pub dpi: u32,
+    pub w: f32,
+    pub h: f32,
+    pub hover: Hover,
+    pub palette: &'a Palette,
+    pub mica: bool,
+    pub show_title_bar: bool,
+    pub tree: Option<&'a Tree>,
+    pub focus_ring: Option<Rect>,
+}
+
+/// Device-level objects shared by every window of this process while open.
 struct Gfx {
     d3d: ID3D11Device,
     factory: IDXGIFactory2,
+    d2d_factory: ID2D1Factory1,
     d2d_device: ID2D1Device,
     dcomp: IDCompositionDevice,
+    round_stroke: ID2D1StrokeStyle,
 }
 
 thread_local! {
@@ -98,7 +120,7 @@ pub fn reset_shared() {
     GFX.with(|g| g.borrow_mut().take());
 }
 
-fn text_system() -> Result<Rc<TextSystem>> {
+pub fn text_system() -> Result<Rc<TextSystem>> {
     if let Some(t) = TEXT.with(|t| t.borrow().clone()) {
         return Ok(t);
     }
@@ -116,14 +138,23 @@ fn shared() -> Result<Rc<Gfx>> {
         let d3d = d3d_device()?;
         let dxgi: IDXGIDevice = d3d.cast()?;
         let factory: IDXGIFactory2 = dxgi.GetAdapter()?.GetParent()?;
-        let d2d: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-        let d2d_device = d2d.CreateDevice(&dxgi)?;
+        let d2d_factory: ID2D1Factory1 =
+            D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+        let d2d_device = d2d_factory.CreateDevice(&dxgi)?;
         let dcomp: IDCompositionDevice = DCompositionCreateDevice(&dxgi)?;
+        let props = D2D1_STROKE_STYLE_PROPERTIES {
+            startCap: D2D1_CAP_STYLE_ROUND,
+            endCap: D2D1_CAP_STYLE_ROUND,
+            ..Default::default()
+        };
+        let round_stroke = ID2D1Factory::CreateStrokeStyle(&d2d_factory, &props, None)?;
         Rc::new(Gfx {
             d3d,
             factory,
+            d2d_factory,
             d2d_device,
             dcomp,
+            round_stroke,
         })
     };
     GFX.with(|g| *g.borrow_mut() = Some(gfx.clone()));
@@ -131,8 +162,7 @@ fn shared() -> Result<Rc<Gfx>> {
 }
 
 pub struct Renderer {
-    // Keeps the device objects alive while this renderer exists.
-    _gfx: Rc<Gfx>,
+    gfx: Rc<Gfx>,
     text: Rc<TextSystem>,
     chrome: Chrome,
     swap: IDXGISwapChain1,
@@ -141,6 +171,9 @@ pub struct Renderer {
     // Held so the composition tree stays alive as long as the renderer.
     _target: IDCompositionTarget,
     _visual: IDCompositionVisual,
+    #[cfg(test)]
+    generation: u64,
+    next_draw_error: Option<HRESULT>,
 }
 
 fn d3d_device() -> Result<ID3D11Device> {
@@ -204,8 +237,10 @@ impl Renderer {
             visual.SetContent(&swap)?;
             target.SetRoot(&visual)?;
             gfx.dcomp.Commit()?;
+            #[cfg(test)]
+            let generation = RENDERER_GEN.fetch_add(1, Ordering::Relaxed) + 1;
             Ok(Self {
-                _gfx: gfx,
+                gfx,
                 text,
                 chrome: Chrome::new(),
                 swap,
@@ -213,8 +248,21 @@ impl Renderer {
                 brush,
                 _target: target,
                 _visual: visual,
+                #[cfg(test)]
+                generation,
+                next_draw_error: None,
             })
         }
+    }
+
+    #[cfg(test)]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    #[cfg(test)]
+    pub fn inject_draw_error(&mut self, hr: HRESULT) {
+        self.next_draw_error = Some(hr);
     }
 
     pub fn set_text_scale(&self, scale: f32) -> bool {
@@ -236,16 +284,12 @@ impl Renderer {
         Ok(())
     }
 
-    /// Draws one frame. `w` and `h` are client dimensions in DIPs.
-    pub fn draw(
-        &mut self,
-        dpi: u32,
-        w: f32,
-        h: f32,
-        hover: Hover,
-        palette: &Palette,
-        mica: bool,
-    ) -> std::result::Result<(), DrawError> {
+    /// Draws one frame from optional retained `Tree`, title bar chrome, and focus ring.
+    pub fn draw_frame(&mut self, opts: FrameOpts<'_>) -> std::result::Result<(), DrawError> {
+        if let Some(hr) = self.next_draw_error.take() {
+            return Err(DrawError::from(windows::core::Error::from(hr)));
+        }
+        let palette = opts.palette;
         // SAFETY: all objects are owned by `self`; BeginDraw/EndDraw are paired.
         unsafe {
             let surface: IDXGISurface = self.swap.GetBuffer(0)?;
@@ -263,11 +307,15 @@ impl Renderer {
                 .ctx
                 .CreateBitmapFromDxgiSurface(&surface, Some(&props))?;
             self.ctx.SetTarget(&bitmap);
-            self.ctx.SetDpi(dpi as f32, dpi as f32);
+            self.ctx.SetDpi(opts.dpi as f32, opts.dpi as f32);
             self.ctx.BeginDraw();
-            if mica {
-                // Transparent clear lets Windows 11 Mica shine through the title bar
-                // and frame; the content body below sits on an opaque surface.
+
+            let top_offset = if opts.show_title_bar {
+                TITLE_BAR_DIP
+            } else {
+                0.0
+            };
+            if opts.mica {
                 let clear = D2D1_COLOR_F {
                     r: 0.0,
                     g: 0.0,
@@ -275,32 +323,320 @@ impl Renderer {
                     a: 0.0,
                 };
                 self.ctx.Clear(Some(&clear));
-                self.fill(0.0, TITLE_BAR_DIP, w, h, palette.surface);
+                self.fill(0.0, top_offset, opts.w, opts.h, palette.surface);
             } else {
                 self.ctx.Clear(Some(&color(palette.surface)));
-                self.fill(0.0, 0.0, w, TITLE_BAR_DIP, palette.title_bar);
+                if opts.show_title_bar {
+                    self.fill(0.0, 0.0, opts.w, TITLE_BAR_DIP, palette.title_bar);
+                }
             }
-            self.caption_buttons(w, hover, palette);
-            self.chrome.layout(w, &self.text);
-            let t = self.chrome.title_rect();
-            self.draw_text(
-                strings::APP_NAME,
-                TITLE_SIZE,
-                Weight::SemiBold,
-                palette.text,
-                D2D_RECT_F {
-                    left: t.x,
-                    top: t.y,
-                    right: t.x + t.w,
-                    bottom: t.y + t.h,
-                },
-            );
+
+            if let Some(tree) = opts.tree {
+                self.draw_tree(tree, palette);
+            }
+
+            if let Some(ring) = opts.focus_ring {
+                let off = palette.focus_ring_offset;
+                self.stroke_rect(
+                    Rect {
+                        x: ring.x - off,
+                        y: ring.y - off,
+                        w: ring.w + off * 2.0,
+                        h: ring.h + off * 2.0,
+                    },
+                    palette.accent,
+                    palette.focus_ring_width,
+                    8.0,
+                );
+            }
+
+            if opts.show_title_bar {
+                self.caption_buttons(opts.w, opts.hover, palette);
+                self.chrome.layout(opts.w, &self.text);
+                let t = self.chrome.title_rect();
+                self.draw_text(
+                    TextFont::Ui,
+                    strings::APP_NAME,
+                    TITLE_SIZE,
+                    Weight::SemiBold,
+                    Align::Left,
+                    Wrap::NoWrap,
+                    palette.text,
+                    d2d_rect(t),
+                );
+            }
+
             let end = self.ctx.EndDraw(None, None);
             self.ctx.SetTarget(None);
             end?;
             self.swap.Present(1, DXGI_PRESENT(0)).ok()?;
         }
         Ok(())
+    }
+
+    unsafe fn draw_tree(&self, tree: &Tree, palette: &Palette) {
+        tree.visit_paint(&mut |data, rect, step| match step {
+            PaintStep::Enter => {
+                if data.paint.clip {
+                    self.ctx
+                        .PushAxisAlignedClip(&d2d_rect(rect), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                }
+                if let Some(bg) = data.paint.bg {
+                    self.fill_rect(rect, bg, data.paint.radius);
+                }
+                if let Some(bc) = data.paint.border_color {
+                    if data.paint.border_width > 0.0 {
+                        self.stroke_rect(rect, bc, data.paint.border_width, data.paint.radius);
+                    }
+                }
+                if let Some(leaf) = data.leaf.as_ref() {
+                    self.draw_leaf(leaf, rect, palette);
+                }
+            }
+            PaintStep::Leave => {
+                if data.paint.clip {
+                    self.ctx.PopAxisAlignedClip();
+                }
+            }
+        });
+    }
+
+    unsafe fn draw_leaf(&self, leaf: &Leaf, rect: Rect, palette: &Palette) {
+        match leaf {
+            Leaf::Text { text, size, weight } => {
+                self.draw_text(
+                    TextFont::Ui,
+                    text,
+                    *size,
+                    *weight,
+                    Align::Left,
+                    Wrap::NoWrap,
+                    palette.text,
+                    d2d_rect(rect),
+                );
+            }
+            Leaf::StyledText {
+                text,
+                size,
+                weight,
+                align,
+                wrap,
+                color,
+            } => {
+                self.draw_text(
+                    TextFont::Ui,
+                    text,
+                    *size,
+                    *weight,
+                    *align,
+                    *wrap,
+                    *color,
+                    d2d_rect(rect),
+                );
+            }
+            Leaf::Icon { glyph, size, color } => {
+                let mut buf = [0u8; 4];
+                let s = glyph.encode_utf8(&mut buf);
+                self.draw_text(
+                    TextFont::Icons,
+                    s,
+                    *size,
+                    Weight::Regular,
+                    Align::Center,
+                    Wrap::NoWrap,
+                    *color,
+                    d2d_rect(rect),
+                );
+            }
+            Leaf::Canvas(cmds) => {
+                for cmd in cmds {
+                    self.draw_cmd(cmd, rect.x, rect.y);
+                }
+            }
+            Leaf::RichTextSlot | Leaf::Box => {}
+        }
+    }
+
+    unsafe fn draw_cmd(&self, cmd: &DrawCmd, ox: f32, oy: f32) {
+        match cmd {
+            DrawCmd::FillRect {
+                rect,
+                color,
+                radius,
+            } => {
+                self.fill_rect(offset_rect(*rect, ox, oy), *color, *radius);
+            }
+            DrawCmd::StrokeRect {
+                rect,
+                color,
+                width,
+                radius,
+            } => {
+                self.stroke_rect(offset_rect(*rect, ox, oy), *color, *width, *radius);
+            }
+            DrawCmd::FillCircle {
+                cx,
+                cy,
+                r,
+                color: c,
+            } => {
+                self.brush.SetColor(&color(*c));
+                self.ctx.FillEllipse(
+                    &D2D1_ELLIPSE {
+                        point: Vector2 {
+                            X: ox + cx,
+                            Y: oy + cy,
+                        },
+                        radiusX: *r,
+                        radiusY: *r,
+                    },
+                    &self.brush,
+                );
+            }
+            DrawCmd::StrokeArc {
+                cx,
+                cy,
+                r,
+                start_deg,
+                sweep_deg,
+                width,
+                color: c,
+                round_cap,
+            } => {
+                self.draw_arc(
+                    ox + cx,
+                    oy + cy,
+                    *r,
+                    *start_deg,
+                    *sweep_deg,
+                    *width,
+                    *c,
+                    *round_cap,
+                );
+            }
+            DrawCmd::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                width,
+                color: c,
+            } => {
+                self.brush.SetColor(&color(*c));
+                self.ctx.DrawLine(
+                    Vector2 {
+                        X: ox + x1,
+                        Y: oy + y1,
+                    },
+                    Vector2 {
+                        X: ox + x2,
+                        Y: oy + y2,
+                    },
+                    &self.brush,
+                    *width,
+                    None,
+                );
+            }
+            DrawCmd::Text {
+                rect,
+                text,
+                size,
+                weight,
+                align,
+                wrap,
+                color,
+            } => {
+                self.draw_text(
+                    TextFont::Ui,
+                    text,
+                    *size,
+                    *weight,
+                    *align,
+                    *wrap,
+                    *color,
+                    d2d_rect(offset_rect(*rect, ox, oy)),
+                );
+            }
+            DrawCmd::Icon {
+                rect,
+                glyph,
+                size,
+                color,
+            } => {
+                let mut buf = [0u8; 4];
+                let s = glyph.encode_utf8(&mut buf);
+                self.draw_text(
+                    TextFont::Icons,
+                    s,
+                    *size,
+                    Weight::Regular,
+                    Align::Center,
+                    Wrap::NoWrap,
+                    *color,
+                    d2d_rect(offset_rect(*rect, ox, oy)),
+                );
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_arc(
+        &self,
+        cx: f32,
+        cy: f32,
+        r: f32,
+        start_deg: f32,
+        sweep_deg: f32,
+        width: f32,
+        c: Color,
+        round_cap: bool,
+    ) {
+        if r <= 0.0 || sweep_deg <= 0.0 {
+            return;
+        }
+        let sweep = sweep_deg.min(359.9);
+        let a0 = (start_deg - 90.0).to_radians();
+        let a1 = (start_deg + sweep - 90.0).to_radians();
+        let p0 = Vector2 {
+            X: cx + r * a0.cos(),
+            Y: cy + r * a0.sin(),
+        };
+        let p1 = Vector2 {
+            X: cx + r * a1.cos(),
+            Y: cy + r * a1.sin(),
+        };
+        let Ok(path) = self.gfx.d2d_factory.CreatePathGeometry() else {
+            return;
+        };
+        let Ok(sink) = path.Open() else {
+            return;
+        };
+        sink.BeginFigure(p0, D2D1_FIGURE_BEGIN_HOLLOW);
+        sink.AddArc(&D2D1_ARC_SEGMENT {
+            point: p1,
+            size: D2D_SIZE_F {
+                width: r,
+                height: r,
+            },
+            rotationAngle: 0.0,
+            sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+            arcSize: if sweep >= 180.0 {
+                D2D1_ARC_SIZE_LARGE
+            } else {
+                D2D1_ARC_SIZE_SMALL
+            },
+        });
+        sink.EndFigure(D2D1_FIGURE_END_OPEN);
+        if sink.Close().is_err() {
+            return;
+        }
+        self.brush.SetColor(&color(c));
+        let style = if round_cap {
+            Some(&self.gfx.round_stroke)
+        } else {
+            None
+        };
+        self.ctx.DrawGeometry(&path, &self.brush, width, style);
     }
 
     unsafe fn fill(&self, l: f32, t: f32, r: f32, b: f32, c: Color) {
@@ -316,9 +652,60 @@ impl Renderer {
         );
     }
 
-    /// Draws one line of text inside `rect`, clipped to it.
-    unsafe fn draw_text(&self, text: &str, size: f32, weight: Weight, c: Color, rect: D2D_RECT_F) {
-        let Ok(format) = self.text.format(size, weight) else {
+    unsafe fn fill_rect(&self, rect: Rect, c: Color, radius: f32) {
+        self.brush.SetColor(&color(c));
+        if radius <= 0.0 {
+            self.ctx.FillRectangle(&d2d_rect(rect), &self.brush);
+        } else {
+            self.ctx.FillRoundedRectangle(
+                &D2D1_ROUNDED_RECT {
+                    rect: d2d_rect(rect),
+                    radiusX: radius,
+                    radiusY: radius,
+                },
+                &self.brush,
+            );
+        }
+    }
+
+    unsafe fn stroke_rect(&self, rect: Rect, c: Color, width: f32, radius: f32) {
+        self.brush.SetColor(&color(c));
+        let inset = width * 0.5;
+        let r = D2D_RECT_F {
+            left: rect.x + inset,
+            top: rect.y + inset,
+            right: (rect.x + rect.w - inset).max(rect.x + inset),
+            bottom: (rect.y + rect.h - inset).max(rect.y + inset),
+        };
+        if radius <= 0.0 {
+            self.ctx.DrawRectangle(&r, &self.brush, width, None);
+        } else {
+            self.ctx.DrawRoundedRectangle(
+                &D2D1_ROUNDED_RECT {
+                    rect: r,
+                    radiusX: radius,
+                    radiusY: radius,
+                },
+                &self.brush,
+                width,
+                None,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_text(
+        &self,
+        font: TextFont,
+        text: &str,
+        size: f32,
+        weight: Weight,
+        align: Align,
+        wrap: Wrap,
+        c: Color,
+        rect: D2D_RECT_F,
+    ) {
+        let Ok(format) = self.text.format_styled(font, size, weight, align, wrap) else {
             return;
         };
         let wide: Vec<u16> = text.encode_utf16().collect();
@@ -385,11 +772,54 @@ impl Renderer {
     }
 }
 
+fn d2d_rect(r: Rect) -> D2D_RECT_F {
+    D2D_RECT_F {
+        left: r.x,
+        top: r.y,
+        right: r.x + r.w,
+        bottom: r.y + r.h,
+    }
+}
+
+fn offset_rect(r: Rect, ox: f32, oy: f32) -> Rect {
+    Rect {
+        x: r.x + ox,
+        y: r.y + oy,
+        w: r.w,
+        h: r.h,
+    }
+}
+
 fn color(c: Color) -> D2D1_COLOR_F {
     D2D1_COLOR_F {
         r: c.0,
         g: c.1,
         b: c.2,
         a: c.3,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn draw_error_classifies_device_loss_hresults() {
+        assert!(matches!(
+            DrawError::from(windows::core::Error::from(D2DERR_RECREATE_TARGET)),
+            DrawError::DeviceLost
+        ));
+        assert!(matches!(
+            DrawError::from(windows::core::Error::from(DXGI_ERROR_DEVICE_REMOVED)),
+            DrawError::DeviceLost
+        ));
+        assert!(matches!(
+            DrawError::from(windows::core::Error::from(DXGI_ERROR_DEVICE_RESET)),
+            DrawError::DeviceLost
+        ));
+        assert!(matches!(
+            DrawError::from(windows::core::Error::from(E_FAIL)),
+            DrawError::Other(_)
+        ));
     }
 }

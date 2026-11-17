@@ -22,7 +22,7 @@ pub enum TextFont {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Weight {
     Regular,
     Medium,
@@ -30,7 +30,7 @@ pub enum Weight {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Align {
     Left,
     Center,
@@ -38,7 +38,7 @@ pub enum Align {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Wrap {
     NoWrap,
     Word,
@@ -88,11 +88,6 @@ impl TextSystem {
 
     pub fn text_scale(&self) -> f32 {
         self.text_scale.get()
-    }
-
-    /// Single-line, vertically centered UI format. Sizes are DIPs before `text_scale`.
-    pub fn format(&self, size: f32, weight: Weight) -> Result<IDWriteTextFormat> {
-        self.format_styled(TextFont::Ui, size, weight, Align::Left, Wrap::NoWrap)
     }
 
     pub fn format_styled(

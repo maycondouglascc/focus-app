@@ -29,8 +29,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::frame::{self, Hit};
 use super::prefs::{self, SystemPrefs};
-use super::render::{reset_shared, DrawError, Hover, Renderer};
+use super::render::{reset_shared, DrawError, FrameOpts, Hover, Renderer};
 use super::theme::Palette;
+use super::tree::Tree;
 
 /// `WM_NCMOUSELEAVE`
 const WM_NCMOUSELEAVE: u32 = 0x02A2;
@@ -43,6 +44,8 @@ struct Ui {
     prefs: SystemPrefs,
     palette: Palette,
     mica: bool,
+    tree: Option<Tree>,
+    paint_count: u64,
 }
 
 thread_local! {
@@ -172,6 +175,8 @@ unsafe fn create() -> Option<HWND> {
             prefs: sys_prefs,
             palette,
             mica,
+            tree: None,
+            paint_count: 0,
         })
     });
     let _ = ShowWindow(hwnd, SW_SHOW);
@@ -283,18 +288,27 @@ unsafe fn on_paint(hwnd: HWND) {
         let hover = u.hover;
         let palette = u.palette;
         let mica = u.mica;
-        let Some(r) = u.renderer.as_mut() else {
-            return false;
+        let tree = u.tree.take();
+        let res = match u.renderer.as_mut() {
+            Some(r) => r.draw_frame(FrameOpts {
+                dpi,
+                w: w as f32 / scale,
+                h: h as f32 / scale,
+                hover,
+                palette: &palette,
+                mica,
+                show_title_bar: true,
+                tree: tree.as_ref(),
+                focus_ring: None,
+            }),
+            None => return false,
         };
-        match r.draw(
-            dpi,
-            w as f32 / scale,
-            h as f32 / scale,
-            hover,
-            &palette,
-            mica,
-        ) {
-            Ok(()) => false,
+        u.tree = tree;
+        match res {
+            Ok(()) => {
+                u.paint_count += 1;
+                false
+            }
             Err(DrawError::DeviceLost) => {
                 u.renderer = None;
                 reset_shared();
@@ -423,4 +437,66 @@ unsafe extern "system" fn wnd_proc(
         _ => {}
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::render::D2DERR_RECREATE_TARGET;
+    use super::*;
+    use windows::Win32::Graphics::Dxgi::DXGI_ERROR_DEVICE_REMOVED;
+
+    fn snapshot() -> Option<(HWND, u64, u64)> {
+        with_ui(|u| {
+            let gen = u.renderer.as_ref().map(|r| r.generation()).unwrap_or(0);
+            (u.hwnd, gen, u.paint_count)
+        })
+    }
+
+    fn pump_until_painted(min_paints: u64) {
+        for _ in 0..50 {
+            pump();
+            if snapshot().is_some_and(|(_, g, p)| g > 0 && p >= min_paints) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn device_loss_recreates_renderer_and_draws_again() {
+        super::super::init();
+        assert!(open());
+        pump_until_painted(1);
+        let (hwnd, gen0, paints0) = snapshot().expect("window opened");
+        assert!(gen0 > 0);
+        assert!(paints0 >= 1);
+
+        for hr in [D2DERR_RECREATE_TARGET, DXGI_ERROR_DEVICE_REMOVED] {
+            let (_, gen_before, paints_before) = snapshot().unwrap();
+            with_ui(|u| {
+                if let Some(r) = u.renderer.as_mut() {
+                    r.inject_draw_error(hr);
+                }
+            });
+            // SAFETY: `hwnd` is our test window owned by this thread.
+            unsafe {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            pump_until_painted(paints_before + 1);
+            let (_, gen_after, paints_after) = snapshot().unwrap();
+            assert!(
+                gen_after > gen_before,
+                "expected renderer generation to increase after {hr:?}"
+            );
+            assert!(
+                paints_after > paints_before,
+                "expected redraw after recovery from {hr:?}"
+            );
+        }
+
+        close();
+        pump();
+        reset_shared();
+        assert!(!is_open());
+    }
 }

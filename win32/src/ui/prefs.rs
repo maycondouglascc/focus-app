@@ -5,6 +5,7 @@
 //! - Windows 11 Mica backdrop (`DWMWA_SYSTEMBACKDROP_TYPE`) with solid fallback
 
 use std::mem::size_of;
+use std::sync::Once;
 
 use windows::core::BOOL;
 use windows::Win32::Foundation::HWND;
@@ -13,7 +14,7 @@ use windows::Win32::Graphics::Dwm::{
     DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
     DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE,
 };
-use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_SINGLETHREADED};
+use windows::Win32::System::Com::CoIncrementMTAUsage;
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW, HIGHCONTRASTW_FLAGS};
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -56,12 +57,15 @@ pub fn normalize_text_scale(raw: f64) -> f32 {
     (raw as f32).clamp(0.5, 4.0)
 }
 
+static MTA_KEEPALIVE: Once = Once::new();
+
 fn query_text_scale() -> f32 {
-    // SAFETY: `RoInitialize` is safe to call on the UI thread; `S_FALSE` and
-    // `RPC_E_CHANGED_MODE` mean the apartment is already initialized.
-    unsafe {
-        let _ = RoInitialize(RO_INIT_SINGLETHREADED);
-    }
+    // Keep the process MTA alive so WinRT's `FactoryCache` for `UISettings` is
+    // never invalidated across worker threads while keeping callers free to use STA.
+    // SAFETY: `CoIncrementMTAUsage` initializes the process MTA idempotently.
+    MTA_KEEPALIVE.call_once(|| unsafe {
+        let _ = CoIncrementMTAUsage();
+    });
     UISettings::new()
         .and_then(|s| s.TextScaleFactor())
         .map(normalize_text_scale)
