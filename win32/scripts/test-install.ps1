@@ -36,15 +36,21 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Fresh install failed" }
 
     $installedExe = Join-Path $installDir 'Focus.exe'
+    $runAfterFirst = (Get-ItemProperty -Path $runKey -Name 'Focus' -ErrorAction SilentlyContinue).Focus
+    $expectedRun = '"' + $installedExe + '" --background'
     $installOk = (Test-Path $installedExe) -and
                  ((Get-FileHash $installedExe -Algorithm SHA256).Hash -eq $srcHash) -and
-                 (Test-Path $shortcut)
+                 (Test-Path $shortcut) -and
+                 ($runAfterFirst -eq $expectedRun)
 
-    # Seed existing Run key to simulate upgrade updating command path without clobbering approval
-    New-Item -Path $runKey -Force | Out-Null
+    # Simulate an old Run command path + user-managed StartupApproved byte value; upgrade must rewrite Run\Focus without touching StartupApproved.
     Set-ItemProperty -Path $runKey -Name 'Focus' -Value '"C:\Old\Focus.exe" --background' -Type String
+    $approvalKey = "HKCU:\Software\FocusInstallApprovalTest-$PID"
+    New-Item -Path $approvalKey -Force | Out-Null
+    $disabledBytes = [byte[]](3,0,0,0,1,2,3,4,5,6,7,8)
+    Set-ItemProperty -Path $approvalKey -Name 'Focus' -Value $disabledBytes -Type Binary
 
-    # Launch installed binary once to verify live background startup & graceful upgrade stop
+    # Launch installed binary and run upgrade while active (verifies idempotency + graceful --quit + single instance).
     & powershell -ExecutionPolicy Bypass -File $installScript `
         -Exe $srcItem.FullName -InstallDir $installDir -DataDir $dataDir `
         -RunKey $runKey -ShortcutPath $shortcut -InstanceTag $tag
@@ -54,12 +60,23 @@ try {
     $upgradeOk = (Test-Path $prevExe) -and
                  ((Get-FileHash $installedExe -Algorithm SHA256).Hash -eq $srcHash)
     $runVal = (Get-ItemProperty -Path $runKey -Name 'Focus').Focus
-    $runKeyOk = ($runVal -eq ('"' + $installedExe + '" --background'))
+    $runKeyOk = ($runVal -eq $expectedRun)
+    $approvalAfter = (Get-ItemProperty -Path $approvalKey -Name 'Focus').Focus
+    $approvalUntouched = ([System.Linq.Enumerable]::SequenceEqual([byte[]]$disabledBytes, [byte[]]$approvalAfter))
 
-    $running = Get-Process -Name 'focus' -ErrorAction SilentlyContinue | Where-Object {
+    # Run a third pass over the already-running Focus.exe to verify repeated install idempotency and process count = 1.
+    & powershell -ExecutionPolicy Bypass -File $installScript `
+        -Exe $srcItem.FullName -InstallDir $installDir -DataDir $dataDir `
+        -RunKey $runKey -ShortcutPath $shortcut -InstanceTag $tag
+    if ($LASTEXITCODE -ne 0) { throw "Third (idempotent) install failed" }
+
+    $running = @(Get-Process -Name 'focus' -ErrorAction SilentlyContinue | Where-Object {
         try { $_.Path -and $_.Path.Equals($installedExe, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false }
-    }
-    $launchOk = ($null -ne $running)
+    })
+    $procCount = $running.Count
+    $launchOk = ($procCount -eq 1) -and
+                ((Get-FileHash $installedExe -Algorithm SHA256).Hash -eq $srcHash) -and
+                (((Get-ItemProperty -Path $runKey -Name 'Focus').Focus) -eq $expectedRun)
 
     # 2. Uninstall -> removes program files, shortcut, Run entry; preserves DataDir untouched
     & powershell -ExecutionPolicy Bypass -File $installScript `
@@ -85,10 +102,10 @@ try {
                       (Test-Path $seedLog) -and
                       ((Get-Content $seedLog -Raw) -like 'seed-log-line*'))
 
-    Write-Output ("install_ok={0} upgrade_ok={1} launch_ok={2} run_key_ok={3} uninstall_ok={4} data_untouched={5}" -f `
-        $installOk, $upgradeOk, $launchOk, $runKeyOk, $uninstallOk, $dataUntouched)
+    Write-Output ("install_ok={0} upgrade_ok={1} launch_ok={2} process_count={3} run_key_ok={4} approval_untouched={5} uninstall_ok={6} data_untouched={7}" -f `
+        $installOk, $upgradeOk, $launchOk, $procCount, $runKeyOk, $approvalUntouched, $uninstallOk, $dataUntouched)
 
-    if (-not ($installOk -and $upgradeOk -and $launchOk -and $runKeyOk -and $uninstallOk -and $dataUntouched)) {
+    if (-not ($installOk -and $upgradeOk -and $launchOk -and $runKeyOk -and $approvalUntouched -and $uninstallOk -and $dataUntouched)) {
         exit 1
     }
     exit 0
@@ -97,6 +114,7 @@ try {
         try { $_.Path -and $_.Path.StartsWith($installDir, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false }
     } | Stop-Process -Force -ErrorAction SilentlyContinue
     Remove-Item -Path $runKey -Recurse -Force -ErrorAction SilentlyContinue
+    if ($approvalKey) { Remove-Item -Path $approvalKey -Recurse -Force -ErrorAction SilentlyContinue }
     Remove-Item -Path $sandbox -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item Env:\FOCUS_TEST_INSTANCE -ErrorAction SilentlyContinue
 }

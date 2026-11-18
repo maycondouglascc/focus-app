@@ -123,13 +123,9 @@ if ($ShortcutPath) {
     $sc.Save()
 }
 
-# Update HKCU\...\Run\Focus command ONLY if already registered; never touch StartupApproved.
-if (Test-Path $RunKey) {
-    $existing = Get-ItemProperty -Path $RunKey -Name 'Focus' -ErrorAction SilentlyContinue
-    if ($null -ne $existing) {
-        Set-ItemProperty -Path $RunKey -Name 'Focus' -Value ('"' + $targetExe + '" --background') -Type String
-    }
-}
+# Recreate HKCU\...\Run\Focus with --background; never touch Explorer StartupApproved\Run.
+New-Item -Path $RunKey -Force | Out-Null
+Set-ItemProperty -Path $RunKey -Name 'Focus' -Value ('"' + $targetExe + '" --background') -Type String
 
 if (-not $NoLaunch) {
     $launchArgs = if ($DataDir -and -not $DataDir.Equals($defaultDataDir, [System.StringComparison]::OrdinalIgnoreCase)) {

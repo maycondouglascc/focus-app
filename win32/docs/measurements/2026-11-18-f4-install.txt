@@ -1,0 +1,1 @@
+install_ok=True upgrade_ok=True launch_ok=True process_count=1 run_key_ok=True approval_untouched=True uninstall_ok=True data_untouched=True
