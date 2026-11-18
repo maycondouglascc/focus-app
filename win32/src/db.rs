@@ -9,9 +9,10 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use windows::Win32::System::Com::CoCreateGuid;
 
+use crate::db_thread::DbHandle;
 use crate::locale::SystemLocale;
 
 /// Ordered schema steps; `PRAGMA user_version` is the number applied.
@@ -362,6 +363,16 @@ pub struct Db {
 impl Db {
     pub fn open(path: &Path) -> rusqlite::Result<Db> {
         Self::init(Connection::open(path)?, true)
+    }
+
+    pub fn open_readonly(path: &Path) -> rusqlite::Result<Db> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.busy_timeout(std::time::Duration::from_millis(2000))?;
+        Ok(Db { conn })
     }
 
     pub fn open_in_memory() -> rusqlite::Result<Db> {
@@ -1250,11 +1261,24 @@ pub fn shared_store(store: Box<dyn Store>) -> SharedStore {
 pub struct DbStore {
     db: Db,
     locale: SystemLocale,
+    writer: Option<DbHandle>,
 }
 
 impl DbStore {
     pub fn new(db: Db, locale: SystemLocale) -> Self {
-        Self { db, locale }
+        Self {
+            db,
+            locale,
+            writer: None,
+        }
+    }
+
+    pub fn with_writer(db: Db, locale: SystemLocale, writer: DbHandle) -> Self {
+        Self {
+            db,
+            locale,
+            writer: Some(writer),
+        }
     }
 }
 
@@ -1284,17 +1308,29 @@ impl Store for DbStore {
     }
 
     fn create_project(&mut self, input: ProjectInput) -> Result<Project, String> {
-        self.db
-            .create_project(&input, self.now_ms())
-            .map_err(db_err)
+        if let Some(ref w) = self.writer {
+            w.create_project(input, self.now_ms())
+        } else {
+            self.db
+                .create_project(&input, self.now_ms())
+                .map_err(db_err)
+        }
     }
 
     fn update_project(&mut self, id: &str, patch: ProjectPatch) -> Result<Project, String> {
-        self.db.update_project(id, &patch).map_err(db_err)
+        if let Some(ref w) = self.writer {
+            w.update_project(id.to_string(), patch)
+        } else {
+            self.db.update_project(id, &patch).map_err(db_err)
+        }
     }
 
     fn delete_project(&mut self, id: &str) -> Result<(), String> {
-        self.db.delete_project(id).map_err(db_err)
+        if let Some(ref w) = self.writer {
+            w.delete_project(id.to_string())
+        } else {
+            self.db.delete_project(id).map_err(db_err)
+        }
     }
 
     fn project_summaries(
@@ -1336,15 +1372,27 @@ impl Store for DbStore {
     }
 
     fn create_entry(&mut self, input: EntryInput) -> Result<TimeEntry, String> {
-        self.db.create_entry(&input).map_err(db_err)
+        if let Some(ref w) = self.writer {
+            w.create_entry(input)
+        } else {
+            self.db.create_entry(&input).map_err(db_err)
+        }
     }
 
     fn update_entry(&mut self, id: &str, patch: EntryPatch) -> Result<TimeEntry, String> {
-        self.db.update_entry(id, &patch).map_err(db_err)
+        if let Some(ref w) = self.writer {
+            w.update_entry(id.to_string(), patch)
+        } else {
+            self.db.update_entry(id, &patch).map_err(db_err)
+        }
     }
 
     fn delete_entry(&mut self, id: &str) -> Result<(), String> {
-        self.db.delete_entry(id).map_err(db_err)
+        if let Some(ref w) = self.writer {
+            w.delete_entry(id.to_string())
+        } else {
+            self.db.delete_entry(id).map_err(db_err)
+        }
     }
 
     fn running_entry(&self) -> Result<Option<TimeEntry>, String> {
@@ -1352,11 +1400,19 @@ impl Store for DbStore {
     }
 
     fn start_timer(&mut self, input: TimerStartInput) -> Result<TimeEntry, String> {
-        self.db.start_timer(&input, self.now_ms()).map_err(db_err)
+        if let Some(ref w) = self.writer {
+            w.start_timer(input, self.now_ms())
+        } else {
+            self.db.start_timer(&input, self.now_ms()).map_err(db_err)
+        }
     }
 
     fn stop_timer(&mut self) -> Result<Option<TimeEntry>, String> {
-        self.db.stop_all_timers(self.now_ms()).map_err(db_err)
+        if let Some(ref w) = self.writer {
+            w.stop_timers(self.now_ms())
+        } else {
+            self.db.stop_all_timers(self.now_ms()).map_err(db_err)
+        }
     }
 
     fn list_activity(&self, from: i64, to: i64) -> Result<Vec<Activity>, String> {
@@ -1381,7 +1437,11 @@ impl Store for DbStore {
     }
 
     fn clear_activity(&mut self) -> Result<(), String> {
-        self.db.clear_activity().map_err(db_err)
+        if let Some(ref w) = self.writer {
+            w.clear_activity()
+        } else {
+            self.db.clear_activity().map_err(db_err)
+        }
     }
 
     fn get_settings(&self) -> Result<Settings, String> {
@@ -1389,10 +1449,13 @@ impl Store for DbStore {
     }
 
     fn save_settings(&mut self, patch: SettingsPatch) -> Result<Settings, String> {
-        let saved = self
-            .db
-            .save_settings(&patch, &self.locale)
-            .map_err(db_err)?;
+        let saved = if let Some(ref w) = self.writer {
+            w.save_settings(patch, self.locale.clone())?
+        } else {
+            self.db
+                .save_settings(&patch, &self.locale)
+                .map_err(db_err)?
+        };
         crate::monitor::request_reload();
         crate::claude::request_reload();
         Ok(saved)

@@ -32,7 +32,9 @@ use windows::Win32::System::Threading::{
 };
 
 use crate::db::{Activity, ClaudeSession, Db};
+use crate::db_thread::{ClaudeBatch, ClaudeOp, DbHandle};
 use crate::log::{self, Category};
+use crate::qos;
 
 const GAP_MS: i64 = 10 * 60_000;
 /// A run's end gets this much after its last message: reading time after a reply.
@@ -63,6 +65,7 @@ pub fn request_reload() {
 pub enum ScanError {
     Io(io::Error),
     Db(rusqlite::Error),
+    Write(String),
 }
 
 impl From<io::Error> for ScanError {
@@ -80,7 +83,78 @@ impl std::fmt::Display for ScanError {
         match self {
             ScanError::Io(e) => write!(f, "io: {e}"),
             ScanError::Db(e) => write!(f, "db: {e}"),
+            ScanError::Write(e) => write!(f, "write: {e}"),
         }
+    }
+}
+
+pub trait ClaudeSink {
+    fn claude_session(&self, id: &str) -> rusqlite::Result<Option<ClaudeSession>>;
+    fn insert_activity(&mut self, a: &Activity) -> rusqlite::Result<i64>;
+    fn set_activity_end(&mut self, id: i64, end: i64) -> rusqlite::Result<()>;
+    fn set_activity_detail(&mut self, id: i64, detail: &str) -> rusqlite::Result<()>;
+}
+
+impl ClaudeSink for Db {
+    fn claude_session(&self, id: &str) -> rusqlite::Result<Option<ClaudeSession>> {
+        Db::claude_session(self, id)
+    }
+
+    fn insert_activity(&mut self, a: &Activity) -> rusqlite::Result<i64> {
+        Db::insert_activity(self, a)
+    }
+
+    fn set_activity_end(&mut self, id: i64, end: i64) -> rusqlite::Result<()> {
+        Db::set_activity_end(self, id, end)
+    }
+
+    fn set_activity_detail(&mut self, id: i64, detail: &str) -> rusqlite::Result<()> {
+        Db::set_activity_detail(self, id, detail)
+    }
+}
+
+struct BufferedClaude<'a> {
+    read_db: &'a Db,
+    next_temp_id: i64,
+    ops: Vec<ClaudeOp>,
+}
+
+impl<'a> BufferedClaude<'a> {
+    fn new(read_db: &'a Db) -> Self {
+        Self {
+            read_db,
+            next_temp_id: -1,
+            ops: Vec::new(),
+        }
+    }
+}
+
+impl ClaudeSink for BufferedClaude<'_> {
+    fn claude_session(&self, id: &str) -> rusqlite::Result<Option<ClaudeSession>> {
+        self.read_db.claude_session(id)
+    }
+
+    fn insert_activity(&mut self, a: &Activity) -> rusqlite::Result<i64> {
+        let id = self.next_temp_id;
+        self.next_temp_id -= 1;
+        self.ops.push(ClaudeOp::InsertActivity {
+            temp_id: id,
+            activity: a.clone(),
+        });
+        Ok(id)
+    }
+
+    fn set_activity_end(&mut self, id: i64, end: i64) -> rusqlite::Result<()> {
+        self.ops.push(ClaudeOp::SetActivityEnd { id, end });
+        Ok(())
+    }
+
+    fn set_activity_detail(&mut self, id: i64, detail: &str) -> rusqlite::Result<()> {
+        self.ops.push(ClaudeOp::SetActivityDetail {
+            id,
+            detail: detail.to_string(),
+        });
+        Ok(())
     }
 }
 
@@ -222,7 +296,7 @@ fn basename(cwd: &str) -> Option<String> {
 pub fn apply_line(
     line: &str,
     sessions: &mut HashMap<String, ClaudeSession>,
-    db: &Db,
+    db: &mut impl ClaudeSink,
 ) -> rusqlite::Result<bool> {
     if line.len() < 20 {
         return Ok(false);
@@ -305,7 +379,7 @@ fn record(
     head: &str,
     is_user: bool,
     ts: i64,
-    db: &Db,
+    db: &mut impl ClaudeSink,
 ) -> rusqlite::Result<bool> {
     if s.title.is_empty() && line.len() < 60_000 && is_user && head.contains(r#""type":"user""#) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
@@ -392,16 +466,34 @@ fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
         .unwrap_or(0)
 }
 
-fn scan_file(db: &Db, path: &Path, size: u64, mtime: i64, cutoff: i64) -> Result<bool, ScanError> {
+fn scan_file_with_writer(
+    read_db: &Db,
+    writer: Option<&DbHandle>,
+    path: &Path,
+    size: u64,
+    mtime: i64,
+    cutoff: i64,
+) -> Result<bool, ScanError> {
     let key = path.to_string_lossy().to_string();
-    let prev = db.claude_file(&key)?;
+    let prev = read_db.claude_file(&key)?;
     if let Some((off, mt)) = prev {
         if mt == mtime && off >= size as i64 {
             return Ok(false);
         }
     }
     if prev.is_none() && mtime < cutoff {
-        db.save_claude_file(&key, size as i64, mtime)?; // too old: remember, never read
+        if let Some(w) = writer {
+            w.apply_claude_batch(ClaudeBatch {
+                ops: Vec::new(),
+                sessions: Vec::new(),
+                file_key: key,
+                offset: size as i64,
+                mtime,
+            })
+            .map_err(ScanError::Write)?;
+        } else {
+            read_db.save_claude_file(&key, size as i64, mtime)?; // too old: remember, never read
+        }
         return Ok(false);
     }
     // A file that shrank was rewritten: read it again from the top.
@@ -410,27 +502,99 @@ fn scan_file(db: &Db, path: &Path, size: u64, mtime: i64, cutoff: i64) -> Result
         _ => 0,
     };
     if from >= size {
-        db.save_claude_file(&key, from as i64, mtime)?;
+        if let Some(w) = writer {
+            w.apply_claude_batch(ClaudeBatch {
+                ops: Vec::new(),
+                sessions: Vec::new(),
+                file_key: key,
+                offset: from as i64,
+                mtime,
+            })
+            .map_err(ScanError::Write)?;
+        } else {
+            read_db.save_claude_file(&key, from as i64, mtime)?;
+        }
         return Ok(false);
     }
     let mut sessions = HashMap::new();
     let mut changed = false;
-    db.in_transaction(|| -> Result<(), ScanError> {
+    if let Some(w) = writer {
+        let mut buf = BufferedClaude::new(read_db);
         let offset = read_lines(path, from, size, |line| -> Result<(), ScanError> {
-            changed |= apply_line(line, &mut sessions, db)?;
+            changed |= apply_line(line, &mut sessions, &mut buf)?;
             Ok(())
         })?;
-        for (id, s) in &sessions {
-            db.save_claude_session(id, s)?;
-        }
-        db.save_claude_file(&key, offset as i64, mtime)?;
-        Ok(())
-    })?;
+        w.apply_claude_batch(ClaudeBatch {
+            ops: buf.ops,
+            sessions: sessions.into_iter().collect(),
+            file_key: key,
+            offset: offset as i64,
+            mtime,
+        })
+        .map_err(ScanError::Write)?;
+    } else {
+        read_db.in_transaction(|| -> Result<(), ScanError> {
+            let mut sink = BufferedClaude::new(read_db);
+            let offset = read_lines(path, from, size, |line| -> Result<(), ScanError> {
+                changed |= apply_line(line, &mut sessions, &mut sink)?;
+                Ok(())
+            })?;
+            let mut temp_to_real: HashMap<i64, i64> = HashMap::new();
+            for op in sink.ops {
+                match op {
+                    ClaudeOp::InsertActivity { temp_id, activity } => {
+                        let real = read_db.insert_activity(&activity)?;
+                        temp_to_real.insert(temp_id, real);
+                    }
+                    ClaudeOp::SetActivityEnd { id, end } => {
+                        let real = if id < 0 {
+                            *temp_to_real.get(&id).unwrap_or(&id)
+                        } else {
+                            id
+                        };
+                        if real > 0 {
+                            read_db.set_activity_end(real, end)?;
+                        }
+                    }
+                    ClaudeOp::SetActivityDetail { id, detail } => {
+                        let real = if id < 0 {
+                            *temp_to_real.get(&id).unwrap_or(&id)
+                        } else {
+                            id
+                        };
+                        if real > 0 {
+                            read_db.set_activity_detail(real, &detail)?;
+                        }
+                    }
+                }
+            }
+            for (id, mut s) in sessions {
+                if let Some(aid) = s.activity_id {
+                    if aid < 0 {
+                        s.activity_id = temp_to_real.get(&aid).copied();
+                    }
+                }
+                read_db.save_claude_session(&id, &s)?;
+            }
+            read_db.save_claude_file(&key, offset as i64, mtime)?;
+            Ok(())
+        })?;
+    }
     Ok(changed)
 }
 
 /// Reads whatever was appended to every `*.jsonl` under `root`.
+#[allow(dead_code)]
 pub fn scan(db: &Db, root: &Path, now_ms: i64) -> Result<bool, ScanError> {
+    scan_with_writer(db, None, root, now_ms)
+}
+
+fn scan_with_writer(
+    db: &Db,
+    writer: Option<&DbHandle>,
+    root: &Path,
+    now_ms: i64,
+) -> Result<bool, ScanError> {
     let cutoff = now_ms - BACKFILL_DAYS * 86_400_000;
     let mut changed = false;
     for dir in std::fs::read_dir(root)?.flatten() {
@@ -444,7 +608,7 @@ pub fn scan(db: &Db, root: &Path, now_ms: i64) -> Result<bool, ScanError> {
             }
             let Ok(meta) = f.metadata() else { continue };
             // One unreadable file must not stop the rest of the scan.
-            match scan_file(db, &path, meta.len(), mtime_ms(&meta), cutoff) {
+            match scan_file_with_writer(db, writer, &path, meta.len(), mtime_ms(&meta), cutoff) {
                 Ok(c) => changed |= c,
                 Err(_) => log::event(Category::Claude, "log_skipped"),
             }
@@ -543,7 +707,8 @@ fn wait_idle(wake: Option<HANDLE>) {
     }
 }
 
-fn run(db_path: PathBuf) {
+fn run(db_path: PathBuf, writer: DbHandle) {
+    qos::set_background_qos(true);
     // Low CPU, disk and memory priority for this thread's whole life.
     // SAFETY: sets thread background priority on current thread.
     unsafe {
@@ -554,7 +719,7 @@ fn run(db_path: PathBuf) {
     if let Some(w) = wake {
         CLAUDE_WAKE_EVENT.store(w.0 as isize, Ordering::SeqCst);
     }
-    let db = match Db::open(&db_path) {
+    let db = match Db::open_readonly(&db_path) {
         Ok(db) => db,
         Err(e) => {
             log::db_err(Category::Claude, "open_db", &e);
@@ -580,10 +745,11 @@ fn run(db_path: PathBuf) {
         };
         loop {
             watch.rearm();
-            if let Err(e) = scan(&db, &root, now_ms()) {
+            if let Err(e) = scan_with_writer(&db, Some(&writer), &root, now_ms()) {
                 match e {
                     ScanError::Db(ref de) => log::db_err(Category::Claude, "scan_db", de),
                     ScanError::Io(_) => log::event(Category::Claude, "scan_io_failed"),
+                    ScanError::Write(_) => log::event(Category::Claude, "scan_write_failed"),
                 }
             }
             if !root.is_dir() || !enabled(&db) {
@@ -596,12 +762,11 @@ fn run(db_path: PathBuf) {
     }
 }
 
-/// Starts the reader on its own thread with its own connection (WAL lets it
-/// write next to the monitor).
-pub fn spawn(db_path: PathBuf) {
+/// Starts the reader on its own thread; all writes route through `writer` (`focus-db`).
+pub fn spawn(db_path: PathBuf, writer: DbHandle) {
     let _ = std::thread::Builder::new()
         .name("claude-logs".into())
-        .spawn(move || run(db_path));
+        .spawn(move || run(db_path, writer));
 }
 
 #[cfg(test)]
@@ -664,14 +829,14 @@ mod tests {
 
     #[test]
     fn messages_within_the_gap_form_one_run_with_a_tail() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         let mut s = HashMap::new();
         for l in [
             user("s1", "2026-11-16T15:00:00.000Z", "human", "Fix the bug"),
             assistant("s1", "2026-11-16T15:03:00.000Z"),
             assistant("s1", "2026-11-16T15:08:00.000Z"),
         ] {
-            assert!(apply_line(&l, &mut s, &db).unwrap());
+            assert!(apply_line(&l, &mut s, &mut db).unwrap());
         }
         let r = runs(&db);
         assert_eq!(r.len(), 1);
@@ -693,34 +858,34 @@ mod tests {
 
     #[test]
     fn a_long_pause_starts_a_new_run() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         let mut s = HashMap::new();
         apply_line(
             &user("s1", "2026-11-16T15:00:00Z", "human", "Hi"),
             &mut s,
-            &db,
+            &mut db,
         )
         .unwrap();
-        apply_line(&assistant("s1", "2026-11-16T15:11:00Z"), &mut s, &db).unwrap();
+        apply_line(&assistant("s1", "2026-11-16T15:11:00Z"), &mut s, &mut db).unwrap();
         assert_eq!(runs(&db).len(), 2);
     }
 
     #[test]
     fn automated_sessions_are_ignored_until_a_human_takes_over() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         let mut s = HashMap::new();
         assert!(!apply_line(
             &user("a", "2026-11-16T15:00:00Z", "sdk", "robot"),
             &mut s,
-            &db
+            &mut db
         )
         .unwrap());
-        assert!(!apply_line(&assistant("a", "2026-11-16T15:01:00Z"), &mut s, &db).unwrap());
+        assert!(!apply_line(&assistant("a", "2026-11-16T15:01:00Z"), &mut s, &mut db).unwrap());
         assert!(runs(&db).is_empty());
         assert!(apply_line(
             &user("a", "2026-11-16T15:02:00Z", "human", "me now"),
             &mut s,
-            &db
+            &mut db
         )
         .unwrap());
         assert_eq!(runs(&db).len(), 1);
@@ -728,39 +893,39 @@ mod tests {
 
     #[test]
     fn sidechains_duplicates_and_old_timestamps_are_skipped() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         let mut s = HashMap::new();
         apply_line(
             &user("s1", "2026-11-16T15:00:00Z", "human", "Hi"),
             &mut s,
-            &db,
+            &mut db,
         )
         .unwrap();
         let side = assistant("s1", "2026-11-16T15:01:00Z")
             .replace("\"message\"", "\"isSidechain\":true,\"message\"");
-        assert!(!apply_line(&side, &mut s, &db).unwrap());
+        assert!(!apply_line(&side, &mut s, &mut db).unwrap());
         assert!(!apply_line(
             &user("s1", "2026-11-16T15:00:00Z", "human", "Hi"),
             &mut s,
-            &db
+            &mut db
         )
         .unwrap());
-        assert!(!apply_line(&assistant("s1", "2026-11-16T14:59:00Z"), &mut s, &db).unwrap());
+        assert!(!apply_line(&assistant("s1", "2026-11-16T14:59:00Z"), &mut s, &mut db).unwrap());
         assert_eq!(runs(&db).len(), 1);
     }
 
     #[test]
     fn a_title_line_renames_the_run() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         let mut s = HashMap::new();
         apply_line(
             &user("s1", "2026-11-16T15:00:00Z", "human", "first prompt"),
             &mut s,
-            &db,
+            &mut db,
         )
         .unwrap();
         let t = r#"{"type":"ai-title","sessionId":"s1","aiTitle":"Better name here"}"#;
-        assert!(!apply_line(t, &mut s, &db).unwrap());
+        assert!(!apply_line(t, &mut s, &mut db).unwrap());
         assert_eq!(runs(&db)[0].detail, "Better name here");
     }
 

@@ -16,6 +16,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::db::{shared_store, Db, DbStore, Store};
+use crate::db_thread::DbHandle;
 use crate::demo::DemoStore;
 use crate::locale::SystemLocale;
 
@@ -88,25 +89,40 @@ fn make_demo_shell(fresh: bool, screen_name: Option<&str>) -> Result<Box<AppShel
     make_demo_shell_from(store, screen_name)
 }
 
-fn make_db_shell_from(db: Db, screen_name: Option<&str>) -> Result<Box<AppShell>, i32> {
-    let store = DbStore::new(db, SystemLocale::query());
+fn make_db_shell_from(
+    db: Db,
+    screen_name: Option<&str>,
+    writer: Option<DbHandle>,
+) -> Result<Box<AppShell>, i32> {
+    let store = match writer {
+        Some(w) => DbStore::with_writer(db, SystemLocale::query(), w),
+        None => DbStore::new(db, SystemLocale::query()),
+    };
     let mut shell = Box::new(AppShell::new(shared_store(Box::new(store))));
     apply_screen_arg(&mut shell, screen_name)?;
     Ok(shell)
 }
 
-fn make_db_shell(path: &Path, screen_name: Option<&str>) -> Result<Box<AppShell>, i32> {
+fn make_db_shell(
+    path: &Path,
+    screen_name: Option<&str>,
+    writer: Option<DbHandle>,
+) -> Result<Box<AppShell>, i32> {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let db = match Db::open(path) {
+    let db = match if writer.is_some() {
+        Db::open_readonly(path).or_else(|_| Db::open(path))
+    } else {
+        Db::open(path)
+    } {
         Ok(db) => db,
         Err(e) => {
             eprintln!("focus: cannot open database at {}: {e}", path.display());
             return Err(1);
         }
     };
-    make_db_shell_from(db, screen_name)
+    make_db_shell_from(db, screen_name, writer)
 }
 
 fn run_loop_until_closed() {
@@ -139,6 +155,7 @@ pub(crate) enum BgStore {
     Db {
         handle: std::thread::JoinHandle<Result<Db, String>>,
         path: std::path::PathBuf,
+        writer: Option<DbHandle>,
     },
 }
 
@@ -156,17 +173,33 @@ impl BgStore {
     }
 
     pub(crate) fn spawn_db(path: &Path) -> Self {
+        Self::spawn_db_inner(path, None)
+    }
+
+    pub(crate) fn spawn_db_with_writer(path: &Path, writer: DbHandle) -> Self {
+        Self::spawn_db_inner(path, Some(writer))
+    }
+
+    fn spawn_db_inner(path: &Path, writer: Option<DbHandle>) -> Self {
         let p_owned = path.to_path_buf();
         let p_disp = path.to_path_buf();
+        let has_writer = writer.is_some();
         let handle = std::thread::spawn(move || {
             if let Some(dir) = p_owned.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
-            Db::open(&p_owned).map_err(|e| e.to_string())
+            if has_writer {
+                Db::open_readonly(&p_owned)
+                    .or_else(|_| Db::open(&p_owned))
+                    .map_err(|e| e.to_string())
+            } else {
+                Db::open(&p_owned).map_err(|e| e.to_string())
+            }
         });
         Self::Db {
             handle,
             path: p_disp,
+            writer,
         }
     }
 
@@ -182,16 +215,22 @@ impl BgStore {
                 }
                 Err(_) => make_demo_shell(fresh, screen_name).map(|s| Some(s as Box<dyn Screen>)),
             },
-            Self::Db { handle, path } => match handle.join() {
-                Ok(Ok(db)) => {
-                    make_db_shell_from(db, screen_name).map(|s| Some(s as Box<dyn Screen>))
+            Self::Db {
+                handle,
+                path,
+                writer,
+            } => {
+                match handle.join() {
+                    Ok(Ok(db)) => make_db_shell_from(db, screen_name, writer)
+                        .map(|s| Some(s as Box<dyn Screen>)),
+                    Ok(Err(e)) => {
+                        eprintln!("focus: cannot open database at {}: {e}", path.display());
+                        Err(1)
+                    }
+                    Err(_) => make_db_shell(&path, screen_name, writer)
+                        .map(|s| Some(s as Box<dyn Screen>)),
                 }
-                Ok(Err(e)) => {
-                    eprintln!("focus: cannot open database at {}: {e}", path.display());
-                    Err(1)
-                }
-                Err(_) => make_db_shell(&path, screen_name).map(|s| Some(s as Box<dyn Screen>)),
-            },
+            }
         }
     }
 

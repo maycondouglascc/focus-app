@@ -26,8 +26,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::claude;
+use crate::db_thread::{DbHandle, DbThread};
 use crate::log::{self, Category};
 use crate::monitor::{self, MonitorHandle};
+use crate::qos;
 use crate::ui::{self, render, selftest::BgStore, window};
 
 pub const TRAY_WINDOW_CLASS: PCWSTR = w!("FocusTrayWindow");
@@ -368,6 +370,8 @@ struct AppState {
     tray_hwnd: HWND,
     msg_show: u32,
     msg_quit: u32,
+    db_handle: DbHandle,
+    db_thread: Option<DbThread>,
     monitor: Option<MonitorHandle>,
     quitting: bool,
 }
@@ -379,18 +383,25 @@ thread_local! {
 fn open_main_window() {
     let t0 = Instant::now();
     if window::is_open() {
+        qos::set_background_qos(false);
         let _ = window::open();
         return;
     }
-    let Some(db_path) = APP.with(|a| a.borrow().as_ref().map(|s| s.db_path.clone())) else {
+    let Some((db_path, db_handle)) = APP.with(|a| {
+        a.borrow()
+            .as_ref()
+            .map(|s| (s.db_path.clone(), s.db_handle.clone()))
+    }) else {
         return;
     };
+    qos::set_background_qos(false);
     ui::init();
     render::warmup_d3d();
-    let bg = BgStore::spawn_db(&db_path);
+    let bg = BgStore::spawn_db_with_writer(&db_path, db_handle);
     if !window::open() {
         bg.abort();
         render::reset_shared();
+        qos::set_background_qos(true);
         return;
     }
     match bg.finish_shell(None) {
@@ -398,12 +409,14 @@ fn open_main_window() {
             if !window::set_screen(screen) {
                 window::close();
                 render::reset_shared();
+                qos::set_background_qos(true);
                 return;
             }
         }
         Ok(None) | Err(_) => {
             window::close();
             render::reset_shared();
+            qos::set_background_qos(true);
             return;
         }
     }
@@ -446,6 +459,7 @@ unsafe extern "system" fn tray_wnd_proc(
         m if m == WM_APP_WINDOW_CLOSED => {
             let quitting = APP.with(|a| a.borrow().as_ref().is_some_and(|s| s.quitting));
             if !quitting {
+                qos::set_background_qos(true);
                 log::event(Category::App, "window_closed");
             }
             return LRESULT(0);
@@ -519,10 +533,10 @@ pub fn run_app(
     };
     window::set_close_notify(tray_hwnd, WM_APP_WINDOW_CLOSED);
 
-    let monitor = match monitor::spawn(db_path.clone()) {
-        Ok(m) => m,
+    let mut db_thread = match DbThread::spawn(db_path.clone()) {
+        Ok(t) => t,
         Err(e) => {
-            log::event(Category::App, "monitor_start_failed");
+            log::event(Category::App, "db_start_failed");
             eprintln!("focus: cannot open database at {}: {e}", db_path.display());
             // SAFETY: `tray_hwnd` was created on this thread above.
             unsafe {
@@ -531,7 +545,22 @@ pub fn run_app(
             return 1;
         }
     };
-    claude::spawn(db_path.clone());
+    let db_handle = db_thread.handle();
+
+    let monitor = match monitor::spawn(db_path.clone(), db_handle.clone()) {
+        Ok(m) => m,
+        Err(e) => {
+            log::event(Category::App, "monitor_start_failed");
+            eprintln!("focus: cannot open database at {}: {e}", db_path.display());
+            db_thread.stop();
+            // SAFETY: `tray_hwnd` was created on this thread above.
+            unsafe {
+                let _ = DestroyWindow(tray_hwnd);
+            }
+            return 1;
+        }
+    };
+    claude::spawn(db_path.clone(), db_handle.clone());
 
     APP.with(|a| {
         *a.borrow_mut() = Some(AppState {
@@ -539,6 +568,8 @@ pub fn run_app(
             tray_hwnd,
             msg_show,
             msg_quit,
+            db_handle,
+            db_thread: Some(db_thread),
             monitor: Some(monitor),
             quitting: false,
         });
@@ -546,6 +577,8 @@ pub fn run_app(
 
     if open_window {
         open_main_window();
+    } else {
+        qos::set_background_qos(true);
     }
 
     // SAFETY: standard Win32 message loop for the UI thread; keeps running when `FocusMainWindow` closes.
@@ -565,6 +598,9 @@ pub fn run_app(
         st.quitting = true;
         if let Some(mut mon) = st.monitor.take() {
             mon.stop();
+        }
+        if let Some(mut db) = st.db_thread.take() {
+            db.stop();
         }
         // SAFETY: `st.tray_hwnd` is owned by this thread and destroyed before process exit.
         unsafe {

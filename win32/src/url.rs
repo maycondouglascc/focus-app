@@ -372,19 +372,12 @@ impl Drop for UrlWorker {
     }
 }
 
-fn run_worker(
-    monitor_hwnd_raw: isize,
-    ready_msg: u32,
-    latest_seq: Arc<AtomicU64>,
-    shared: Arc<(Mutex<SharedQueue>, Condvar)>,
-) {
-    // SAFETY: initializes COM MTA for this dedicated UIA worker thread and uninitializes on exit.
+fn init_uia() -> Option<(IUIAutomation, IUIAutomationCondition)> {
+    // SAFETY: initializes COM MTA and creates `CUIAutomation` on this dedicated thread.
     unsafe {
         if CoInitializeEx(None, COINIT_MULTITHREADED).is_err() {
-            return;
+            return None;
         }
-    }
-    let uia: Option<(IUIAutomation, IUIAutomationCondition)> = (|| unsafe {
         let auto: IUIAutomation =
             CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
         if let Ok(a2) = auto.cast::<IUIAutomation2>() {
@@ -393,7 +386,18 @@ fn run_worker(
         }
         let cond = auto.CreateTrueCondition().ok()?;
         Some((auto, cond))
-    })();
+    }
+}
+
+fn run_worker(
+    monitor_hwnd_raw: isize,
+    ready_msg: u32,
+    latest_seq: Arc<AtomicU64>,
+    shared: Arc<(Mutex<SharedQueue>, Condvar)>,
+) {
+    crate::qos::set_background_qos(true);
+    let mut uia: Option<(IUIAutomation, IUIAutomationCondition)> = None;
+    let mut uia_attempted = false;
 
     let mut cache: HashMap<isize, IUIAutomationElement> = HashMap::new();
     let (lock, cvar) = &*shared;
@@ -410,6 +414,10 @@ fn run_worker(
             g.pending.take()
         };
         let Some(req) = req else { continue };
+        if !uia_attempted {
+            uia_attempted = true;
+            uia = init_uia();
+        }
         if let Some((ref auto, ref cond)) = uia {
             if cache.len() > 16 {
                 cache.retain(|&raw, _| {
@@ -442,10 +450,12 @@ fn run_worker(
         }
     }
     cache.clear();
-    drop(uia);
-    // SAFETY: pairs with `CoInitializeEx` at thread start.
-    unsafe {
-        CoUninitialize();
+    if uia.is_some() {
+        drop(uia);
+        // SAFETY: pairs with `CoInitializeEx` inside `init_uia`.
+        unsafe {
+            CoUninitialize();
+        }
     }
 }
 

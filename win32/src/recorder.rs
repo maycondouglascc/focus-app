@@ -8,6 +8,21 @@
 
 use crate::db::{Activity, Db};
 
+pub trait ActivitySink {
+    fn insert_activity(&self, a: &Activity) -> rusqlite::Result<i64>;
+    fn set_activity_end(&self, id: i64, end: i64) -> rusqlite::Result<()>;
+}
+
+impl ActivitySink for Db {
+    fn insert_activity(&self, a: &Activity) -> rusqlite::Result<i64> {
+        Db::insert_activity(self, a)
+    }
+
+    fn set_activity_end(&self, id: i64, end: i64) -> rusqlite::Result<()> {
+        Db::set_activity_end(self, id, end)
+    }
+}
+
 /// What the monitor learned about the foreground window.
 #[derive(Debug, Clone)]
 pub struct Info {
@@ -116,9 +131,14 @@ impl Recorder {
     /// event, not of the debounce confirmation).
     /// Returns `Some(activity_id)` when a new run was inserted, `None` when
     /// an existing run was extended or the window was excluded.
-    pub fn on_focus(&mut self, db: &Db, mut info: Info, at: i64) -> rusqlite::Result<Option<i64>> {
+    pub fn on_focus<S: ActivitySink>(
+        &mut self,
+        sink: &S,
+        mut info: Info,
+        at: i64,
+    ) -> rusqlite::Result<Option<i64>> {
         if self.exclusions.matches(&info) {
-            self.close(db, at)?;
+            self.close(sink, at)?;
             return Ok(None);
         }
         if is_private_browser_title(&info.exe, &info.detail) {
@@ -129,8 +149,8 @@ impl Recorder {
                 return Ok(None);
             }
         }
-        self.close(db, at)?;
-        let id = db.insert_activity(&Activity {
+        self.close(sink, at)?;
+        let id = sink.insert_activity(&Activity {
             id: 0,
             kind: "app".into(),
             app: info.app,
@@ -152,10 +172,10 @@ impl Recorder {
     }
 
     /// Periodic flush of the current run's end.
-    pub fn tick(&mut self, db: &Db, now: i64) -> rusqlite::Result<()> {
+    pub fn tick<S: ActivitySink>(&mut self, sink: &S, now: i64) -> rusqlite::Result<()> {
         if let Some(run) = &mut self.current {
             if now > run.end {
-                db.set_activity_end(run.id, now)?;
+                sink.set_activity_end(run.id, now)?;
                 run.end = now;
             }
         }
@@ -165,11 +185,11 @@ impl Recorder {
     /// Ends the current run at `at` (switch, lock, suspend, shutdown). `at`
     /// may be earlier than the last flush: idle starts at the last input, so
     /// the end is moved back, never before the run's own start.
-    pub fn close(&mut self, db: &Db, at: i64) -> rusqlite::Result<()> {
+    pub fn close<S: ActivitySink>(&mut self, sink: &S, at: i64) -> rusqlite::Result<()> {
         if let Some(run) = self.current.take() {
             let end = at.max(run.start);
             if end != run.end {
-                db.set_activity_end(run.id, end)?;
+                sink.set_activity_end(run.id, end)?;
             }
         }
         Ok(())

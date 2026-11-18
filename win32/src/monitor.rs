@@ -39,9 +39,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::appinfo::{self, WindowTarget};
 use crate::db::{Db, Settings};
+use crate::db_thread::{DbHandle, QueuedSink};
 use crate::locale::SystemLocale;
 use crate::log::{self, Category};
 use crate::presence::{self, Change, Presence, DISPLAY_OFF, IDLE, LOCKED, SLEEP, USER_PAUSED};
+use crate::qos;
 use crate::recorder::{self, Exclusions};
 use crate::url::UrlWorker;
 
@@ -139,7 +141,9 @@ impl Drop for MonitorHandle {
 }
 
 struct State {
-    db: Db,
+    read_db: Db,
+    sink: QueuedSink,
+    handle: DbHandle,
     locale: SystemLocale,
     recorder: recorder::Recorder,
     presence: Presence,
@@ -234,7 +238,7 @@ fn record_window(st: &mut State, hwnd: HWND, at: i64) {
     match inspect_hwnd(hwnd) {
         WindowTarget::OwnApp => {
             st.url_worker.invalidate();
-            if let Err(e) = st.recorder.close(&st.db, at) {
+            if let Err(e) = st.recorder.close(&st.sink, at) {
                 log_err("close_own_app", e);
             }
         }
@@ -243,7 +247,7 @@ fn record_window(st: &mut State, hwnd: HWND, at: i64) {
             let is_browser = recorder::is_supported_browser_exe(&info.exe);
             let is_private = recorder::is_private_browser_title(&info.exe, &info.detail);
             let pid = info.pid;
-            match st.recorder.on_focus(&st.db, info, at) {
+            match st.recorder.on_focus(&st.sink, info, at) {
                 Ok(Some(run_id)) => {
                     if st.browser_tabs && is_browser && !is_private {
                         st.url_worker.submit(run_id, hwnd.0 as isize, pid);
@@ -277,7 +281,7 @@ fn apply_reason(st: &mut State, reason: u8, on: bool, at: i64) {
     match st.presence.set(reason, on) {
         Change::Paused => {
             st.url_worker.invalidate();
-            if let Err(e) = st.recorder.close(&st.db, at) {
+            if let Err(e) = st.recorder.close(&st.sink, at) {
                 log_err("pause", e);
             }
         }
@@ -319,7 +323,7 @@ fn reload_settings() {
     let now = now_ms();
     with_state(|st| {
         let s = st
-            .db
+            .read_db
             .load_settings(&st.locale)
             .unwrap_or_else(|_| Settings::defaults_for(&st.locale));
         apply_settings(st, s, now);
@@ -329,9 +333,7 @@ fn reload_settings() {
 fn apply_pending_urls() {
     with_state(|st| {
         for res in st.url_worker.drain_results() {
-            if let Err(e) = st.db.set_activity_url(res.run_id, &res.url, &res.context) {
-                log_err("set_url", e);
-            }
+            st.handle.set_run_url(res.run_id, res.url, res.context);
         }
     });
 }
@@ -379,12 +381,12 @@ fn flush() {
         let (wall, unb) = (now_ms(), unbiased_ms());
         if presence::slept_between(st.last_wall, st.last_unbiased, wall, unb, SLEEP_GAP_MS) {
             // The machine slept: the run ended at the last instant we knew about.
-            if let Err(e) = st.recorder.close(&st.db, st.last_wall) {
+            if let Err(e) = st.recorder.close(&st.sink, st.last_wall) {
                 log_err("close_after_sleep", e);
             }
             resync(st, wall);
         } else {
-            if let Err(e) = st.recorder.tick(&st.db, wall) {
+            if let Err(e) = st.recorder.tick(&st.sink, wall) {
                 log_err("flush", e);
             }
             // Hook watchdog: catch missed focus events if foreground changed silently.
@@ -496,7 +498,7 @@ fn on_power(code: usize, lparam: LPARAM) {
 fn on_time_change() {
     let now = now_ms();
     with_state(|st| {
-        if let Err(e) = st.recorder.close(&st.db, now) {
+        if let Err(e) = st.recorder.close(&st.sink, now) {
             log_err("close_on_time_change", e);
         }
         reset_clock_baseline(st);
@@ -508,11 +510,11 @@ fn on_time_change() {
 fn on_end_session() {
     with_state(|st| {
         if !st.end_session_flushed {
-            if let Err(e) = st.recorder.close(&st.db, now_ms()) {
+            if let Err(e) = st.recorder.close(&st.sink, now_ms()) {
                 log_err("close_on_shutdown", e);
             }
-            if let Err(e) = st.db.checkpoint() {
-                log_err("checkpoint", e);
+            if st.handle.checkpoint().is_err() {
+                log::event(Category::Monitor, "checkpoint_failed");
             }
             st.end_session_flushed = true;
         }
@@ -599,13 +601,12 @@ unsafe fn create_hidden_window() -> Option<HWND> {
 
 fn run_thread(
     db_path: PathBuf,
+    handle: DbHandle,
     end_session_sync: Arc<(Mutex<bool>, Condvar)>,
     ready_tx: mpsc::Sender<Result<isize, String>>,
 ) {
-    if let Some(dir) = db_path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let db = match Db::open(&db_path) {
+    qos::set_background_qos(true);
+    let read_db = match Db::open_readonly(&db_path) {
         Ok(db) => db,
         Err(e) => {
             log::db_err(Category::Monitor, "open_db", &e);
@@ -614,7 +615,7 @@ fn run_thread(
         }
     };
     let locale = SystemLocale::query();
-    let settings = db
+    let settings = read_db
         .load_settings(&locale)
         .unwrap_or_else(|_| Settings::defaults_for(&locale));
 
@@ -647,9 +648,12 @@ fn run_thread(
             let _ = presence.set(USER_PAUSED, true);
         }
 
+        let sink = QueuedSink::new(handle.clone());
         STATE.with(|s| {
             *s.borrow_mut() = Some(State {
-                db,
+                read_db,
+                sink,
+                handle,
                 locale,
                 recorder,
                 presence,
@@ -746,27 +750,25 @@ fn run_thread(
         }
     }
 
-    // Quit: stop URL thread, end the current run, optimize and checkpoint the WAL.
+    // Quit: stop URL thread and flush the active run (`DbThread::stop` optimizes and checkpoints).
     STATE.with(|s| {
         if let Some(mut st) = s.borrow_mut().take() {
             st.url_worker.stop();
-            if let Err(e) = st.recorder.close(&st.db, now_ms()) {
+            if let Err(e) = st.recorder.close(&st.sink, now_ms()) {
                 log_err("close", e);
             }
-            let _ = st.db.optimize();
-            let _ = st.db.checkpoint();
         }
     });
     log::event(Category::Monitor, "stopped");
 }
 
-pub fn spawn(db_path: PathBuf) -> Result<MonitorHandle, String> {
+pub fn spawn(db_path: PathBuf, handle: DbHandle) -> Result<MonitorHandle, String> {
     let (tx, rx) = mpsc::channel();
     let end_session_sync = Arc::new((Mutex::new(false), Condvar::new()));
     let sync_clone = Arc::clone(&end_session_sync);
     let join = std::thread::Builder::new()
         .name("focus-monitor".into())
-        .spawn(move || run_thread(db_path, sync_clone, tx))
+        .spawn(move || run_thread(db_path, handle, sync_clone, tx))
         .map_err(|e| format!("failed to spawn monitor thread: {e}"))?;
 
     match rx.recv() {
