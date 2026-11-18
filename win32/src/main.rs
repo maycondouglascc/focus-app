@@ -3,7 +3,9 @@
 
 mod app;
 mod appinfo;
+mod backup;
 mod claude;
+mod crash;
 mod csv_export;
 mod db;
 mod db_thread;
@@ -52,6 +54,7 @@ fn attach_parent_console_if_needed() {
 }
 
 fn main() {
+    crash::install();
     let raw_args: Vec<String> = std::env::args().collect();
     let parsed = parse_args(&raw_args);
     let tag = test_instance_tag();
@@ -63,6 +66,7 @@ fn main() {
                 println!("focus {}", env!("CARGO_PKG_VERSION"));
                 0
             }
+            AppAction::CrashTest => crash::trigger_crash_test(),
             AppAction::DiagDrag => ui::selftest::diag_drag(),
             AppAction::UiCycle { count, all_screens } => ui::selftest::cycle(count, all_screens),
             AppAction::TrayCycle(count) => ui::selftest::tray_cycle(count),

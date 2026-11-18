@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use rusqlite::ErrorCode;
 
+use crate::backup::{self, HousekeepingReport};
 use crate::db::{
     Activity, ClaudeSession, Db, EntryInput, EntryPatch, Project, ProjectInput, ProjectPatch,
     Settings, SettingsPatch, TimeEntry, TimerStartInput,
@@ -114,6 +115,11 @@ pub enum DbCmd {
     },
     ProbeWrite {
         reply: Reply<bool>,
+    },
+    RunHousekeeping {
+        backup_dir: PathBuf,
+        now_ms: i64,
+        reply: Reply<HousekeepingReport>,
     },
     #[cfg(test)]
     SleepForTest {
@@ -222,17 +228,26 @@ impl DbHandle {
         self.call(|reply| DbCmd::Checkpoint { reply })
     }
 
-    #[allow(dead_code)]
     pub fn probe_write(&self) -> Result<bool, String> {
         self.call(|reply| DbCmd::ProbeWrite { reply })
     }
 
-    #[allow(dead_code)]
+    pub fn run_housekeeping(
+        &self,
+        backup_dir: PathBuf,
+        now_ms: i64,
+    ) -> Result<HousekeepingReport, String> {
+        self.call(|reply| DbCmd::RunHousekeeping {
+            backup_dir,
+            now_ms,
+            reply,
+        })
+    }
+
     pub fn is_in_error(&self) -> bool {
         self.in_error.load(Ordering::SeqCst)
     }
 
-    #[allow(dead_code)]
     pub fn set_error_callback(&self, cb: impl Fn(bool) + Send + Sync + 'static) {
         if let Ok(mut g) = self.on_error_change.lock() {
             *g = Some(Box::new(cb));
@@ -381,6 +396,22 @@ fn is_transient_busy(err: &rusqlite::Error) -> bool {
     )
 }
 
+fn is_fatal_storage_error(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(f, _)
+            if matches!(
+                f.code,
+                ErrorCode::DiskFull
+                    | ErrorCode::SystemIoFailure
+                    | ErrorCode::CannotOpen
+                    | ErrorCode::ReadOnly
+                    | ErrorCode::DatabaseCorrupt
+                    | ErrorCode::NotADatabase
+            )
+    )
+}
+
 fn retry_busy<T>(mut op: impl FnMut() -> rusqlite::Result<T>) -> rusqlite::Result<T> {
     let mut attempts = 0u32;
     loop {
@@ -487,6 +518,7 @@ fn run_loop(
     on_error_change: Arc<ErrorCallbackHolder>,
 ) {
     let mut tokens = TokenMap::new();
+    let mut dirty_since_backup = false;
     let record_res = |op: &'static str, r: &rusqlite::Result<()>| match r {
         Ok(()) => set_error_state(&in_error, &on_error_change, false),
         Err(e) if !is_transient_busy(e) => {
@@ -494,6 +526,12 @@ fn run_loop(
             set_error_state(&in_error, &on_error_change, true);
         }
         Err(_) => {}
+    };
+    let record_ui = |op: &'static str, err: &rusqlite::Error| {
+        if is_fatal_storage_error(err) {
+            log::db_err(Category::Db, op, err);
+            set_error_state(&in_error, &on_error_change, true);
+        }
     };
 
     while let Ok(cmd) = rx.recv() {
@@ -503,6 +541,7 @@ fn run_loop(
                 match res {
                     Ok(row_id) => {
                         tokens.insert(token, row_id);
+                        dirty_since_backup = true;
                         set_error_state(&in_error, &on_error_change, false);
                     }
                     Err(e) => {
@@ -516,6 +555,9 @@ fn run_loop(
             DbCmd::SetRunEnd { token, end } => {
                 if let Some(row_id) = tokens.get(token) {
                     let res = retry_busy(|| db.set_activity_end(row_id, end));
+                    if res.is_ok() {
+                        dirty_since_backup = true;
+                    }
                     record_res("set_run_end", &res);
                 }
             }
@@ -526,13 +568,19 @@ fn run_loop(
             } => {
                 if let Some(row_id) = tokens.get(token) {
                     let res = retry_busy(|| db.set_activity_url(row_id, &url, &context));
+                    if res.is_ok() {
+                        dirty_since_backup = true;
+                    }
                     record_res("set_run_url", &res);
                 }
             }
             DbCmd::ApplyClaudeBatch { batch, reply } => {
                 let res = retry_busy(|| apply_claude_batch_tx(&db, batch.clone()));
                 match &res {
-                    Ok(()) => set_error_state(&in_error, &on_error_change, false),
+                    Ok(()) => {
+                        dirty_since_backup = true;
+                        set_error_state(&in_error, &on_error_change, false);
+                    }
                     Err(e) if !is_transient_busy(e) => {
                         log::db_err(Category::Db, "claude_batch", e);
                         set_error_state(&in_error, &on_error_change, true);
@@ -547,26 +595,62 @@ fn run_loop(
                 reply,
             } => {
                 let res = retry_busy(|| db.create_project(&input, now_ms));
+                if res.is_ok() {
+                    dirty_since_backup = true;
+                    set_error_state(&in_error, &on_error_change, false);
+                } else if let Err(ref e) = res {
+                    record_ui("create_project", e);
+                }
                 let _ = reply.send(res.map_err(|e| e.to_string()));
             }
             DbCmd::UpdateProject { id, patch, reply } => {
                 let res = retry_busy(|| db.update_project(&id, &patch));
+                if res.is_ok() {
+                    dirty_since_backup = true;
+                    set_error_state(&in_error, &on_error_change, false);
+                } else if let Err(ref e) = res {
+                    record_ui("update_project", e);
+                }
                 let _ = reply.send(res.map_err(|e| e.to_string()));
             }
             DbCmd::DeleteProject { id, reply } => {
                 let res = retry_busy(|| db.delete_project(&id));
+                if res.is_ok() {
+                    dirty_since_backup = true;
+                    set_error_state(&in_error, &on_error_change, false);
+                } else if let Err(ref e) = res {
+                    record_ui("delete_project", e);
+                }
                 let _ = reply.send(res.map_err(|e| e.to_string()));
             }
             DbCmd::CreateEntry { input, reply } => {
                 let res = retry_busy(|| db.create_entry(&input));
+                if res.is_ok() {
+                    dirty_since_backup = true;
+                    set_error_state(&in_error, &on_error_change, false);
+                } else if let Err(ref e) = res {
+                    record_ui("create_entry", e);
+                }
                 let _ = reply.send(res.map_err(|e| e.to_string()));
             }
             DbCmd::UpdateEntry { id, patch, reply } => {
                 let res = retry_busy(|| db.update_entry(&id, &patch));
+                if res.is_ok() {
+                    dirty_since_backup = true;
+                    set_error_state(&in_error, &on_error_change, false);
+                } else if let Err(ref e) = res {
+                    record_ui("update_entry", e);
+                }
                 let _ = reply.send(res.map_err(|e| e.to_string()));
             }
             DbCmd::DeleteEntry { id, reply } => {
                 let res = retry_busy(|| db.delete_entry(&id));
+                if res.is_ok() {
+                    dirty_since_backup = true;
+                    set_error_state(&in_error, &on_error_change, false);
+                } else if let Err(ref e) = res {
+                    record_ui("delete_entry", e);
+                }
                 let _ = reply.send(res.map_err(|e| e.to_string()));
             }
             DbCmd::StartTimer {
@@ -575,14 +659,32 @@ fn run_loop(
                 reply,
             } => {
                 let res = retry_busy(|| db.start_timer(&input, now_ms));
+                if res.is_ok() {
+                    dirty_since_backup = true;
+                    set_error_state(&in_error, &on_error_change, false);
+                } else if let Err(ref e) = res {
+                    record_ui("start_timer", e);
+                }
                 let _ = reply.send(res.map_err(|e| e.to_string()));
             }
             DbCmd::StopTimers { now_ms, reply } => {
                 let res = retry_busy(|| db.stop_all_timers(now_ms));
+                if res.is_ok() {
+                    dirty_since_backup = true;
+                    set_error_state(&in_error, &on_error_change, false);
+                } else if let Err(ref e) = res {
+                    record_ui("stop_timers", e);
+                }
                 let _ = reply.send(res.map_err(|e| e.to_string()));
             }
             DbCmd::ClearActivity { reply } => {
                 let res = retry_busy(|| db.clear_activity());
+                if res.is_ok() {
+                    dirty_since_backup = true;
+                    set_error_state(&in_error, &on_error_change, false);
+                } else if let Err(ref e) = res {
+                    record_ui("clear_activity", e);
+                }
                 let _ = reply.send(res.map_err(|e| e.to_string()));
             }
             DbCmd::SaveSettings {
@@ -591,6 +693,12 @@ fn run_loop(
                 reply,
             } => {
                 let res = retry_busy(|| db.save_settings(&patch, &locale));
+                if res.is_ok() {
+                    dirty_since_backup = true;
+                    set_error_state(&in_error, &on_error_change, false);
+                } else if let Err(ref e) = res {
+                    record_ui("save_settings", e);
+                }
                 let _ = reply.send(res.map_err(|e| e.to_string()));
             }
             DbCmd::Checkpoint { reply } => {
@@ -609,6 +717,15 @@ fn run_loop(
                         let _ = reply.send(Err(e.to_string()));
                     }
                 }
+            }
+            DbCmd::RunHousekeeping {
+                backup_dir,
+                now_ms,
+                reply,
+            } => {
+                let rep =
+                    backup::run_housekeeping(&db, &backup_dir, &mut dirty_since_backup, now_ms);
+                let _ = reply.send(Ok(rep));
             }
             #[cfg(test)]
             DbCmd::SleepForTest { duration } => {

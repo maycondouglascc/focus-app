@@ -432,6 +432,24 @@ impl Db {
         self.conn.execute_batch("PRAGMA optimize")
     }
 
+    pub fn vacuum_into(&self, dest: &Path) -> rusqlite::Result<()> {
+        self.conn
+            .execute("VACUUM INTO ?", [dest.to_string_lossy().as_ref()])?;
+        Ok(())
+    }
+
+    pub fn quick_check(&self) -> rusqlite::Result<bool> {
+        let mut stmt = self.conn.prepare("PRAGMA quick_check")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let line: String = row.get(0)?;
+            if !line.eq_ignore_ascii_case("ok") {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     // ── Activity ─────────────────────────────────────────────────────────
 
     pub fn insert_activity(&self, a: &Activity) -> rusqlite::Result<i64> {
@@ -1049,6 +1067,20 @@ impl Db {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    pub fn get_setting_i64(&self, key: &str) -> Option<i64> {
+        let raw: String = self
+            .conn
+            .query_row("SELECT value FROM settings WHERE key = ?", [key], |r| {
+                r.get(0)
+            })
+            .ok()?;
+        raw.trim().parse::<i64>().ok()
+    }
+
+    pub fn set_setting_i64(&self, key: &str, value: i64) -> rusqlite::Result<()> {
+        self.set_setting(key, &value.to_string())
     }
 
     pub fn load_settings(&self, locale: &SystemLocale) -> rusqlite::Result<Settings> {

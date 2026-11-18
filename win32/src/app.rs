@@ -28,6 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_APP, WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
 };
 
+use crate::backup;
 use crate::claude;
 use crate::db::{Db, SettingsPatch};
 use crate::db_thread::{DbHandle, DbThread};
@@ -51,6 +52,7 @@ const WM_APP_WINDOW_CLOSED: u32 = WM_APP + 30;
 const WM_APP_TRAY_CALLBACK: u32 = WM_APP + 31;
 const WM_APP_DATA_CHANGED: u32 = WM_APP + 32;
 const WM_APP_AWAY_RESUME: u32 = WM_APP + 33;
+const WM_APP_DB_ERROR: u32 = WM_APP + 34;
 /// Win32 `shellapi.h`: `NIN_KEYSELECT = NIN_SELECT | NINF_KEY (0x1)`, `NIN_BALLOONUSERCLICK = WM_USER + 5`.
 const NIN_KEYSELECT: u32 = NIN_SELECT + 1;
 const NIN_BALLOONUSERCLICK: u32 = NIN_SELECT + 5;
@@ -76,6 +78,12 @@ pub fn notify_data_changed() {
 const TRAY_TICK_TIMER_ID: usize = 1;
 const TRAY_TICK_MS: u32 = 60_000;
 const TRAY_TICK_TOLERANCE_MS: u32 = 10_000;
+const DB_PROBE_TIMER_ID: usize = 2;
+const DB_PROBE_MS: u32 = 300_000;
+const DB_PROBE_TOLERANCE_MS: u32 = 30_000;
+const HOUSEKEEPING_TIMER_ID: usize = 3;
+const HOUSEKEEPING_MS: u32 = 3_600_000;
+const HOUSEKEEPING_TOLERANCE_MS: u32 = 300_000;
 
 const TEST_INSTANCE_ENV: &str = "FOCUS_TEST_INSTANCE";
 
@@ -95,11 +103,13 @@ pub struct CliArgs {
     pub all_screens: bool,
     pub ui_show: Option<u64>,
     pub gallery: bool,
+    pub crash_test: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppAction {
     PrintVersion,
+    CrashTest,
     DiagDrag,
     UiCycle {
         count: u32,
@@ -162,6 +172,7 @@ pub fn parse_args(args: &[String]) -> CliArgs {
             "--demo" => out.demo = true,
             "--fresh" => out.fresh = true,
             "--diag-drag" => out.diag_drag = true,
+            "--crash-test" => out.crash_test = true,
             "--all-screens" => out.all_screens = true,
             "--gallery" => out.gallery = true,
             "--ui-cycle" => {
@@ -198,6 +209,9 @@ pub fn parse_args(args: &[String]) -> CliArgs {
 pub fn decide_action(already_running: bool, args: &CliArgs) -> AppAction {
     if args.version {
         return AppAction::PrintVersion;
+    }
+    if args.crash_test {
+        return AppAction::CrashTest;
     }
     if args.diag_drag {
         return AppAction::DiagDrag;
@@ -255,6 +269,7 @@ pub fn decide_action(already_running: bool, args: &CliArgs) -> AppAction {
 
 pub fn needs_single_instance(args: &CliArgs) -> bool {
     !args.version
+        && !args.crash_test
         && !args.diag_drag
         && args.ui_cycle.is_none()
         && args.tray_cycle.is_none()
@@ -790,6 +805,75 @@ unsafe extern "system" fn tray_wnd_proc(
             refresh_tray_state();
             return LRESULT(0);
         }
+        m if m == WM_APP_DB_ERROR => {
+            let errored = wparam.0 != 0;
+            monitor::set_db_error(errored);
+            refresh_tray_state();
+            if errored {
+                APP.with(|a| {
+                    if let Some(ref st) = *a.borrow() {
+                        if let Some(ref tray) = st.tray {
+                            tray.show_balloon(
+                                strings::BALLOON_DB_ERROR_TITLE,
+                                strings::BALLOON_DB_ERROR_BODY,
+                                true,
+                            );
+                        }
+                    }
+                });
+                // SAFETY: `hwnd` is `FocusTrayWindow` on the UI thread; retries write probe every 5m.
+                unsafe {
+                    let _ = SetCoalescableTimer(
+                        Some(hwnd),
+                        DB_PROBE_TIMER_ID,
+                        DB_PROBE_MS,
+                        None,
+                        DB_PROBE_TOLERANCE_MS,
+                    );
+                }
+            } else {
+                // SAFETY: `hwnd` is `FocusTrayWindow` on the UI thread.
+                unsafe {
+                    let _ = KillTimer(Some(hwnd), DB_PROBE_TIMER_ID);
+                }
+            }
+            return LRESULT(0);
+        }
+        WM_TIMER if wparam.0 == DB_PROBE_TIMER_ID => {
+            let handle = APP.with(|a| a.borrow().as_ref().map(|s| s.db_handle.clone()));
+            if let Some(h) = handle {
+                if let Ok(true) = h.probe_write() {
+                    monitor::set_db_error(false);
+                    // SAFETY: `hwnd` is `FocusTrayWindow` on the UI thread.
+                    unsafe {
+                        let _ = KillTimer(Some(hwnd), DB_PROBE_TIMER_ID);
+                    }
+                    refresh_tray_state();
+                }
+            }
+            return LRESULT(0);
+        }
+        WM_TIMER if wparam.0 == HOUSEKEEPING_TIMER_ID => {
+            let handle = APP.with(|a| a.borrow().as_ref().map(|s| s.db_handle.clone()));
+            if let Some(h) = handle {
+                if let Ok(rep) = h.run_housekeeping(backup::default_backup_dir(), system_now_ms()) {
+                    if rep.quick_check_failed {
+                        APP.with(|a| {
+                            if let Some(ref st) = *a.borrow() {
+                                if let Some(ref tray) = st.tray {
+                                    tray.show_balloon(
+                                        strings::BALLOON_QUICK_CHECK_TITLE,
+                                        strings::BALLOON_QUICK_CHECK_BODY,
+                                        true,
+                                    );
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+            return LRESULT(0);
+        }
         m if m == WM_APP_WINDOW_CLOSED => {
             let info = APP.with(|a| {
                 a.borrow()
@@ -926,6 +1010,18 @@ pub fn run_app(
         }
     };
     let db_handle = db_thread.handle();
+    let tray_raw = tray_hwnd.0 as isize;
+    db_handle.set_error_callback(move |errored| {
+        // SAFETY: `tray_raw` stays alive until `DestroyWindow(tray_hwnd)` after `db_thread.stop()`.
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(tray_raw as *mut _)),
+                WM_APP_DB_ERROR,
+                WPARAM(usize::from(errored)),
+                LPARAM(0),
+            );
+        }
+    });
 
     let monitor = match monitor::spawn(db_path.clone(), db_handle.clone()) {
         Ok(m) => m,
@@ -959,6 +1055,16 @@ pub fn run_app(
         });
     });
     refresh_tray_state();
+    // SAFETY: hourly coalescable maintenance timer on `FocusTrayWindow`.
+    unsafe {
+        let _ = SetCoalescableTimer(
+            Some(tray_hwnd),
+            HOUSEKEEPING_TIMER_ID,
+            HOUSEKEEPING_MS,
+            None,
+            HOUSEKEEPING_TOLERANCE_MS,
+        );
+    }
 
     if open_window {
         open_main_window();
@@ -990,6 +1096,11 @@ pub fn run_app(
             unsafe {
                 let _ = KillTimer(Some(st.tray_hwnd), TRAY_TICK_TIMER_ID);
             }
+        }
+        // SAFETY: `st.tray_hwnd` is owned by this UI thread; clean up maintenance timers.
+        unsafe {
+            let _ = KillTimer(Some(st.tray_hwnd), DB_PROBE_TIMER_ID);
+            let _ = KillTimer(Some(st.tray_hwnd), HOUSEKEEPING_TIMER_ID);
         }
         if let Some(mut tray) = st.tray.take() {
             tray.remove();

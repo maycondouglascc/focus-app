@@ -9,6 +9,7 @@ fn main() {
             "dwrite.dll",
             "UIAutomationCore.dll",
             "dwmapi.dll",
+            "dbghelp.dll",
         ] {
             println!("cargo:rustc-link-arg-bin=focus=/DELAYLOAD:{dll}");
         }

@@ -93,6 +93,11 @@ fn backup_path_for(path: &Path) -> PathBuf {
 static LOGGER: OnceLock<Mutex<LogFile>> = OnceLock::new();
 
 pub fn default_log_dir() -> PathBuf {
+    if let Some(custom) = std::env::var_os("FOCUS_LOG_DIR") {
+        if !custom.is_empty() {
+            return PathBuf::from(custom);
+        }
+    }
     let base = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);

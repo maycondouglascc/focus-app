@@ -42,7 +42,9 @@ use crate::db::{Db, Settings};
 use crate::db_thread::{DbHandle, QueuedSink};
 use crate::locale::SystemLocale;
 use crate::log::{self, Category};
-use crate::presence::{self, Change, Presence, DISPLAY_OFF, IDLE, LOCKED, SLEEP, USER_PAUSED};
+use crate::presence::{
+    self, Change, Presence, DB_ERROR, DISPLAY_OFF, IDLE, LOCKED, SLEEP, USER_PAUSED,
+};
 use crate::qos;
 use crate::recorder::{self, Exclusions};
 use crate::url::UrlWorker;
@@ -80,6 +82,7 @@ const WM_APP_MONITOR_STOP: u32 = WM_APP + 20;
 const WM_APP_END_SESSION: u32 = WM_APP + 21;
 const WM_APP_RELOAD_SETTINGS: u32 = WM_APP + 22;
 const WM_APP_URL_READY: u32 = WM_APP + 23;
+const WM_APP_DB_ERROR: u32 = WM_APP + 24;
 
 static MONITOR_HWND: AtomicIsize = AtomicIsize::new(0);
 static AWAY_NOTIFY_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -94,6 +97,21 @@ pub fn set_away_resume_notify(hwnd: isize, msg: u32) {
 pub fn take_away_resume_start() -> Option<i64> {
     let v = LAST_AWAY_START_MS.swap(0, Ordering::SeqCst);
     (v > 0).then_some(v)
+}
+
+pub fn set_db_error(errored: bool) {
+    let raw = MONITOR_HWND.load(Ordering::SeqCst);
+    if raw != 0 {
+        // SAFETY: `raw` is a live `FocusHiddenWindow` owned by the monitor thread.
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(raw as *mut _)),
+                WM_APP_DB_ERROR,
+                WPARAM(usize::from(errored)),
+                LPARAM(0),
+            );
+        }
+    }
 }
 
 pub fn request_reload() {
@@ -599,6 +617,11 @@ unsafe extern "system" fn wnd_proc(
         }
         m if m == WM_APP_URL_READY => {
             apply_pending_urls();
+            return LRESULT(0);
+        }
+        m if m == WM_APP_DB_ERROR => {
+            let errored = wparam.0 != 0;
+            set_reason(DB_ERROR, errored, now_ms());
             return LRESULT(0);
         }
         m if m == WM_APP_MONITOR_STOP => {

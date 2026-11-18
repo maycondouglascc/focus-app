@@ -300,3 +300,9 @@ pub const SETTINGS_STARTUP_LABEL: &str = "Start with Windows";
 pub const SETTINGS_STARTUP_HINT: &str =
     "Launch Focus automatically in the system tray when you sign in";
 pub const SETTINGS_STARTUP_DISABLED_TM: &str = "Disabled in Windows Task Manager Startup apps";
+
+pub const BALLOON_DB_ERROR_TITLE: &str = "Focus couldn't save data";
+pub const BALLOON_DB_ERROR_BODY: &str = "Activity recording is paused due to a database write error. Retrying automatically every 5 minutes.";
+pub const BALLOON_QUICK_CHECK_TITLE: &str = "Database integrity warning";
+pub const BALLOON_QUICK_CHECK_BODY: &str =
+    "Focus detected a database check issue. Check logs and backups under AppData\\Local\\Focus.";

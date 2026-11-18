@@ -7,6 +7,7 @@ pub const LOCKED: u8 = 2;
 pub const SLEEP: u8 = 4;
 pub const DISPLAY_OFF: u8 = 8;
 pub const USER_PAUSED: u8 = 16;
+pub const DB_ERROR: u8 = 32;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Change {
