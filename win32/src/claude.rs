@@ -30,6 +30,7 @@ use windows::Win32::System::Threading::{
 };
 
 use crate::db::{Activity, ClaudeSession, Db};
+use crate::log::{self, Category};
 
 const GAP_MS: i64 = 10 * 60_000;
 /// A run's end gets this much after its last message: reading time after a reply.
@@ -431,7 +432,7 @@ pub fn scan(db: &Db, root: &Path, now_ms: i64) -> Result<bool, ScanError> {
             // One unreadable file must not stop the rest of the scan.
             match scan_file(db, &path, meta.len(), mtime_ms(&meta), cutoff) {
                 Ok(c) => changed |= c,
-                Err(e) => eprintln!("focus: claude log skipped: {e}"),
+                Err(_) => log::event(Category::Claude, "log_skipped"),
             }
         }
     }
@@ -517,7 +518,7 @@ fn run(db_path: PathBuf) {
     let db = match Db::open(&db_path) {
         Ok(db) => db,
         Err(e) => {
-            eprintln!("focus: claude reader cannot open the database: {e}");
+            log::db_err(Category::Claude, "open_db", &e);
             return;
         }
     };
@@ -534,7 +535,10 @@ fn run(db_path: PathBuf) {
         loop {
             watch.rearm();
             if let Err(e) = scan(&db, &root, now_ms()) {
-                eprintln!("focus: claude scan failed: {e}");
+                match e {
+                    ScanError::Db(ref de) => log::db_err(Category::Claude, "scan_db", de),
+                    ScanError::Io(_) => log::event(Category::Claude, "scan_io_failed"),
+                }
             }
             if !root.is_dir() || !enabled(&db) {
                 break;
