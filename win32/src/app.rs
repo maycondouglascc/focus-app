@@ -7,18 +7,20 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicIsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HINSTANCE, HLOCAL, HWND, LPARAM,
-    LRESULT, WPARAM,
+    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, FILETIME, HANDLE, HINSTANCE, HLOCAL, HWND,
+    LPARAM, LRESULT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::UpdateWindow;
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, OpenProcessToken};
+use windows::Win32::System::Threading::{
+    CreateMutexW, GetCurrentProcess, GetProcessTimes, OpenProcessToken,
+};
 use windows::Win32::UI::Shell::NIN_SELECT;
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
@@ -968,14 +970,45 @@ unsafe fn create_tray_window(instance_tag: Option<&str>) -> Option<HWND> {
     }
 }
 
+fn process_elapsed_ms() -> Option<f64> {
+    const WINDOWS_TO_UNIX_100NS: u64 = 116_444_736_000_000_000;
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: `GetCurrentProcess()` is valid for this process and all pointers refer to stack locals.
+    unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+        .ok()?;
+    }
+    let creation_100ns =
+        (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
+    let unix_100ns = u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_nanos()
+            / 100,
+    )
+    .ok()?;
+    let now_100ns = unix_100ns.saturating_add(WINDOWS_TO_UNIX_100NS);
+    Some(now_100ns.saturating_sub(creation_100ns) as f64 / 10_000.0)
+}
+
 pub fn run_app(
     db_path: PathBuf,
     open_window: bool,
     instance_tag: Option<&str>,
     _mutex: InstanceMutex,
 ) -> i32 {
+    let entry_ms = process_elapsed_ms();
     log::init_default();
-    startup::register_restart();
 
     // SAFETY: creates `FocusTrayWindow`, registers inter-instance messages, and runs the UI message pump.
     let (tray_hwnd, msg_show, msg_quit) = unsafe {
@@ -989,12 +1022,23 @@ pub fn run_app(
             RegisterWindowMessageW(MSG_QUIT_NAME),
         )
     };
+    let win_ms = process_elapsed_ms();
     window::set_close_notify(tray_hwnd, WM_APP_WINDOW_CLOSED);
     TRAY_NOTIFY_HWND.store(tray_hwnd.0 as isize, Ordering::SeqCst);
     monitor::set_away_resume_notify(tray_hwnd.0 as isize, WM_APP_AWAY_RESUME);
 
     // Startup order: single-instance mutex -> tray icon -> DB writer -> monitor.
     let tray = Tray::add(tray_hwnd, WM_APP_TRAY_CALLBACK, strings::TRAY_TIP_IDLE);
+    if let Some(tray_ms) = process_elapsed_ms() {
+        log::metric_ms(Category::Perf, "startup", "tray_ms", tray_ms);
+    }
+    if let Some(entry_ms) = entry_ms {
+        log::metric_ms(Category::Perf, "startup", "entry_ms", entry_ms);
+    }
+    if let Some(win_ms) = win_ms {
+        log::metric_ms(Category::Perf, "startup", "win_ms", win_ms);
+    }
+    startup::register_restart();
 
     let mut db_thread = match DbThread::spawn(db_path.clone()) {
         Ok(t) => t,

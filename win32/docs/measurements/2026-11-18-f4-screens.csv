@@ -1,0 +1,9 @@
+source,screen,first_frame_ms,paints,private_mb,working_set_mb
+demo-fresh,welcome,152.1,1,15.07,40.37
+demo,calendar,179.1,2,31.44,55.93
+demo,activity,153.0,1,36.36,54.66
+demo,reports,156.3,1,29.59,50.06
+demo,projects,201.7,1,22.75,47.98
+demo,project,196.4,1,31.96,52.28
+demo,settings,204.0,2,30.37,56.19
+db,welcome,169.3,1,13.54,42.33

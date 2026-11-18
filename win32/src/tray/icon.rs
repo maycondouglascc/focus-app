@@ -4,15 +4,9 @@
 //! distance fields so tray startup never loads Direct2D, Direct3D, or external
 //! image crates.
 
-use std::mem::size_of;
-use std::ptr;
-
-use windows::core::BOOL;
-use windows::Win32::Graphics::Gdi::{
-    CreateBitmap, CreateDIBSection, DeleteObject, BITMAPV5HEADER, BI_BITFIELDS, DIB_RGB_COLORS,
-    HBITMAP,
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateIconFromResourceEx, DestroyIcon, HICON, IMAGE_FLAGS,
 };
-use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, DestroyIcon, HICON, ICONINFO};
 
 /// Visual state reflected in the taskbar notification area icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -306,85 +300,27 @@ pub fn render_app_icon_rgba(size: u32) -> Vec<u8> {
     out
 }
 
-/// Creates a Win32 `HICON` from a square RGBA pixel buffer.
+/// Creates a Win32 `HICON` from a square RGBA pixel buffer via `user32` directly
+/// (avoiding `CreateDIBSection` / `gdi32` / `mscms` initialization on tray startup).
 /// Caller owns the returned handle and must destroy it with `DestroyIcon`.
 pub fn hicon_from_rgba(size: u32, rgba: &[u8]) -> Option<HICON> {
     if size == 0 || rgba.len() != (size * size * 4) as usize {
         return None;
     }
 
-    let hdr = BITMAPV5HEADER {
-        bV5Size: size_of::<BITMAPV5HEADER>() as u32,
-        bV5Width: size as i32,
-        bV5Height: -(size as i32), // top-down DIB
-        bV5Planes: 1,
-        bV5BitCount: 32,
-        bV5Compression: BI_BITFIELDS,
-        bV5RedMask: 0x00FF_0000,
-        bV5GreenMask: 0x0000_FF00,
-        bV5BlueMask: 0x0000_00FF,
-        bV5AlphaMask: 0xFF00_0000,
-        ..Default::default()
-    };
-
-    let mut bits_ptr: *mut std::ffi::c_void = ptr::null_mut();
-    // SAFETY: `hdr` describes a top-down 32-bit BGRA DIB section of `size x size`; Win32 fills `bits_ptr`.
-    let color_bmp: HBITMAP = unsafe {
-        CreateDIBSection(
-            None,
-            &hdr as *const BITMAPV5HEADER as *const _,
-            DIB_RGB_COLORS,
-            &mut bits_ptr,
-            None,
-            0,
+    let dib = encode_ico_dib_frame(size, rgba);
+    // SAFETY: `dib` is a complete 32-bit BGRA `BITMAPINFOHEADER` + XOR/AND icon image for `size x size`.
+    unsafe {
+        CreateIconFromResourceEx(
+            &dib,
+            true,
+            0x0003_0000,
+            size as i32,
+            size as i32,
+            IMAGE_FLAGS(0),
         )
-        .ok()?
-    };
-    if color_bmp.is_invalid() || bits_ptr.is_null() {
-        return None;
+        .ok()
     }
-
-    // SAFETY: `CreateDIBSection` allocated `size * size * 4` writable bytes at `bits_ptr`.
-    unsafe {
-        let dst = std::slice::from_raw_parts_mut(bits_ptr as *mut u8, (size * size * 4) as usize);
-        for (src_px, dst_px) in rgba
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .zip(dst.as_chunks_mut::<4>().0.iter_mut())
-        {
-            dst_px[0] = src_px[2]; // B
-            dst_px[1] = src_px[1]; // G
-            dst_px[2] = src_px[0]; // R
-            dst_px[3] = src_px[3]; // A
-        }
-    }
-
-    // SAFETY: creates a 1-bpp mask bitmap; GDI uses the alpha channel from `color_bmp` on XP+.
-    let mask_bmp: HBITMAP = unsafe { CreateBitmap(size as i32, size as i32, 1, 1, None) };
-    if mask_bmp.is_invalid() {
-        // SAFETY: `color_bmp` was created above and not yet released.
-        unsafe {
-            let _ = DeleteObject(color_bmp.into());
-        }
-        return None;
-    }
-
-    let info = ICONINFO {
-        fIcon: BOOL(1),
-        xHotspot: 0,
-        yHotspot: 0,
-        hbmMask: mask_bmp,
-        hbmColor: color_bmp,
-    };
-    // SAFETY: `info` references valid `color_bmp` and `mask_bmp`; `CreateIconIndirect` copies the bitmaps.
-    let icon = unsafe { CreateIconIndirect(&info).ok() };
-    // SAFETY: clean up temporary GDI bitmaps immediately after `CreateIconIndirect`.
-    unsafe {
-        let _ = DeleteObject(color_bmp.into());
-        let _ = DeleteObject(mask_bmp.into());
-    }
-    icon
 }
 
 pub fn create_tray_hicon(size: u32, state: IconState, theme: TaskbarTheme) -> Option<HICON> {
@@ -394,7 +330,7 @@ pub fn create_tray_hicon(size: u32, state: IconState, theme: TaskbarTheme) -> Op
 
 pub fn destroy_hicon(icon: HICON) {
     if !icon.is_invalid() {
-        // SAFETY: `icon` is an owned Win32 icon handle created by `CreateIconIndirect`.
+        // SAFETY: `icon` is an owned Win32 icon handle created by `CreateIconFromResourceEx`.
         unsafe {
             let _ = DestroyIcon(icon);
         }
@@ -439,7 +375,6 @@ pub fn encode_ico(sizes: &[u32]) -> Vec<u8> {
     buf
 }
 
-#[allow(dead_code)] // used by `encode_ico`
 fn encode_ico_dib_frame(size: u32, rgba: &[u8]) -> Vec<u8> {
     let and_stride = size.div_ceil(32) * 4;
     let color_bytes = size * size * 4;

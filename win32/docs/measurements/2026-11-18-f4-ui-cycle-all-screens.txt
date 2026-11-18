@@ -1,0 +1,3 @@
+baseline before any window 6.75 MB, after warm-up cycle 11.84 MB
+cycles 50 (all-screens) in 120.8s | first open 2276.2 ms | private MB start 11.84 end 11.32 growth -0.53 | window left open: false
+OK

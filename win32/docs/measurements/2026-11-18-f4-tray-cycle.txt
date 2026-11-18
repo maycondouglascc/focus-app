@@ -1,0 +1,2 @@
+tray_cycles 50 in 9.5s | private MB start 12.37 end 10.25 growth -2.12 | handles 411->411 (+0) gdi 48->48 user 51->51
+OK

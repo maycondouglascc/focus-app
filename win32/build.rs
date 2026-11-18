@@ -10,6 +10,15 @@ fn main() {
             "UIAutomationCore.dll",
             "dwmapi.dll",
             "dbghelp.dll",
+            "shell32.dll",
+            "gdi32.dll",
+            "ole32.dll",
+            "oleaut32.dll",
+            "combase.dll",
+            "comctl32.dll",
+            "wtsapi32.dll",
+            "version.dll",
+            "psapi.dll",
         ] {
             println!("cargo:rustc-link-arg-bin=focus=/DELAYLOAD:{dll}");
         }
