@@ -15,6 +15,7 @@ mod monitor;
 mod presence;
 mod qos;
 mod recorder;
+mod startup;
 mod stats;
 mod time;
 mod tray;

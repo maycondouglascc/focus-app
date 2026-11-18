@@ -6,6 +6,7 @@ use taffy::prelude::*;
 
 use crate::db::{FirstDayPref, Settings, SettingsPatch, SharedStore, TimeFormatPref};
 use crate::format::{self, ALL_CURRENCIES};
+use crate::startup::{self, StartupStatus};
 use crate::ui::screen::{BuiltScreen, Screen, ScreenEnv};
 use crate::ui::strings;
 use crate::ui::text::{Align, Weight, Wrap};
@@ -40,6 +41,7 @@ pub struct SettingsScreen {
     id_claude: Option<WidgetId>,
     id_busy: Option<WidgetId>,
     id_mini_timer: Option<WidgetId>,
+    id_startup: Option<WidgetId>,
     id_csv_standard: Option<WidgetId>,
     id_delete_prompt: Option<WidgetId>,
     id_delete_keep: Option<WidgetId>,
@@ -74,6 +76,7 @@ impl SettingsScreen {
             id_claude: None,
             id_busy: None,
             id_mini_timer: None,
+            id_startup: None,
             id_csv_standard: None,
             id_delete_prompt: None,
             id_delete_keep: None,
@@ -553,6 +556,29 @@ impl SettingsScreen {
             &mut self.id_mini_timer,
             env,
         );
+        build_hairline(tree, track_card, p);
+        let st_status = if self.store.borrow().is_demo() {
+            StartupStatus::Off
+        } else {
+            startup::status()
+        };
+        let (st_checked, st_disabled, st_hint) = match st_status {
+            StartupStatus::Enabled => (true, false, strings::SETTINGS_STARTUP_HINT),
+            StartupStatus::Off => (false, false, strings::SETTINGS_STARTUP_HINT),
+            StartupStatus::DisabledInTaskManager => {
+                (false, true, strings::SETTINGS_STARTUP_DISABLED_TM)
+            }
+        };
+        Self::build_toggle_row(
+            tree,
+            track_card,
+            strings::SETTINGS_STARTUP_LABEL,
+            st_hint,
+            st_checked,
+            st_disabled,
+            &mut self.id_startup,
+            env,
+        );
 
         // 4. Data & exports
         build_section_title(tree, col, strings::SETTINGS_SEC_DATA, p);
@@ -647,6 +673,16 @@ impl SettingsScreen {
                 mini_timer_enabled: Some(!s.mini_timer_enabled),
                 ..Default::default()
             });
+            return true;
+        }
+        if Some(id) == self.id_startup {
+            if !self.store.borrow().is_demo() {
+                let enable = matches!(startup::status(), StartupStatus::Off);
+                match startup::set_enabled(enable) {
+                    Ok(()) => self.error = None,
+                    Err(e) => self.error = Some(e),
+                }
+            }
             return true;
         }
         if Some(id) == self.id_csv_standard {
@@ -979,6 +1015,7 @@ mod tests {
         let _first_day_id = focus.tab(false).unwrap();
         let _tf_id = focus.tab(false).unwrap();
         let mini_timer_id = focus.tab(false).unwrap();
+        let _startup_id = focus.tab(false).unwrap();
         let csv_id = focus.tab(false).unwrap();
         let del_prompt_id = focus.tab(false).unwrap();
 

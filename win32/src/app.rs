@@ -35,6 +35,7 @@ use crate::locale::SystemLocale;
 use crate::log::{self, Category};
 use crate::monitor::{self, MonitorHandle};
 use crate::qos;
+use crate::startup;
 use crate::tray::flyout::{self, FlyoutMode};
 use crate::tray::icon::IconState;
 use crate::tray::{menu, mini_timer, Tray};
@@ -890,6 +891,7 @@ pub fn run_app(
     _mutex: InstanceMutex,
 ) -> i32 {
     log::init_default();
+    startup::register_restart();
 
     // SAFETY: creates `FocusTrayWindow`, registers inter-instance messages, and runs the UI message pump.
     let (tray_hwnd, msg_show, msg_quit) = unsafe {

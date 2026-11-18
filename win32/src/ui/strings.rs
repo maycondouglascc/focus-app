@@ -295,3 +295,8 @@ pub const BALLOON_AWAY_TIMER_BODY: &str =
 
 pub const SETTINGS_MINI_TIMER: &str = "Floating mini timer";
 pub const SETTINGS_MINI_TIMER_SUB: &str = "Always-on-top compact bar showing the active timer";
+
+pub const SETTINGS_STARTUP_LABEL: &str = "Start with Windows";
+pub const SETTINGS_STARTUP_HINT: &str =
+    "Launch Focus automatically in the system tray when you sign in";
+pub const SETTINGS_STARTUP_DISABLED_TM: &str = "Disabled in Windows Task Manager Startup apps";
