@@ -614,6 +614,14 @@ impl Db {
         Ok(())
     }
 
+    pub fn set_activity_url(&self, id: i64, url: &str, context: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE activity SET url = ?, context = ? WHERE id = ?",
+            params![url, context, id],
+        )?;
+        Ok(())
+    }
+
     // ── Projects ─────────────────────────────────────────────────────────
 
     pub fn list_projects(&self) -> rusqlite::Result<Vec<Project>> {
@@ -1381,7 +1389,13 @@ impl Store for DbStore {
     }
 
     fn save_settings(&mut self, patch: SettingsPatch) -> Result<Settings, String> {
-        self.db.save_settings(&patch, &self.locale).map_err(db_err)
+        let saved = self
+            .db
+            .save_settings(&patch, &self.locale)
+            .map_err(db_err)?;
+        crate::monitor::request_reload();
+        crate::claude::request_reload();
+        Ok(saved)
     }
 
     fn monitor_status(&self) -> MonitorStatus {

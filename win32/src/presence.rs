@@ -1,11 +1,12 @@
 //! Pure rules for when the user is away. No Windows calls here, so every
-//! rule is unit-tested; main.rs feeds it the real events.
+//! rule is unit-tested; monitor.rs feeds it the real events.
 
 /// Reasons recording is paused. Several can hold at once.
 pub const IDLE: u8 = 1;
 pub const LOCKED: u8 = 2;
 pub const SLEEP: u8 = 4;
 pub const DISPLAY_OFF: u8 = 8;
+pub const USER_PAUSED: u8 = 16;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Change {
@@ -86,6 +87,17 @@ mod tests {
         assert_eq!(p.set(SLEEP, true), Change::None);
         assert_eq!(p.set(DISPLAY_OFF, false), Change::None);
         assert!(p.has(SLEEP));
+    }
+
+    #[test]
+    fn user_paused_combines_with_away_reasons() {
+        let mut p = Presence::default();
+        assert_eq!(p.set(USER_PAUSED, true), Change::Paused);
+        assert_eq!(p.set(IDLE, true), Change::None);
+        assert_eq!(p.set(IDLE, false), Change::None);
+        assert!(p.paused());
+        assert_eq!(p.set(USER_PAUSED, false), Change::Resumed);
+        assert!(!p.paused());
     }
 
     #[test]

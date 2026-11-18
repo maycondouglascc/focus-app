@@ -1,11 +1,12 @@
 //! Foreground window monitor running on its own background thread.
 //!
 //! Uses out-of-context `SetWinEventHook` + a hidden top-level window (`FocusHiddenWindow`)
-//! for power, session, clock, and shutdown broadcasts so modal UI loops never drop
-//! thread timers or events.
+//! for power, session, clock, settings reload, URL results, and shutdown broadcasts so
+//! modal UI loops never drop thread timers or events.
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -36,11 +37,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_TIMER, WNDCLASSW,
 };
 
-use crate::appinfo;
-use crate::db::Db;
+use crate::appinfo::{self, WindowTarget};
+use crate::db::{Db, Settings};
+use crate::locale::SystemLocale;
 use crate::log::{self, Category};
-use crate::presence::{self, Change, Presence, DISPLAY_OFF, IDLE, LOCKED, SLEEP};
-use crate::recorder;
+use crate::presence::{self, Change, Presence, DISPLAY_OFF, IDLE, LOCKED, SLEEP, USER_PAUSED};
+use crate::recorder::{self, Exclusions};
+use crate::url::UrlWorker;
 
 const DEBOUNCE_MS: u32 = 1500;
 /// Flush interval for the current run's end; coalescable so the CPU can sleep.
@@ -53,7 +56,6 @@ const IDLE_RETURN_CHECK_MS: u32 = 3_000;
 const IDLE_RETURN_TOLERANCE_MS: u32 = 1_000;
 /// A wall-clock jump beyond the unbiased clock bigger than this means we slept.
 const SLEEP_GAP_MS: i64 = 30_000;
-const DEFAULT_IDLE_MINUTES: f64 = 3.0;
 
 // Window messages and codes used by the hidden window (numeric to avoid feature sprawl).
 const WM_QUERYENDSESSION: u32 = 0x0011;
@@ -74,6 +76,25 @@ const GUID_CONSOLE_DISPLAY_STATE: GUID = GUID::from_u128(0x6fe69556_704a_47a0_8f
 
 const WM_APP_MONITOR_STOP: u32 = WM_APP + 20;
 const WM_APP_END_SESSION: u32 = WM_APP + 21;
+const WM_APP_RELOAD_SETTINGS: u32 = WM_APP + 22;
+const WM_APP_URL_READY: u32 = WM_APP + 23;
+
+static MONITOR_HWND: AtomicIsize = AtomicIsize::new(0);
+
+pub fn request_reload() {
+    let raw = MONITOR_HWND.load(Ordering::SeqCst);
+    if raw != 0 {
+        // SAFETY: `raw` is a live `FocusHiddenWindow` owned by the monitor thread.
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(raw as *mut _)),
+                WM_APP_RELOAD_SETTINGS,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+    }
+}
 
 pub struct MonitorHandle {
     hwnd_raw: isize,
@@ -96,7 +117,6 @@ impl MonitorHandle {
         self.hwnd_raw = 0;
     }
 
-    #[allow(dead_code)]
     pub fn end_session_and_wait(&self, timeout: Duration) {
         if self.hwnd_raw != 0 {
             let hwnd = HWND(self.hwnd_raw as *mut _);
@@ -120,12 +140,18 @@ impl Drop for MonitorHandle {
 
 struct State {
     db: Db,
+    locale: SystemLocale,
     recorder: recorder::Recorder,
     presence: Presence,
     idle_threshold_ms: u64,
+    keep_active_when_busy: bool,
+    browser_tabs: bool,
     /// Clocks at the previous flush, to notice sleeps that sent no event.
     last_wall: i64,
     last_unbiased: i64,
+    /// Last foreground HWND passed to `record_window` for the 60s hook watchdog.
+    last_fg_hwnd: isize,
+    url_worker: UrlWorker,
     end_session_sync: Arc<(Mutex<bool>, Condvar)>,
     end_session_flushed: bool,
 }
@@ -186,9 +212,9 @@ fn user_is_busy() -> bool {
     }
 }
 
-fn info_for(hwnd: HWND) -> Option<recorder::Info> {
+fn inspect_hwnd(hwnd: HWND) -> WindowTarget {
     // SAFETY: `GetCurrentProcessId` is a plain process-ID read.
-    appinfo::info_for(hwnd, unsafe { GetCurrentProcessId() })
+    appinfo::inspect(hwnd, unsafe { GetCurrentProcessId() })
 }
 
 fn log_err(op: &'static str, e: rusqlite::Error) {
@@ -200,30 +226,113 @@ fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
     STATE.with(|s| s.borrow_mut().as_mut().map(f))
 }
 
+fn record_window(st: &mut State, hwnd: HWND, at: i64) {
+    st.last_fg_hwnd = hwnd.0 as isize;
+    if st.presence.paused() {
+        return;
+    }
+    match inspect_hwnd(hwnd) {
+        WindowTarget::OwnApp => {
+            st.url_worker.invalidate();
+            if let Err(e) = st.recorder.close(&st.db, at) {
+                log_err("close_own_app", e);
+            }
+        }
+        WindowTarget::Unavailable => {}
+        WindowTarget::Tracked(info) => {
+            let is_browser = recorder::is_supported_browser_exe(&info.exe);
+            let is_private = recorder::is_private_browser_title(&info.exe, &info.detail);
+            let pid = info.pid;
+            match st.recorder.on_focus(&st.db, info, at) {
+                Ok(Some(run_id)) => {
+                    if st.browser_tabs && is_browser && !is_private {
+                        st.url_worker.submit(run_id, hwnd.0 as isize, pid);
+                    } else {
+                        st.url_worker.invalidate();
+                    }
+                }
+                Ok(None) => {
+                    // Excluded windows close the active run; ensure no stale URL lands later.
+                    if is_private || !is_browser {
+                        st.url_worker.invalidate();
+                    }
+                }
+                Err(e) => log_err("record", e),
+            }
+        }
+    }
+}
+
 /// Opens a run for whatever is in the foreground right now.
 fn resync(st: &mut State, at: i64) {
     if st.presence.paused() {
         return;
     }
     // SAFETY: `GetForegroundWindow` returns the current foreground HWND or null.
-    if let Some(info) = info_for(unsafe { GetForegroundWindow() }) {
-        if let Err(e) = st.recorder.on_focus(&st.db, info, at) {
-            log_err("resume", e);
-        }
-    }
+    let fg = unsafe { GetForegroundWindow() };
+    record_window(st, fg, at);
 }
 
-/// Adds or clears a reason for being away. `at` is when it really began or
-/// ended (idle starts in the past, at the last input).
-fn set_reason(reason: u8, on: bool, at: i64) {
-    with_state(|st| match st.presence.set(reason, on) {
+fn apply_reason(st: &mut State, reason: u8, on: bool, at: i64) {
+    match st.presence.set(reason, on) {
         Change::Paused => {
+            st.url_worker.invalidate();
             if let Err(e) = st.recorder.close(&st.db, at) {
                 log_err("pause", e);
             }
         }
         Change::Resumed => resync(st, at),
         Change::None => {}
+    }
+}
+
+/// Adds or clears a reason for being away. `at` is when it really began or
+/// ended (idle starts in the past, at the last input).
+fn set_reason(reason: u8, on: bool, at: i64) {
+    with_state(|st| apply_reason(st, reason, on, at));
+}
+
+fn apply_settings(st: &mut State, s: Settings, at: i64) {
+    st.idle_threshold_ms = (s.idle_minutes as u64) * 60_000;
+    st.keep_active_when_busy = s.keep_active_when_busy;
+    st.browser_tabs = s.browser_tabs;
+    if !st.browser_tabs {
+        st.url_worker.invalidate();
+    }
+    let next_excl = Exclusions {
+        apps: s.excluded_apps,
+        title_keywords: s.excluded_title_patterns,
+    };
+    let excl_changed = st.recorder.exclusions() != &next_excl;
+    st.recorder.set_exclusions(next_excl);
+    apply_reason(st, USER_PAUSED, !s.monitor_enabled, at);
+    if st.idle_threshold_ms == 0 && st.presence.has(IDLE) {
+        apply_reason(st, IDLE, false, at);
+        arm_idle_timer(false);
+    }
+    if excl_changed && !st.presence.paused() {
+        resync(st, at);
+    }
+}
+
+fn reload_settings() {
+    let now = now_ms();
+    with_state(|st| {
+        let s = st
+            .db
+            .load_settings(&st.locale)
+            .unwrap_or_else(|_| Settings::defaults_for(&st.locale));
+        apply_settings(st, s, now);
+    });
+}
+
+fn apply_pending_urls() {
+    with_state(|st| {
+        for res in st.url_worker.drain_results() {
+            if let Err(e) = st.db.set_activity_url(res.run_id, &res.url, &res.context) {
+                log_err("set_url", e);
+            }
+        }
     });
 }
 
@@ -261,18 +370,10 @@ unsafe extern "system" fn on_event(
 fn confirm_pending() {
     let hwnd = HWND(PENDING_HWND.with(|l| l.get()) as *mut _);
     let at = PENDING_AT.with(|t| t.get());
-    let Some(info) = info_for(hwnd) else { return };
-    with_state(|st| {
-        if st.presence.paused() {
-            return;
-        }
-        if let Err(e) = st.recorder.on_focus(&st.db, info, at) {
-            log_err("record", e);
-        }
-    });
+    with_state(|st| record_window(st, hwnd, at));
 }
 
-/// Every 60 s: persist the run's end, and notice sleeps that sent no event.
+/// Every 60 s: persist the run's end, notice silent sleeps, and run the hook watchdog.
 fn flush() {
     with_state(|st| {
         let (wall, unb) = (now_ms(), unbiased_ms());
@@ -282,8 +383,21 @@ fn flush() {
                 log_err("close_after_sleep", e);
             }
             resync(st, wall);
-        } else if let Err(e) = st.recorder.tick(&st.db, wall) {
-            log_err("flush", e);
+        } else {
+            if let Err(e) = st.recorder.tick(&st.db, wall) {
+                log_err("flush", e);
+            }
+            // Hook watchdog: catch missed focus events if foreground changed silently.
+            let pending = DEBOUNCE_TIMER.with(|t| t.get()) != 0;
+            if !st.presence.paused() && !pending {
+                // SAFETY: `GetForegroundWindow` returns the current foreground HWND or null.
+                let fg = unsafe { GetForegroundWindow() };
+                let fg_raw = fg.0 as isize;
+                if fg_raw != 0 && fg_raw != st.last_fg_hwnd {
+                    log::event(Category::Monitor, "watchdog_resync");
+                    record_window(st, fg, wall);
+                }
+            }
         }
         st.last_wall = wall;
         st.last_unbiased = unb;
@@ -308,24 +422,33 @@ fn arm_idle_timer(fast: bool) {
 }
 
 fn check_idle() {
-    let Some((threshold, is_idle)) = with_state(|st| (st.idle_threshold_ms, st.presence.has(IDLE)))
-    else {
+    let Some((threshold, is_idle, keep_busy)) = with_state(|st| {
+        (
+            st.idle_threshold_ms,
+            st.presence.has(IDLE),
+            st.keep_active_when_busy,
+        )
+    }) else {
         return;
     };
     if threshold == 0 {
+        if is_idle {
+            set_reason(IDLE, false, now_ms());
+            arm_idle_timer(false);
+        }
         return; // idle detection turned off in settings
     }
     let idle = idle_now_ms();
     let began = now_ms() - idle as i64; // the instant of the last input
     if !is_idle {
-        if idle >= threshold && !user_is_busy() {
+        let busy = keep_busy && user_is_busy();
+        if idle >= threshold && !busy {
             set_reason(IDLE, true, began);
             arm_idle_timer(true);
         }
     } else if idle < threshold {
         set_reason(IDLE, false, began);
         arm_idle_timer(false);
-        // Record the window that is already in the foreground when returning from idle.
         with_state(|st| resync(st, now_ms()));
     }
 }
@@ -423,6 +546,14 @@ unsafe extern "system" fn wnd_proc(
             on_end_session();
             return LRESULT(0);
         }
+        m if m == WM_APP_RELOAD_SETTINGS => {
+            reload_settings();
+            return LRESULT(0);
+        }
+        m if m == WM_APP_URL_READY => {
+            apply_pending_urls();
+            return LRESULT(0);
+        }
         m if m == WM_APP_MONITOR_STOP => {
             // SAFETY: runs on the monitor thread's message loop and breaks cleanly out of `GetMessageW`.
             unsafe { PostQuitMessage(0) };
@@ -466,16 +597,6 @@ unsafe fn create_hidden_window() -> Option<HWND> {
     }
 }
 
-fn idle_threshold_ms(db: &Db) -> u64 {
-    let minutes = db
-        .get_setting("idleMinutes")
-        .ok()
-        .flatten()
-        .and_then(|v| v.trim().parse::<f64>().ok())
-        .unwrap_or(DEFAULT_IDLE_MINUTES);
-    (minutes.max(0.0) * 60_000.0) as u64
-}
-
 fn run_thread(
     db_path: PathBuf,
     end_session_sync: Arc<(Mutex<bool>, Condvar)>,
@@ -492,24 +613,17 @@ fn run_thread(
             return;
         }
     };
-    let threshold = idle_threshold_ms(&db);
-    STATE.with(|s| {
-        *s.borrow_mut() = Some(State {
-            db,
-            recorder: recorder::Recorder::default(),
-            presence: Presence::default(),
-            idle_threshold_ms: threshold,
-            last_wall: now_ms(),
-            last_unbiased: unbiased_ms(),
-            end_session_sync,
-            end_session_flushed: false,
-        })
-    });
+    let locale = SystemLocale::query();
+    let settings = db
+        .load_settings(&locale)
+        .unwrap_or_else(|_| Settings::defaults_for(&locale));
 
     // SAFETY: creates the monitor thread's hidden window, registers Win32 hooks/timers, and cleans them up before exit.
     unsafe {
         let mut power_notify: Option<HPOWERNOTIFY> = None;
         let hidden_hwnd = create_hidden_window();
+        let hwnd_raw = hidden_hwnd.map_or(0, |h| h.0 as isize);
+        MONITOR_HWND.store(hwnd_raw, Ordering::SeqCst);
         if let Some(hwnd) = hidden_hwnd {
             let _ = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
             power_notify = RegisterPowerSettingNotification(
@@ -521,6 +635,35 @@ fn run_thread(
         } else {
             log::event(Category::Monitor, "hidden_window_failed");
         }
+
+        let url_worker = UrlWorker::spawn(hwnd_raw, WM_APP_URL_READY);
+        let mut recorder = recorder::Recorder::default();
+        recorder.set_exclusions(Exclusions {
+            apps: settings.excluded_apps.clone(),
+            title_keywords: settings.excluded_title_patterns.clone(),
+        });
+        let mut presence = Presence::default();
+        if !settings.monitor_enabled {
+            let _ = presence.set(USER_PAUSED, true);
+        }
+
+        STATE.with(|s| {
+            *s.borrow_mut() = Some(State {
+                db,
+                locale,
+                recorder,
+                presence,
+                idle_threshold_ms: (settings.idle_minutes as u64) * 60_000,
+                keep_active_when_busy: settings.keep_active_when_busy,
+                browser_tabs: settings.browser_tabs,
+                last_wall: now_ms(),
+                last_unbiased: unbiased_ms(),
+                last_fg_hwnd: 0,
+                url_worker,
+                end_session_sync,
+                end_session_flushed: false,
+            })
+        });
 
         let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
         let hook_fg = SetWinEventHook(
@@ -554,7 +697,7 @@ fn run_thread(
         with_state(|st| resync(st, now_ms()));
         log::event(Category::Monitor, "started");
 
-        let _ = ready_tx.send(Ok(hidden_hwnd.map_or(0, |h| h.0 as isize)));
+        let _ = ready_tx.send(Ok(hwnd_raw));
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -579,6 +722,7 @@ fn run_thread(
             DispatchMessageW(&msg);
         }
 
+        MONITOR_HWND.store(0, Ordering::SeqCst);
         if !hook_fg.is_invalid() {
             let _ = UnhookWinEvent(hook_fg);
         }
@@ -602,11 +746,11 @@ fn run_thread(
         }
     }
 
-    // Quit: end the current run, optimize and checkpoint the WAL.
+    // Quit: stop URL thread, end the current run, optimize and checkpoint the WAL.
     STATE.with(|s| {
-        if let Some(st) = s.borrow_mut().take() {
-            let mut rec = st.recorder;
-            if let Err(e) = rec.close(&st.db, now_ms()) {
+        if let Some(mut st) = s.borrow_mut().take() {
+            st.url_worker.stop();
+            if let Err(e) = st.recorder.close(&st.db, now_ms()) {
                 log_err("close", e);
             }
             let _ = st.db.optimize();

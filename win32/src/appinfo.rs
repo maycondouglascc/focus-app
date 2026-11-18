@@ -237,36 +237,57 @@ fn title(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buf[..n.max(0) as usize])
 }
 
-/// Identity, name and title of the window, or None for our own process or
-/// one whose image cannot be queried (protected processes).
-pub fn info_for(hwnd: HWND, own_pid: u32) -> Option<Info> {
+pub enum WindowTarget {
+    Tracked(Info),
+    OwnApp,
+    Unavailable,
+}
+
+/// Identity, exe stem, name and title of the foreground window.
+pub fn inspect(hwnd: HWND, own_pid: u32) -> WindowTarget {
     let mut pid = 0u32;
+    // SAFETY: `GetWindowThreadProcessId` accepts any HWND and writes `pid`.
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-    if pid == 0 || pid == own_pid {
-        return None;
+    if pid == 0 {
+        return WindowTarget::Unavailable;
     }
-    let host_path = path_for_pid(pid)?;
-    if is_frame_host(&exe_stem(&host_path)) {
+    if pid == own_pid {
+        return WindowTarget::OwnApp;
+    }
+    let Some(host_path) = path_for_pid(pid) else {
+        return WindowTarget::Unavailable;
+    };
+    let host_stem = exe_stem(&host_path);
+    if is_frame_host(&host_stem) {
         let real = real_pid(hwnd, pid);
         if real == pid {
             // Suspended or minimized Store app: no CoreWindow to follow.
-            return Some(Info {
+            return WindowTarget::Tracked(Info {
                 key: "pkg:applicationframehost".into(),
                 app: "Windows app".into(),
+                exe: host_stem.to_ascii_lowercase(),
                 detail: title(hwnd),
+                pid,
             });
         }
-        let path = path_for_pid(real)?;
-        return Some(Info {
+        let Some(path) = path_for_pid(real) else {
+            return WindowTarget::Unavailable;
+        };
+        let stem = exe_stem(&path);
+        return WindowTarget::Tracked(Info {
             key: normalize_key(&path),
             app: display_name(&path),
+            exe: stem.to_ascii_lowercase(),
             detail: title(hwnd),
+            pid: real,
         });
     }
-    Some(Info {
+    WindowTarget::Tracked(Info {
         key: normalize_key(&host_path),
         app: display_name(&host_path),
+        exe: host_stem.to_ascii_lowercase(),
         detail: title(hwnd),
+        pid,
     })
 }
 

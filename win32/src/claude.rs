@@ -16,17 +16,19 @@ use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Storage::FileSystem::{
     FindCloseChangeNotification, FindFirstChangeNotificationW, FindNextChangeNotification,
     FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE,
     FILE_NOTIFY_CHANGE_SIZE,
 };
 use windows::Win32::System::Threading::{
-    GetCurrentThread, SetThreadPriority, WaitForSingleObject, THREAD_MODE_BACKGROUND_BEGIN,
+    CreateEventW, GetCurrentThread, SetEvent, SetThreadPriority, WaitForMultipleObjects,
+    WaitForSingleObject, THREAD_MODE_BACKGROUND_BEGIN,
 };
 
 use crate::db::{Activity, ClaudeSession, Db};
@@ -41,9 +43,21 @@ const THROTTLE: Duration = Duration::from_secs(15);
 /// Safety net in case a notification is missed (cached writes can be late).
 const SAFETY_NET_MS: u32 = 5 * 60_000;
 /// How often to look again when there is no log folder or the feature is off.
-const IDLE_POLL: Duration = Duration::from_secs(5 * 60);
+const IDLE_POLL_MS: u32 = 5 * 60_000;
 const CHUNK: usize = 1 << 20;
 const FILE_SHARE_ALL: u32 = 0x1 | 0x2 | 0x4; // read | write | delete
+
+static CLAUDE_WAKE_EVENT: AtomicIsize = AtomicIsize::new(0);
+
+pub fn request_reload() {
+    let raw = CLAUDE_WAKE_EVENT.load(Ordering::SeqCst);
+    if raw != 0 {
+        // SAFETY: `raw` is a live Win32 auto-reset event handle owned by the claude thread.
+        unsafe {
+            let _ = SetEvent(HANDLE(raw as *mut _));
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum ScanError {
@@ -488,9 +502,18 @@ impl Watch {
         Some(Watch(h))
     }
 
-    /// True if signalled, false on the safety-net timeout.
-    fn wait(&self) -> bool {
-        unsafe { WaitForSingleObject(self.0, SAFETY_NET_MS) == WAIT_OBJECT_0 }
+    /// True if directory change signalled, false on reload event or safety-net timeout.
+    fn wait_or_wake(&self, wake: Option<HANDLE>) -> bool {
+        // SAFETY: `self.0` and optional `wake` are valid waitable Win32 handles.
+        unsafe {
+            match wake {
+                Some(w) => {
+                    let handles = [self.0, w];
+                    WaitForMultipleObjects(&handles, false, SAFETY_NET_MS) == WAIT_OBJECT_0
+                }
+                None => WaitForSingleObject(self.0, SAFETY_NET_MS) == WAIT_OBJECT_0,
+            }
+        }
     }
 
     /// Re-arm before scanning, so writes during the scan signal again.
@@ -510,26 +533,49 @@ impl Drop for Watch {
     }
 }
 
+fn wait_idle(wake: Option<HANDLE>) {
+    match wake {
+        // SAFETY: `w` is an owned Win32 event handle created by this thread.
+        Some(w) => unsafe {
+            let _ = WaitForSingleObject(w, IDLE_POLL_MS);
+        },
+        None => std::thread::sleep(Duration::from_millis(IDLE_POLL_MS as u64)),
+    }
+}
+
 fn run(db_path: PathBuf) {
     // Low CPU, disk and memory priority for this thread's whole life.
+    // SAFETY: sets thread background priority on current thread.
     unsafe {
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+    }
+    // SAFETY: creates an unnamed auto-reset event for waking the loop on settings changes.
+    let wake = unsafe { CreateEventW(None, false, false, None).ok() };
+    if let Some(w) = wake {
+        CLAUDE_WAKE_EVENT.store(w.0 as isize, Ordering::SeqCst);
     }
     let db = match Db::open(&db_path) {
         Ok(db) => db,
         Err(e) => {
             log::db_err(Category::Claude, "open_db", &e);
+            CLAUDE_WAKE_EVENT.store(0, Ordering::SeqCst);
+            if let Some(w) = wake {
+                // SAFETY: `w` is an owned event handle.
+                unsafe {
+                    let _ = CloseHandle(w);
+                }
+            }
             return;
         }
     };
     loop {
         let root = claude_root();
         if !enabled(&db) || !root.is_dir() {
-            std::thread::sleep(IDLE_POLL);
+            wait_idle(wake);
             continue;
         }
         let Some(watch) = Watch::new(&root) else {
-            std::thread::sleep(IDLE_POLL);
+            wait_idle(wake);
             continue;
         };
         loop {
@@ -543,7 +589,7 @@ fn run(db_path: PathBuf) {
             if !root.is_dir() || !enabled(&db) {
                 break;
             }
-            if watch.wait() {
+            if watch.wait_or_wake(wake) {
                 std::thread::sleep(THROTTLE); // let a burst of writes settle
             }
         }

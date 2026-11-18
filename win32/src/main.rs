@@ -16,6 +16,7 @@ mod recorder;
 mod stats;
 mod time;
 mod ui;
+mod url;
 
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_UNKNOWN};
