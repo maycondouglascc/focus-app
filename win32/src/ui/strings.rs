@@ -251,3 +251,8 @@ pub const PROJ_REP_EDIT: &str = "Edit project";
 pub const PROJ_REP_WHAT_WORKED_ON: &str = "What you worked on";
 pub const PROJ_REP_FILES: &str = "Top windows & files";
 pub const PROJ_REP_NO_DESC: &str = "No description";
+
+// ── Tray & Shell Integration ─────────────────────────────────────────────
+pub const TRAY_TIP_IDLE: &str = "Focus";
+pub const TRAY_TIP_PAUSED: &str = "Focus — Recording paused";
+pub const TRAY_TIP_ERROR: &str = "Focus — Database write error";

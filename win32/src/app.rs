@@ -5,7 +5,7 @@
 //! alive after the main Direct2D window closes; only `Focus.Quit` exits the loop.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use windows::core::{w, PCWSTR, PWSTR};
@@ -18,19 +18,25 @@ use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, OpenProcessToken};
+use windows::Win32::UI::Shell::NIN_SELECT;
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    FindWindowW, GetMessageW, GetWindowThreadProcessId, PostMessageW, PostQuitMessage,
-    RegisterClassW, RegisterWindowMessageW, SendMessageTimeoutW, TranslateMessage, MSG,
-    SMTO_ABORTIFHUNG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WNDCLASSW,
+    FindWindowW, GetMessageW, GetWindowThreadProcessId, KillTimer, PostMessageW, PostQuitMessage,
+    RegisterClassW, RegisterWindowMessageW, SendMessageTimeoutW, SetCoalescableTimer,
+    TranslateMessage, MSG, SMTO_ABORTIFHUNG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP,
+    WM_LBUTTONDBLCLK, WM_TIMER, WNDCLASSW,
 };
 
 use crate::claude;
+use crate::db::Db;
 use crate::db_thread::{DbHandle, DbThread};
+use crate::locale::SystemLocale;
 use crate::log::{self, Category};
 use crate::monitor::{self, MonitorHandle};
 use crate::qos;
-use crate::ui::{self, render, selftest::BgStore, window};
+use crate::tray::icon::IconState;
+use crate::tray::Tray;
+use crate::ui::{self, render, selftest::BgStore, strings, window};
 
 pub const TRAY_WINDOW_CLASS: PCWSTR = w!("FocusTrayWindow");
 pub const MSG_SHOW_NAME: PCWSTR = w!("Focus.Show");
@@ -39,6 +45,13 @@ pub const MSG_QUIT_NAME: PCWSTR = w!("Focus.Quit");
 const WM_QUERYENDSESSION: u32 = 0x0011;
 const WM_ENDSESSION: u32 = 0x0016;
 const WM_APP_WINDOW_CLOSED: u32 = WM_APP + 30;
+const WM_APP_TRAY_CALLBACK: u32 = WM_APP + 31;
+/// Win32 `shellapi.h`: `NIN_KEYSELECT = NIN_SELECT | NINF_KEY (0x1)`.
+const NIN_KEYSELECT: u32 = NIN_SELECT + 1;
+
+const TRAY_TICK_TIMER_ID: usize = 1;
+const TRAY_TICK_MS: u32 = 60_000;
+const TRAY_TICK_TOLERANCE_MS: u32 = 10_000;
 
 const TEST_INSTANCE_ENV: &str = "FOCUS_TEST_INSTANCE";
 
@@ -373,11 +386,100 @@ struct AppState {
     db_handle: DbHandle,
     db_thread: Option<DbThread>,
     monitor: Option<MonitorHandle>,
+    tray: Option<Tray>,
+    tray_tick_armed: bool,
     quitting: bool,
 }
 
 thread_local! {
     static APP: RefCell<Option<AppState>> = const { RefCell::new(None) };
+}
+
+fn system_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn compute_tray_presentation(db_path: &Path, db_handle: &DbHandle) -> (IconState, String, bool) {
+    if db_handle.is_in_error() {
+        return (IconState::Error, strings::TRAY_TIP_ERROR.to_string(), false);
+    }
+    let Ok(db) = Db::open_readonly(db_path) else {
+        return (
+            IconState::Stopped,
+            strings::TRAY_TIP_IDLE.to_string(),
+            false,
+        );
+    };
+    let locale = SystemLocale::query();
+    let paused = db
+        .load_settings(&locale)
+        .map(|s| !s.monitor_enabled)
+        .unwrap_or(false);
+    if let Ok(Some(running)) = db.running_entry() {
+        let elapsed_ms = (system_now_ms() - running.start).max(0);
+        let mins = (elapsed_ms / 60_000) as u64;
+        let progress_steps = (mins % 60) as u8;
+        let elapsed_str = if mins >= 60 {
+            format!("{}h {:02}m", mins / 60, mins % 60)
+        } else {
+            format!("{}m", mins)
+        };
+        let label = running.description.trim();
+        let tip = if label.is_empty() {
+            format!("Focus — {elapsed_str}")
+        } else {
+            format!("Focus — {elapsed_str}: {label}")
+        };
+        return (IconState::Running { progress_steps }, tip, true);
+    }
+    if paused {
+        (
+            IconState::Paused,
+            strings::TRAY_TIP_PAUSED.to_string(),
+            false,
+        )
+    } else {
+        (
+            IconState::Stopped,
+            strings::TRAY_TIP_IDLE.to_string(),
+            false,
+        )
+    }
+}
+
+fn refresh_tray_state() {
+    APP.with(|a| {
+        let mut borrow = a.borrow_mut();
+        let Some(st) = borrow.as_mut() else {
+            return;
+        };
+        let (state, tip, timer_running) = compute_tray_presentation(&st.db_path, &st.db_handle);
+        if let Some(ref mut tray) = st.tray {
+            tray.set_state(state, &tip);
+        }
+        if timer_running && !st.tray_tick_armed {
+            // SAFETY: `st.tray_hwnd` is owned by this UI thread; coalescable timer runs only while timer ticks.
+            let id = unsafe {
+                SetCoalescableTimer(
+                    Some(st.tray_hwnd),
+                    TRAY_TICK_TIMER_ID,
+                    TRAY_TICK_MS,
+                    None,
+                    TRAY_TICK_TOLERANCE_MS,
+                )
+            };
+            st.tray_tick_armed = id != 0;
+        } else if !timer_running && st.tray_tick_armed {
+            // SAFETY: `st.tray_hwnd` is owned by this UI thread.
+            unsafe {
+                let _ = KillTimer(Some(st.tray_hwnd), TRAY_TICK_TIMER_ID);
+            }
+            st.tray_tick_armed = false;
+        }
+    });
 }
 
 fn open_main_window() {
@@ -456,10 +558,22 @@ unsafe extern "system" fn tray_wnd_proc(
             unsafe { PostQuitMessage(0) };
             return LRESULT(0);
         }
+        m if m == WM_APP_TRAY_CALLBACK => {
+            let event = (lparam.0 as usize & 0xFFFF) as u32;
+            if event == NIN_SELECT || event == NIN_KEYSELECT || event == WM_LBUTTONDBLCLK {
+                open_main_window();
+            }
+            return LRESULT(0);
+        }
+        WM_TIMER if wparam.0 == TRAY_TICK_TIMER_ID => {
+            refresh_tray_state();
+            return LRESULT(0);
+        }
         m if m == WM_APP_WINDOW_CLOSED => {
             let quitting = APP.with(|a| a.borrow().as_ref().is_some_and(|s| s.quitting));
             if !quitting {
                 qos::set_background_qos(true);
+                refresh_tray_state();
                 log::event(Category::App, "window_closed");
             }
             return LRESULT(0);
@@ -476,6 +590,15 @@ unsafe extern "system" fn tray_wnd_proc(
             return LRESULT(0);
         }
         _ => {}
+    }
+    let handled = APP.with(|a| {
+        a.borrow_mut()
+            .as_mut()
+            .and_then(|s| s.tray.as_mut())
+            .is_some_and(|tray| tray.handle_env_message(msg, lparam))
+    });
+    if handled {
+        return LRESULT(0);
     }
     // SAFETY: delegates unhandled messages to Win32 default window procedure.
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
@@ -533,11 +656,15 @@ pub fn run_app(
     };
     window::set_close_notify(tray_hwnd, WM_APP_WINDOW_CLOSED);
 
+    // Startup order: single-instance mutex -> tray icon -> DB writer -> monitor.
+    let tray = Tray::add(tray_hwnd, WM_APP_TRAY_CALLBACK, strings::TRAY_TIP_IDLE);
+
     let mut db_thread = match DbThread::spawn(db_path.clone()) {
         Ok(t) => t,
         Err(e) => {
             log::event(Category::App, "db_start_failed");
             eprintln!("focus: cannot open database at {}: {e}", db_path.display());
+            drop(tray);
             // SAFETY: `tray_hwnd` was created on this thread above.
             unsafe {
                 let _ = DestroyWindow(tray_hwnd);
@@ -553,6 +680,7 @@ pub fn run_app(
             log::event(Category::App, "monitor_start_failed");
             eprintln!("focus: cannot open database at {}: {e}", db_path.display());
             db_thread.stop();
+            drop(tray);
             // SAFETY: `tray_hwnd` was created on this thread above.
             unsafe {
                 let _ = DestroyWindow(tray_hwnd);
@@ -571,9 +699,12 @@ pub fn run_app(
             db_handle,
             db_thread: Some(db_thread),
             monitor: Some(monitor),
+            tray: Some(tray),
+            tray_tick_armed: false,
             quitting: false,
         });
     });
+    refresh_tray_state();
 
     if open_window {
         open_main_window();
@@ -596,6 +727,15 @@ pub fn run_app(
     let state = APP.with(|a| a.borrow_mut().take());
     if let Some(mut st) = state {
         st.quitting = true;
+        if st.tray_tick_armed {
+            // SAFETY: `st.tray_hwnd` is owned by this UI thread.
+            unsafe {
+                let _ = KillTimer(Some(st.tray_hwnd), TRAY_TICK_TIMER_ID);
+            }
+        }
+        if let Some(mut tray) = st.tray.take() {
+            tray.remove();
+        }
         if let Some(mut mon) = st.monitor.take() {
             mon.stop();
         }

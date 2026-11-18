@@ -17,6 +17,7 @@ mod qos;
 mod recorder;
 mod stats;
 mod time;
+mod tray;
 mod ui;
 mod url;
 
