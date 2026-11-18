@@ -34,6 +34,10 @@ gate, mas o teste de 8 h de "uso real" depende delas):
    backup diário e `quick_check` semanal (pedidos pelo plano e verificados no
    gate da F5) não existem.
 
+Decidido pelo usuário em 2026-11-18: as lacunas 1 e 2 ficam para a F5
+(entrada "Monitor segue as Configurações e grava a URL" no backlog do
+`gates.md`). A F4 trata só a 3 e a 4.
+
 Pontos a favor: `popup::open` já aceita `owner: None` (o flyout pode usar o
 mesmo host de popup sem a janela principal aberta), o manifesto já é
 embutido pelo `build.rs`, as DLLs gráficas já são delay-load, e o binário
@@ -53,7 +57,9 @@ oculta.**
 | Monitor | hooks WinEvent, janela oculta de energia e sessão (a `FocusHiddenWindow` atual), timers de debounce, flush e ociosidade | eventos de foco e título, energia, sessão, timers coalescíveis |
 | Banco | a única conexão de escrita | comandos por canal |
 | Claude Code | leitor de logs (já existe) | `ReadDirectoryChangesW` |
-| URL (UIA) | thread COM MTA da leitura da barra de endereço | pedido do monitor quando o título de um navegador muda |
+
+A thread de URL (UIA) prevista no plano entra na F5, junto com a leitura da
+barra de endereço.
 
 Por que o monitor sai da thread principal: laços modais (mover e
 redimensionar a janela, `TrackPopupMenu`, `IFileSaveDialog`) descartam
@@ -105,7 +111,7 @@ pausado por ociosidade":
 |---|---|---|
 | Parado | sem timer manual rodando | ícone base |
 | Rodando | timer rodando e usuário presente | ícone base + anel que completa a cada hora, redesenhado no máximo 1×/min |
-| Pausado | gravação pausada (ociosidade, bloqueio, monitor desligado nas Configurações) | ícone base esmaecido + marca de pausa |
+| Pausado | gravação pausada (ociosidade, bloqueio, suspensão; na F5 também o monitor desligado nas Configurações) | ícone base esmaecido + marca de pausa |
 | Erro | escrita no banco falhando (disco cheio, E/S) | marca de alerta; tooltip diz o erro |
 
 Variante clara ou escura conforme `SystemUsesLightTheme` (a barra de
@@ -158,9 +164,13 @@ Commits sugeridos: `Move foreground monitor onto its own thread`,
 `Keep the process alive after the main window closes`,
 `Switch to the windows subsystem and attach a console for diagnostics`.
 
-### E2. Monitor obedece às Configurações; URL e watchdog (G)
+### E2. Monitor obedece às Configurações e grava a URL (adiada para a F5)
 
-Fecha as lacunas 1 e 2 da seção 1.
+**Fora da F4** por decisão do usuário (2026-11-18). O conteúdo fica aqui
+como especificação para a F5; o watchdog, que era o item 5, foi para a E7.
+Consequência para o gate: as medições da E10 não incluem o custo da leitura
+de URL. A F5 já exige repetir as 8 h depois da última mudança de código, e
+é essa medição que vai cobrir a UIA.
 
 1. Recarga de configurações: depois de salvar em Configurações, a UI posta
    `RELOAD_SETTINGS` ao monitor, que relê `idle_minutes`,
@@ -181,14 +191,13 @@ Fecha as lacunas 1 e 2 da seção 1.
    query e fragmento, ignorar quando o campo tem foco de teclado, nada em
    janelas InPrivate/anônimas, nada em navegador elevado. Respeita
    `browser_tabs`.
-5. Watchdog de 60 s pegando carona no timer de flush: compara
-   `GetForegroundWindow()` com o último conhecido e ressincroniza.
+5. No menu da bandeja (E5), o item "pausar ou retomar a gravação", que
+   depende do motivo `USER_PAUSED` do item 2.
 
-Commits sugeridos: `Reload monitor settings when Settings are saved`,
+Commits sugeridos (F5): `Reload monitor settings when Settings are saved`,
 `Pause recording when the monitor is turned off in Settings`,
 `Skip excluded apps and window keywords in the recorder`,
-`Read browser address bar via UI Automation on title change`,
-`Resync the foreground window every flush as a hook watchdog`.
+`Read browser address bar via UI Automation on title change`.
 
 ### E3. Thread de banco e EcoQoS (M)
 
@@ -199,7 +208,7 @@ Item de backlog, critérios dele no `gates.md`.
    `StopTimer`, ...), respostas por canal quando a UI precisa do resultado.
    A UI continua lendo pela própria conexão (WAL permite).
 2. `SetThreadInformation(ThreadPowerThrottling)` e
-   `MEMORY_PRIORITY_LOW` nas threads de monitor, banco, Claude e URL; a
+   `MEMORY_PRIORITY_LOW` nas threads de monitor, banco e Claude; a
    thread de UI desliga o estrangulamento só enquanto a janela estiver
    aberta.
 3. Teste com escritor lento (comando que dorme 2 s): o monitor continua
@@ -235,9 +244,9 @@ state, tooltip and TaskbarCreated recovery`.
 
 1. Menu de contexto nativo (`TrackPopupMenuEx`, com
    `SetForegroundWindow` antes e `PostMessage(WM_NULL)` depois): iniciar ou
-   parar o timer, iniciar num dos 5 projetos recentes (submenu), pausar ou
-   retomar a gravação, abrir o Focus, mostrar o mini timer, sair. Textos em
-   `strings.rs`.
+   parar o timer, iniciar num dos 5 projetos recentes (submenu), abrir o
+   Focus, mostrar o mini timer, sair. Textos em `strings.rs`. "Pausar a
+   gravação" entra na F5, com a E2.
 2. Flyout (clique esquerdo, `NIN_SELECT` / `NIN_KEYSELECT`): popup sem dono
    via `popup::open(None, ...)`, ancorado em `Shell_NotifyIconGetRect` e na
    área de trabalho do monitor; descrição, projeto, tempo decorrido,
@@ -298,8 +307,12 @@ Commits sugeridos: `Manage the Run key and read StartupApproved state`,
 4. Backup diário com `VACUUM INTO` em `%LOCALAPPDATA%\Focus\backups`,
    guardando 7, na thread de banco em `THREAD_MODE_BACKGROUND_BEGIN`;
    `PRAGMA quick_check` semanal, resultado no log. Ver risco R3.
+5. Watchdog de 60 s no timer de flush do monitor: compara
+   `GetForegroundWindow()` com a última janela conhecida e ressincroniza
+   (custo de uma chamada).
 
 Commits sugeridos: `Add rotating file log without private data`,
+`Resync the foreground window every flush as a hook watchdog`,
 `Write minidumps on panic and unhandled exceptions`,
 `Pause recording and retry on database write failures`,
 `Add daily backup and weekly quick_check`.
@@ -377,17 +390,16 @@ item do quadro em `Done`.
 ## 4. Dependências entre etapas
 
 ```
-E0 → E1 → E2 ─┐
-        │     ├→ E9 → E10
-        ├→ E3 ┤
-        ├→ E4 → E5
-        ├→ E6
-        ├→ E7 (o backup e o tratamento de erro usam a thread de banco da E3)
-        └→ E8 (precisa de --quit e --version da E1)
+E0 → E1 ─┬→ E3 → E7 (backup e tratamento de erro usam a thread de banco)
+         ├→ E4 → E5
+         ├→ E6
+         └→ E8 (precisa de --quit e --version da E1)
+todas → E9 → E10
 ```
 
-E1 é pré-requisito de tudo. Depois dela, E2, E3, E4, E6 e E8 mexem em
-arquivos diferentes e podem andar em paralelo; E5 depende de E4, E7 de E3.
+E1 é pré-requisito de tudo. Depois dela, E3, E4, E6 e E8 mexem em arquivos
+diferentes e podem andar em paralelo; E5 depende de E4, E7 de E3. A E2 não
+faz parte da F4.
 
 ## 5. Riscos
 
@@ -397,13 +409,13 @@ arquivos diferentes e podem andar em paralelo; E5 depende de E4, E7 de E3.
 | R2 | Flyout deixa ~21 MB residentes após o primeiro clique na bandeja | Aceito pela D5 e coberto pelo teto de 30 MB; se incomodar no uso real, o flyout pode virar menu nativo na F5 |
 | R3 | Backup diário com `VACUUM INTO` escreve o banco inteiro e pode estourar < 1 MB/h num banco grande | Medir com o banco real na E7; se estourar, backup só quando o banco mudou e decisão registrando que o backup fica fora da média horária |
 | R4 | Antivírus estranha o exe novo: início automático, leitura de títulos e UIA no mesmo processo | Teste de 8 h com o exe instalado; bloqueio nunca é contornado em código, vai para o usuário pedir exceção (regra do gate) |
-| R5 | Leitura de URL aumenta CPU e wakeups de fundo | Medir antes e depois na E2; o toggle `browser_tabs` desliga |
+| R5 | O Gate 4 passa sem a leitura de URL, que vai pesar no fundo quando entrar na F5 | A medição de 8 h da F5 (obrigatória depois da última mudança) cobre a UIA; o toggle `browser_tabs` desliga |
 | R6 | Fim de sessão com várias threads: o Windows mata o processo antes do monitor gravar | Monitor trata o próprio `WM_ENDSESSION` na própria janela; UI espera com limite; teste com `shutdown /l` registrado na nota |
 
-## 6. Decisões que dependem do usuário
+## 6. Decisões do usuário
 
-1. As lacunas 1 e 2 (monitor seguir as Configurações, URL via UIA) entram
-   na F4, como a E2 propõe, ou ficam para a F5? Recomendação: F4, porque o
-   orçamento de 8 h precisa medir todo o trabalho de fundo do exe final.
-2. Atalho global (`RegisterHotKey`) fica para o backlog da F5 (proposto
-   acima).
+1. 2026-11-18: as lacunas 1 e 2 (monitor seguir as Configurações, URL via
+   UIA) ficam para a F5. A E2 está fora da F4 e virou entrada no backlog do
+   `gates.md`.
+2. Pendente: o atalho global (`RegisterHotKey`) foi proposto para o backlog
+   da F5.

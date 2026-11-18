@@ -189,6 +189,14 @@ Removing the Electron app from the repository is **never** autonomous: ask.
   Done when: DB writes happen off the monitor thread (test with a slow
   writer), background threads set `ThreadPowerThrottling` and low memory
   priority, and the closed-window CPU and wakeup numbers are not worse.
+- "Monitor segue as Configurações e grava a URL": do it in F5 (user decision,
+  2026-11-18; spec in `docs/plan-f4.md`, step E2). Today the recorder ignores
+  `monitor_enabled`, `browser_tabs`, `keep_active_when_busy` and the
+  exclusion lists, reads `idleMinutes` only at start, and stores an empty
+  URL. Done when: saving Settings reloads them in the running monitor (test),
+  excluded apps and title keywords record nothing (table test), the address
+  bar of Chrome, Edge and Firefox is read per decision 0003 and `AGENTS.md`,
+  and the F5 8 h measurement includes this work.
 
 ## Keeping this file honest
 
