@@ -18,8 +18,11 @@ use windows::Win32::Graphics::Gdi::UpdateWindow;
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::StationsAndDesktops::{
+    GetThreadDesktop, GetUserObjectInformationW, UOI_NAME,
+};
 use windows::Win32::System::Threading::{
-    CreateMutexW, GetCurrentProcess, GetProcessTimes, OpenProcessToken,
+    CreateMutexW, GetCurrentProcess, GetCurrentThreadId, GetProcessTimes, OpenProcessToken,
 };
 use windows::Win32::UI::Shell::NIN_SELECT;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -280,10 +283,66 @@ pub fn needs_single_instance(args: &CliArgs) -> bool {
         && !args.ui
 }
 
-pub fn mutex_name_for_sid(sid: &str, instance_tag: Option<&str>) -> String {
+fn sanitize_mutex_component(raw: &str) -> String {
+    let clean: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if clean.is_empty() {
+        "default".into()
+    } else {
+        clean
+    }
+}
+
+/// Scopes the single-instance mutex to both user SID and Win32 desktop so an
+/// instance running on another desktop cannot silence launches on the user's
+/// active desktop (where `FindWindowW` only searches the caller's desktop).
+pub fn mutex_name_for_sid_and_desktop(
+    sid: &str,
+    desktop: &str,
+    instance_tag: Option<&str>,
+) -> String {
+    let desk = sanitize_mutex_component(desktop);
     match instance_tag {
-        Some(tag) if !tag.is_empty() => format!("Local\\Focus-{sid}-{tag}"),
-        _ => format!("Local\\Focus-{sid}"),
+        Some(tag) if !tag.is_empty() => format!("Local\\Focus-{sid}-{desk}-{tag}"),
+        _ => format!("Local\\Focus-{sid}-{desk}"),
+    }
+}
+
+fn current_desktop_name() -> String {
+    // SAFETY: queries the desktop name for the current thread into a caller-owned UTF-16 buffer.
+    unsafe {
+        let Ok(hdesk) = GetThreadDesktop(GetCurrentThreadId()) else {
+            return "default".into();
+        };
+        let hobj = HANDLE(hdesk.0);
+        let mut needed = 0u32;
+        let _ = GetUserObjectInformationW(hobj, UOI_NAME, None, 0, Some(&mut needed));
+        if needed == 0 {
+            return "default".into();
+        }
+        let words = (needed as usize).div_ceil(2).max(1);
+        let mut buf = vec![0u16; words];
+        if GetUserObjectInformationW(
+            hobj,
+            UOI_NAME,
+            Some(buf.as_mut_ptr().cast()),
+            (buf.len() * 2) as u32,
+            Some(&mut needed),
+        )
+        .is_err()
+        {
+            return "default".into();
+        }
+        let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        sanitize_mutex_component(&String::from_utf16_lossy(&buf[..end]))
     }
 }
 
@@ -341,7 +400,8 @@ pub struct InstanceMutex {
 impl InstanceMutex {
     pub fn acquire(instance_tag: Option<&str>) -> Result<(Self, bool), String> {
         let sid = current_user_sid();
-        let name = mutex_name_for_sid(&sid, instance_tag);
+        let desktop = current_desktop_name();
+        let name = mutex_name_for_sid_and_desktop(&sid, &desktop, instance_tag);
         Self::acquire_named(&name)
     }
 
@@ -392,8 +452,21 @@ fn find_tray_window(instance_tag: Option<&str>) -> Option<HWND> {
     None
 }
 
+fn post_ipc_message(hwnd: HWND, msg: u32, fail_op: &'static str) -> bool {
+    // SAFETY: `hwnd` was resolved via `FindWindowW` and `msg` was registered with `RegisterWindowMessageW`.
+    match unsafe { PostMessageW(Some(hwnd), msg, WPARAM(0), LPARAM(0)) } {
+        Ok(()) => true,
+        Err(e) => {
+            log::code(Category::App, fail_op, e.code().0 as i64);
+            false
+        }
+    }
+}
+
 pub fn send_show(instance_tag: Option<&str>) -> i32 {
+    log::init_default();
     let Some(hwnd) = find_tray_window(instance_tag) else {
+        log::event(Category::App, "send_show_no_tray_hwnd");
         return 1;
     };
     // SAFETY: `MSG_SHOW_NAME` is a static wide literal; `hwnd` was returned by `FindWindowW`.
@@ -415,22 +488,28 @@ pub fn send_show(instance_tag: Option<&str>) -> i32 {
         )
         .0 == 0
         {
-            let _ = PostMessageW(Some(hwnd), msg, WPARAM(0), LPARAM(0));
+            if !post_ipc_message(hwnd, msg, "send_show_post_failed") {
+                return 1;
+            }
+            log::event(Category::App, "send_show_posted_after_timeout");
         }
     }
     0
 }
 
 pub fn send_quit(instance_tag: Option<&str>) -> i32 {
+    log::init_default();
     let Some(hwnd) = find_tray_window(instance_tag) else {
+        log::event(Category::App, "send_quit_no_tray_hwnd");
         return 1;
     };
     // SAFETY: `MSG_QUIT_NAME` is a static wide literal; `PostMessageW` asks the primary instance to quit cleanly.
-    unsafe {
-        let msg = RegisterWindowMessageW(MSG_QUIT_NAME);
-        let _ = PostMessageW(Some(hwnd), msg, WPARAM(0), LPARAM(0));
+    let msg = unsafe { RegisterWindowMessageW(MSG_QUIT_NAME) };
+    if post_ipc_message(hwnd, msg, "send_quit_post_failed") {
+        0
+    } else {
+        1
     }
-    0
 }
 
 struct PendingAway {
@@ -662,6 +741,7 @@ fn open_main_window() {
     render::warmup_d3d();
     let bg = BgStore::spawn_db_with_writer(&db_path, db_handle);
     if !window::open() {
+        log::event(Category::App, "open_window_failed");
         bg.abort();
         render::reset_shared();
         qos::set_background_qos(true);
@@ -670,6 +750,7 @@ fn open_main_window() {
     match bg.finish_shell(None) {
         Ok(Some(screen)) => {
             if !window::set_screen(screen) {
+                log::event(Category::App, "open_set_screen_failed");
                 window::close();
                 render::reset_shared();
                 qos::set_background_qos(true);
@@ -677,6 +758,7 @@ fn open_main_window() {
             }
         }
         Ok(None) | Err(_) => {
+            log::event(Category::App, "open_shell_failed");
             window::close();
             render::reset_shared();
             qos::set_background_qos(true);
@@ -687,6 +769,7 @@ fn open_main_window() {
         // SAFETY: `hwnd` is our thread-owned main window created above.
         unsafe {
             let _ = UpdateWindow(hwnd);
+            let _ = SetForegroundWindow(hwnd);
         }
     }
     let first_frame_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -1233,6 +1316,18 @@ mod tests {
                 all_screens: true,
             }
         );
+    }
+
+    #[test]
+    fn mutex_name_scopes_by_desktop_and_sanitizes_separators() {
+        let a = mutex_name_for_sid_and_desktop("S-1-5-21-1", "Default", None);
+        let b = mutex_name_for_sid_and_desktop("S-1-5-21-1", "Desk 2\\Alt", None);
+        let c = mutex_name_for_sid_and_desktop("S-1-5-21-1", "Default", Some("tag1"));
+        assert_eq!(a, "Local\\Focus-S-1-5-21-1-Default");
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(b, "Local\\Focus-S-1-5-21-1-Desk_2_Alt");
+        assert!(!b.strip_prefix("Local\\").unwrap().contains('\\'));
     }
 
     #[test]

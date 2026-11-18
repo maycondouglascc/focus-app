@@ -13,7 +13,9 @@ use std::ffi::c_void;
 use std::mem::size_of;
 
 use windows::core::{w, GUID};
-use windows::Win32::Foundation::{ERROR_SUCCESS, HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{
+    GetLastError, SetLastError, ERROR_SUCCESS, HWND, LPARAM, RECT, WIN32_ERROR,
+};
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Shell::{
@@ -201,19 +203,31 @@ impl Tray {
             return false;
         };
         let mut nid = self.base_nid(new_icon);
-        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+        // Set `uVersion` via `NIM_SETVERSION` and `NIF_SHOWTIP` via `NIM_MODIFY` only after `NIM_ADD` succeeds.
+        nid.Anonymous = NOTIFYICONDATAW_0::default();
+        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
 
         // SAFETY: `nid` is a stack-allocated, fully initialized `NOTIFYICONDATAW` bound to `self.hwnd`.
-        let ok = unsafe { Shell_NotifyIconW(NIM_ADD, &nid).as_bool() };
+        let (ok, err) = unsafe {
+            SetLastError(WIN32_ERROR(0));
+            let ok = Shell_NotifyIconW(NIM_ADD, &nid).as_bool();
+            let err = if ok { 0 } else { GetLastError().0 };
+            (ok, err)
+        };
         if !ok {
             destroy_hicon(new_icon);
-            log::event(Category::Tray, "nim_add_failed");
+            log::code(Category::Tray, "nim_add_failed", err as i64);
             self.added = false;
             return false;
         }
-        // SAFETY: sets `NOTIFYICON_VERSION_4` immediately after `NIM_ADD`.
+        nid.Anonymous = NOTIFYICONDATAW_0 {
+            uVersion: NOTIFYICON_VERSION_4,
+        };
+        // SAFETY: sets `NOTIFYICON_VERSION_4` immediately after `NIM_ADD`, then applies `NIF_SHOWTIP`.
         unsafe {
             let _ = Shell_NotifyIconW(NIM_SETVERSION, &nid);
+            nid.uFlags = NIF_TIP | NIF_SHOWTIP;
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
         }
         if let Some(old) = self.hicon.replace(new_icon) {
             destroy_hicon(old);

@@ -54,7 +54,7 @@ function Stop-RunningFocus {
         }
         Start-Sleep -Milliseconds 250
     }
-    throw "Timed out waiting 10s for running $targetExe to exit gracefully via --quit"
+    throw "Timed out waiting 10s for running $targetExe to exit gracefully via --quit (if it is running in another desktop/session, close it manually in Task Manager and retry)"
 }
 
 if ($Uninstall) {
@@ -138,6 +138,7 @@ if (-not $NoLaunch) {
     if ($p.HasExited) {
         throw "Launched Focus exited unexpectedly with code $($p.ExitCode)"
     }
+    Write-Output "Started Focus in background (system tray); open Focus from the Start Menu or tray icon to show the window."
 }
 
 Write-Output "Installed $verOut -> $targetExe"

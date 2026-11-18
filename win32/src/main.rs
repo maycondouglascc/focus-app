@@ -95,6 +95,8 @@ fn main() {
     let (mutex, already_running) = match InstanceMutex::acquire(tag.as_deref()) {
         Ok(res) => res,
         Err(e) => {
+            log::init_default();
+            log::event(log::Category::App, "mutex_acquire_failed");
             attach_parent_console_if_needed();
             eprintln!("focus: {e}");
             std::process::exit(1);
