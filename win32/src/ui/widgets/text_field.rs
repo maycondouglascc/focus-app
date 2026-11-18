@@ -20,7 +20,9 @@ use windows::Win32::UI::Controls::RichEdit::{
     MSFTEDIT_CLASS, SCF_ALL, SCF_DEFAULT,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, VK_ESCAPE, VK_RETURN, VK_TAB};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, GetFocus, SetFocus, VK_ESCAPE, VK_RETURN, VK_TAB,
+};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, GetClientRect, GetParent, GetWindowLongW, GetWindowTextLengthW,
@@ -36,6 +38,7 @@ pub const WM_RICHEDIT_SUBMIT: u32 = WM_APP + 4;
 const EM_SETREADONLY: u32 = 0x00CF;
 
 use super::interactive_a11y;
+use crate::ui::focus::FocusModel;
 use crate::ui::frame;
 use crate::ui::theme::{to_colorref, Palette};
 use crate::ui::tree::{style, A11yRole, HitMode, Leaf, Node, PaintStyle, Rect, Tree, WidgetId};
@@ -592,6 +595,88 @@ impl Drop for RichEditField {
                 let _ = DeleteObject(HGDIOBJ(self.font.0));
                 self.font = HFONT::default();
             }
+        }
+    }
+}
+
+/// Reconciles native `RICHEDIT50W` children against `RichTextSlot` leaves in `tree`.
+pub fn sync_rich_fields(
+    hwnd: HWND,
+    tree: &Tree,
+    rich_fields: &mut Vec<RichEditField>,
+    text_scale: f32,
+    palette: &Palette,
+    syncing_flag: &mut bool,
+) {
+    let slots = tree.rich_text_slots();
+    *syncing_flag = true;
+    rich_fields.retain(|f| slots.iter().any(|s| s.key == f.key()));
+
+    // SAFETY: `hwnd` is a thread-owned window handle.
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    for spec in slots {
+        if let Some(field) = rich_fields.iter_mut().find(|f| f.key() == spec.key) {
+            field.sync_spec(
+                spec.id,
+                &spec.value,
+                &spec.placeholder,
+                spec.sync_rev,
+                spec.disabled,
+                palette,
+            );
+            field.sync_bounds(spec.rect, spec.hidden);
+        } else if let Some(mut field) = RichEditField::create(
+            hwnd,
+            spec.id,
+            &spec.key,
+            spec.sync_rev,
+            spec.multiline,
+            &spec.placeholder,
+            palette,
+            dpi,
+            text_scale,
+        ) {
+            if !spec.value.is_empty() {
+                field.set_text(&spec.value);
+            }
+            field.sync_spec(
+                spec.id,
+                &spec.value,
+                &spec.placeholder,
+                spec.sync_rev,
+                spec.disabled,
+                palette,
+            );
+            field.sync_bounds(spec.rect, spec.hidden);
+            rich_fields.push(field);
+        }
+    }
+    *syncing_flag = false;
+}
+
+/// Synchronizes Win32 keyboard focus between `hwnd` and any active `RichEditField` child.
+pub fn sync_rich_focus(hwnd: HWND, focus: &FocusModel, tree: &Tree, rich_fields: &[RichEditField]) {
+    // SAFETY: queries and transfers Win32 child focus only within our own active window.
+    unsafe {
+        let cur = GetFocus();
+        let ours = cur == hwnd || rich_fields.iter().any(|f| f.hwnd() == cur);
+        if !ours {
+            return;
+        }
+        if let Some(fid) = focus.focused() {
+            if let Some(field) = rich_fields.iter().find(|f| f.slot_id() == fid) {
+                let disabled = tree
+                    .node_by_id(fid)
+                    .and_then(|n| tree.data(n))
+                    .is_none_or(|d| d.disabled || d.hidden);
+                if !disabled && cur != field.hwnd() {
+                    let _ = SetFocus(Some(field.hwnd()));
+                }
+                return;
+            }
+        }
+        if rich_fields.iter().any(|f| f.hwnd() == cur) {
+            let _ = SetFocus(Some(hwnd));
         }
     }
 }

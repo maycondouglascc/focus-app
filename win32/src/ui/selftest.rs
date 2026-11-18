@@ -9,16 +9,24 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Graphics::Gdi::UpdateWindow;
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
-use windows::Win32::System::Threading::GetCurrentProcess;
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, GetGuiResources, GetProcessHandleCount, GR_GDIOBJECTS, GR_USEROBJECTS,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, KillTimer, PeekMessageW, SetTimer, TranslateMessage, WaitMessage, MSG,
-    PM_REMOVE, WM_QUIT, WM_TIMER,
+    DestroyWindow, DispatchMessageW, KillTimer, PeekMessageW, SetTimer, TranslateMessage,
+    WaitMessage, MSG, PM_REMOVE, WM_QUIT, WM_TIMER,
 };
 
-use crate::db::{shared_store, Db, DbStore, Store};
-use crate::db_thread::DbHandle;
+use crate::db::{shared_store, Db, DbStore, ProjectInput, Store};
+use crate::db_thread::{DbHandle, DbThread};
 use crate::demo::DemoStore;
 use crate::locale::SystemLocale;
+use crate::tray::{
+    flyout::{self, FlyoutMode},
+    icon::IconState,
+    menu::{self, MenuSnapshot},
+    mini_timer, Tray,
+};
 
 use super::app::{AppShell, Section};
 use super::screen::Screen;
@@ -561,5 +569,172 @@ pub fn diag_drag() -> i32 {
             println!("FAIL");
             1
         }
+    }
+}
+
+fn resource_counts() -> (u32, u32, u32) {
+    // SAFETY: queries current process handle, GDI object, and USER object counts.
+    unsafe {
+        let proc = GetCurrentProcess();
+        let mut handles = 0u32;
+        let _ = GetProcessHandleCount(proc, &mut handles);
+        let gdi = GetGuiResources(proc, GR_GDIOBJECTS);
+        let user = GetGuiResources(proc, GR_USEROBJECTS);
+        (handles, gdi, user)
+    }
+}
+
+fn noop_tray_cb() {}
+
+/// `focus.exe --tray-cycle N`: creates/destroys tray icons, native HMENUs,
+/// flyout popups (with RichEdit), and mini-timer windows `N` times and checks
+/// private bytes plus Handle/GDI/USER object delta after warm-up.
+pub fn tray_cycle(n: u32) -> i32 {
+    use windows::core::w;
+    use windows::Win32::Foundation::HINSTANCE;
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, RegisterClassW, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
+    };
+
+    super::init();
+    let dir = std::env::temp_dir().join(format!("focus-tray-cycle-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let db_path = dir.join("tray_cycle.db");
+    let Ok(mut db_thread) = DbThread::spawn(db_path.clone()) else {
+        eprintln!("focus: tray_cycle failed to spawn db thread");
+        return 1;
+    };
+    let db_handle = db_thread.handle();
+    for i in 1..=3 {
+        let _ = db_handle.create_project(
+            ProjectInput {
+                name: format!("Tray Project {i}"),
+                client: String::new(),
+                color: "#3b7ddd".into(),
+                rate: 0.0,
+                currency: "USD".into(),
+                billable_default: true,
+                archived: false,
+            },
+            1000 + i as i64,
+        );
+    }
+
+    unsafe extern "system" fn noop_wnd_proc(
+        hwnd: windows::Win32::Foundation::HWND,
+        msg: u32,
+        wparam: windows::Win32::Foundation::WPARAM,
+        lparam: windows::Win32::Foundation::LPARAM,
+    ) -> windows::Win32::Foundation::LRESULT {
+        // SAFETY: forwards messages for temporary tray cycle host window.
+        unsafe {
+            windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+    }
+
+    // SAFETY: temporary invisible message host on the UI thread for tray cycle tests.
+    let host_hwnd = unsafe {
+        let Some(hinst) = GetModuleHandleW(None).ok().map(|h| HINSTANCE(h.0)) else {
+            return 1;
+        };
+        let cls = w!("FocusTrayCycleHost");
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(noop_wnd_proc),
+            hInstance: hinst,
+            lpszClassName: cls,
+            ..Default::default()
+        };
+        RegisterClassW(&wc);
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            cls,
+            w!("FocusTrayCycle"),
+            WINDOW_STYLE(0),
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            Some(hinst),
+            None,
+        )
+        .ok()
+    };
+    let Some(hwnd) = host_hwnd else {
+        eprintln!("focus: tray_cycle failed to create host window");
+        db_thread.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+        return 1;
+    };
+
+    let snap = MenuSnapshot::from_db(&db_path);
+    let one_cycle = |step: u32| {
+        let mut tray = Tray::add(hwnd, 0x8001, strings::TRAY_TIP_IDLE);
+        let state = match step % 4 {
+            0 => IconState::Stopped,
+            1 => IconState::Running { progress_steps: 20 },
+            2 => IconState::Paused,
+            _ => IconState::Error,
+        };
+        tray.set_state(state, "Focus — 20m");
+        menu::exercise_menu_handles(&snap);
+        let _ = flyout::open(
+            Some(tray.anchor_rect()),
+            &db_path,
+            db_handle.clone(),
+            FlyoutMode::Timer,
+            noop_tray_cb,
+            noop_tray_cb,
+        );
+        window::pump();
+        flyout::close();
+        window::pump();
+        let _ = mini_timer::open(&db_path, db_handle.clone(), noop_tray_cb, noop_tray_cb);
+        window::pump();
+        mini_timer::close();
+        window::pump();
+        tray.remove();
+        window::pump();
+    };
+
+    // Warm-up 5 cycles so D3D/D2D/msftedit/shell caches settle before measuring.
+    for s in 0..5 {
+        one_cycle(s);
+    }
+    pump_for(Duration::from_millis(300));
+
+    let start_mb = private_mb();
+    let (h0, g0, u0) = resource_counts();
+    let t0 = Instant::now();
+    for i in 0..n {
+        one_cycle(i);
+    }
+    pump_for(Duration::from_millis(500));
+    let end_mb = private_mb();
+    let (h1, g1, u1) = resource_counts();
+    let growth = end_mb - start_mb;
+
+    // SAFETY: `hwnd` belongs to this thread and is destroyed before exit.
+    unsafe {
+        let _ = DestroyWindow(hwnd);
+    }
+    super::render::reset_shared();
+    db_thread.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    println!(
+        "tray_cycles {n} in {:.1}s | private MB start {start_mb:.2} end {end_mb:.2} growth {growth:+.2} | handles {h0}->{h1} ({:+}) gdi {g0}->{g1} user {u0}->{u1}",
+        t0.elapsed().as_secs_f64(),
+        h1 as i64 - h0 as i64
+    );
+
+    if growth > GROWTH_BUDGET_MB || g1 > g0 || u1 > u0 {
+        println!("FAIL");
+        1
+    } else {
+        println!("OK");
+        0
     }
 }

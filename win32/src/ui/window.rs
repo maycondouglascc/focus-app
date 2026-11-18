@@ -13,9 +13,9 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetFocus, GetKeyState, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE,
-    TME_NONCLIENT, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME,
-    VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TME_NONCLIENT,
+    TRACKMOUSEEVENT, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT,
+    VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::Input::Pointer::{
     GetPointerInfo, POINTER_FLAG_FIRSTBUTTON, POINTER_FLAG_SECONDBUTTON, POINTER_INFO,
@@ -54,6 +54,7 @@ use super::text::TextSystem;
 use super::theme::Palette;
 use super::tree::{Rect, Tree, WidgetId};
 use super::widgets::text_field::{
+    sync_rich_fields as sync_rich_children, sync_rich_focus as sync_rich_children_focus,
     RichEditField, WM_RICHEDIT_BLUR, WM_RICHEDIT_FOCUS, WM_RICHEDIT_SUBMIT,
 };
 
@@ -68,6 +69,7 @@ const EN_CHANGE: u16 = 0x0300;
 const TIMER_TICK_ID: usize = 1;
 const TIMER_AUTOSCROLL_ID: usize = 2;
 const WM_APP_SYNC_RICH: u32 = WM_APP + 6;
+const WM_APP_REFRESH_STORE: u32 = WM_APP + 7;
 
 struct Ui {
     hwnd: HWND,
@@ -102,6 +104,15 @@ thread_local! {
 
 pub(crate) fn set_close_notify(hwnd: HWND, msg: u32) {
     CLOSE_NOTIFY.with(|c| c.set((hwnd.0 as isize, msg)));
+}
+
+pub(crate) fn request_refresh() {
+    if let Some(hwnd) = current() {
+        // SAFETY: `hwnd` is our thread-owned main window validated by `current()`.
+        unsafe {
+            let _ = PostMessageW(Some(hwnd), WM_APP_REFRESH_STORE, WPARAM(0), LPARAM(0));
+        }
+    }
 }
 
 fn with_ui<R>(f: impl FnOnce(&mut Ui) -> R) -> Option<R> {
@@ -589,7 +600,7 @@ pub fn close() {
     if let Some(ui) = ui {
         let hwnd = ui.hwnd;
         drop(ui);
-        reset_shared();
+        super::reset_shared_if_idle();
         // SAFETY: `hwnd` is ours; DestroyWindow on a dead handle just fails.
         unsafe {
             let _ = DestroyWindow(hwnd);
@@ -1329,80 +1340,30 @@ unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
 }
 
 fn sync_rich_fields(ui: &mut Ui) {
-    let Some(slots) = active_tree(ui).map(|t| t.rich_text_slots()) else {
-        return;
-    };
-    ui.syncing_rich = true;
-    ui.rich_fields
-        .retain(|f| slots.iter().any(|s| s.key == f.key()));
-
-    // SAFETY: `ui.hwnd` is our thread-owned window handle.
-    let dpi = unsafe { GetDpiForWindow(ui.hwnd) };
     let text_scale = ui.text.text_scale();
     let palette = ui.palette;
-
-    for spec in slots {
-        if let Some(field) = ui.rich_fields.iter_mut().find(|f| f.key() == spec.key) {
-            field.sync_spec(
-                spec.id,
-                &spec.value,
-                &spec.placeholder,
-                spec.sync_rev,
-                spec.disabled,
-                &palette,
-            );
-            field.sync_bounds(spec.rect, spec.hidden);
-        } else if let Some(mut field) = RichEditField::create(
-            ui.hwnd,
-            spec.id,
-            &spec.key,
-            spec.sync_rev,
-            spec.multiline,
-            &spec.placeholder,
-            &palette,
-            dpi,
-            text_scale,
-        ) {
-            if !spec.value.is_empty() {
-                field.set_text(&spec.value);
-            }
-            field.sync_spec(
-                spec.id,
-                &spec.value,
-                &spec.placeholder,
-                spec.sync_rev,
-                spec.disabled,
-                &palette,
-            );
-            field.sync_bounds(spec.rect, spec.hidden);
-            ui.rich_fields.push(field);
-        }
-    }
-    ui.syncing_rich = false;
+    let hwnd = ui.hwnd;
+    let Some(tree) = ui
+        .screen
+        .as_ref()
+        .map(ScreenHost::tree)
+        .or(ui.tree.as_ref())
+    else {
+        return;
+    };
+    sync_rich_children(
+        hwnd,
+        tree,
+        &mut ui.rich_fields,
+        text_scale,
+        &palette,
+        &mut ui.syncing_rich,
+    );
 }
 
 fn sync_rich_focus(ui: &Ui) {
-    // SAFETY: queries and transfers Win32 child focus only within our own active window.
-    unsafe {
-        let cur = GetFocus();
-        let ours = cur == ui.hwnd || ui.rich_fields.iter().any(|f| f.hwnd() == cur);
-        if !ours {
-            return;
-        }
-        if let Some(fid) = ui.focus.focused() {
-            if let Some(field) = ui.rich_fields.iter().find(|f| f.slot_id() == fid) {
-                let disabled = active_tree(ui)
-                    .and_then(|t| t.node_by_id(fid).and_then(|n| t.data(n)))
-                    .is_none_or(|d| d.disabled || d.hidden);
-                if !disabled && cur != field.hwnd() {
-                    let _ = SetFocus(Some(field.hwnd()));
-                }
-                return;
-            }
-        }
-        if ui.rich_fields.iter().any(|f| f.hwnd() == cur) {
-            let _ = SetFocus(Some(ui.hwnd));
-        }
+    if let Some(tree) = active_tree(ui) {
+        sync_rich_children_focus(ui.hwnd, &ui.focus, tree, &ui.rich_fields);
     }
 }
 
@@ -1716,6 +1677,24 @@ unsafe extern "system" fn wnd_proc(
             with_ui(ensure_rich_synced);
             return LRESULT(0);
         }
+        m if m == WM_APP_REFRESH_STORE => {
+            let changed = with_ui(|u| {
+                if let Some(h) = u.screen.as_mut() {
+                    if h.on_external_data_change() {
+                        rebuild_screen_if_dirty(u, hwnd);
+                        sync_timers(u, hwnd, false);
+                        return true;
+                    }
+                }
+                false
+            })
+            .unwrap_or(false);
+            if changed {
+                sync_a11y(hwnd);
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            return LRESULT(0);
+        }
         m if m == WM_A11Y_ACTION => {
             on_a11y_action_msg(hwnd);
             return LRESULT(0);
@@ -1891,7 +1870,7 @@ unsafe extern "system" fn wnd_proc(
                 }
             });
             drop(ui);
-            reset_shared();
+            super::reset_shared_if_idle();
             let (notify_hwnd, notify_msg) = CLOSE_NOTIFY.with(|c| c.get());
             if notify_hwnd != 0 && notify_msg != 0 {
                 // SAFETY: `notify_hwnd` is owned by this UI thread's `FocusTrayWindow`.

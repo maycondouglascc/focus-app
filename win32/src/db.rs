@@ -276,6 +276,10 @@ pub struct Settings {
     pub excluded_apps: Vec<String>,
     pub excluded_title_patterns: Vec<String>,
     pub csv_standard: bool,
+    pub mini_timer_enabled: bool,
+    pub mini_timer_x: Option<i32>,
+    pub mini_timer_y: Option<i32>,
+    pub tray_hint_shown: bool,
 }
 
 impl Settings {
@@ -294,6 +298,10 @@ impl Settings {
             excluded_apps: vec!["1Password".into(), "Bitwarden".into(), "KeePass".into()],
             excluded_title_patterns: Vec::new(),
             csv_standard: false,
+            mini_timer_enabled: false,
+            mini_timer_x: None,
+            mini_timer_y: None,
+            tray_hint_shown: false,
         }
     }
 }
@@ -313,6 +321,10 @@ pub struct SettingsPatch {
     pub excluded_apps: Option<Vec<String>>,
     pub excluded_title_patterns: Option<Vec<String>>,
     pub csv_standard: Option<bool>,
+    pub mini_timer_enabled: Option<bool>,
+    pub mini_timer_x: Option<Option<i32>>,
+    pub mini_timer_y: Option<Option<i32>>,
+    pub tray_hint_shown: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -731,6 +743,21 @@ impl Db {
         Ok(())
     }
 
+    pub fn recent_projects(&self, limit: usize) -> rusqlite::Result<Vec<Project>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.id, p.name, p.client, p.color, p.rate, p.currency,
+                    p.billable_default, p.archived, p.created_at
+             FROM projects p
+             LEFT JOIN entries e ON e.project_id = p.id
+             WHERE p.archived = 0
+             GROUP BY p.id
+             ORDER BY MAX(e.start) DESC, p.created_at DESC
+             LIMIT ?",
+        )?;
+        let rows = stmt.query_map([limit as i64], map_project)?;
+        rows.collect()
+    }
+
     /// Aggregates per-project month/all-time/earned stats inside SQLite without loading all entries.
     pub fn project_summaries(
         &self,
@@ -1107,6 +1134,22 @@ impl Db {
                         s.csv_standard = v;
                     }
                 }
+                "miniTimerEnabled" => {
+                    if let Some(v) = val.as_bool() {
+                        s.mini_timer_enabled = v;
+                    }
+                }
+                "miniTimerX" => {
+                    s.mini_timer_x = val.as_i64().and_then(|v| i32::try_from(v).ok());
+                }
+                "miniTimerY" => {
+                    s.mini_timer_y = val.as_i64().and_then(|v| i32::try_from(v).ok());
+                }
+                "trayHintShown" => {
+                    if let Some(v) = val.as_bool() {
+                        s.tray_hint_shown = v;
+                    }
+                }
                 _ => {}
             }
         }
@@ -1160,6 +1203,30 @@ impl Db {
             }
             if let Some(v) = patch.csv_standard {
                 self.set_setting("csvStandard", &serde_json::to_string(&v).unwrap())?;
+            }
+            if let Some(v) = patch.mini_timer_enabled {
+                self.set_setting("miniTimerEnabled", &serde_json::to_string(&v).unwrap())?;
+            }
+            if let Some(opt) = patch.mini_timer_x {
+                match opt {
+                    Some(x) => self.set_setting("miniTimerX", &x.to_string())?,
+                    None => {
+                        self.conn
+                            .execute("DELETE FROM settings WHERE key = 'miniTimerX'", [])?;
+                    }
+                }
+            }
+            if let Some(opt) = patch.mini_timer_y {
+                match opt {
+                    Some(y) => self.set_setting("miniTimerY", &y.to_string())?,
+                    None => {
+                        self.conn
+                            .execute("DELETE FROM settings WHERE key = 'miniTimerY'", [])?;
+                    }
+                }
+            }
+            if let Some(v) = patch.tray_hint_shown {
+                self.set_setting("trayHintShown", &serde_json::to_string(&v).unwrap())?;
             }
             Ok(())
         })?;
@@ -1308,29 +1375,35 @@ impl Store for DbStore {
     }
 
     fn create_project(&mut self, input: ProjectInput) -> Result<Project, String> {
-        if let Some(ref w) = self.writer {
+        let res = if let Some(ref w) = self.writer {
             w.create_project(input, self.now_ms())
         } else {
             self.db
                 .create_project(&input, self.now_ms())
                 .map_err(db_err)
-        }
+        }?;
+        crate::app::notify_data_changed();
+        Ok(res)
     }
 
     fn update_project(&mut self, id: &str, patch: ProjectPatch) -> Result<Project, String> {
-        if let Some(ref w) = self.writer {
+        let res = if let Some(ref w) = self.writer {
             w.update_project(id.to_string(), patch)
         } else {
             self.db.update_project(id, &patch).map_err(db_err)
-        }
+        }?;
+        crate::app::notify_data_changed();
+        Ok(res)
     }
 
     fn delete_project(&mut self, id: &str) -> Result<(), String> {
         if let Some(ref w) = self.writer {
-            w.delete_project(id.to_string())
+            w.delete_project(id.to_string())?;
         } else {
-            self.db.delete_project(id).map_err(db_err)
+            self.db.delete_project(id).map_err(db_err)?;
         }
+        crate::app::notify_data_changed();
+        Ok(())
     }
 
     fn project_summaries(
@@ -1372,27 +1445,33 @@ impl Store for DbStore {
     }
 
     fn create_entry(&mut self, input: EntryInput) -> Result<TimeEntry, String> {
-        if let Some(ref w) = self.writer {
+        let res = if let Some(ref w) = self.writer {
             w.create_entry(input)
         } else {
             self.db.create_entry(&input).map_err(db_err)
-        }
+        }?;
+        crate::app::notify_data_changed();
+        Ok(res)
     }
 
     fn update_entry(&mut self, id: &str, patch: EntryPatch) -> Result<TimeEntry, String> {
-        if let Some(ref w) = self.writer {
+        let res = if let Some(ref w) = self.writer {
             w.update_entry(id.to_string(), patch)
         } else {
             self.db.update_entry(id, &patch).map_err(db_err)
-        }
+        }?;
+        crate::app::notify_data_changed();
+        Ok(res)
     }
 
     fn delete_entry(&mut self, id: &str) -> Result<(), String> {
         if let Some(ref w) = self.writer {
-            w.delete_entry(id.to_string())
+            w.delete_entry(id.to_string())?;
         } else {
-            self.db.delete_entry(id).map_err(db_err)
+            self.db.delete_entry(id).map_err(db_err)?;
         }
+        crate::app::notify_data_changed();
+        Ok(())
     }
 
     fn running_entry(&self) -> Result<Option<TimeEntry>, String> {
@@ -1400,19 +1479,23 @@ impl Store for DbStore {
     }
 
     fn start_timer(&mut self, input: TimerStartInput) -> Result<TimeEntry, String> {
-        if let Some(ref w) = self.writer {
+        let res = if let Some(ref w) = self.writer {
             w.start_timer(input, self.now_ms())
         } else {
             self.db.start_timer(&input, self.now_ms()).map_err(db_err)
-        }
+        }?;
+        crate::app::notify_data_changed();
+        Ok(res)
     }
 
     fn stop_timer(&mut self) -> Result<Option<TimeEntry>, String> {
-        if let Some(ref w) = self.writer {
+        let res = if let Some(ref w) = self.writer {
             w.stop_timers(self.now_ms())
         } else {
             self.db.stop_all_timers(self.now_ms()).map_err(db_err)
-        }
+        }?;
+        crate::app::notify_data_changed();
+        Ok(res)
     }
 
     fn list_activity(&self, from: i64, to: i64) -> Result<Vec<Activity>, String> {
@@ -1438,10 +1521,12 @@ impl Store for DbStore {
 
     fn clear_activity(&mut self) -> Result<(), String> {
         if let Some(ref w) = self.writer {
-            w.clear_activity()
+            w.clear_activity()?;
         } else {
-            self.db.clear_activity().map_err(db_err)
+            self.db.clear_activity().map_err(db_err)?;
         }
+        crate::app::notify_data_changed();
+        Ok(())
     }
 
     fn get_settings(&self) -> Result<Settings, String> {
@@ -1458,6 +1543,7 @@ impl Store for DbStore {
         };
         crate::monitor::request_reload();
         crate::claude::request_reload();
+        crate::app::notify_data_changed();
         Ok(saved)
     }
 

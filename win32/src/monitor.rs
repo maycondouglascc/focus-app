@@ -6,7 +6,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicIsize, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -82,6 +82,19 @@ const WM_APP_RELOAD_SETTINGS: u32 = WM_APP + 22;
 const WM_APP_URL_READY: u32 = WM_APP + 23;
 
 static MONITOR_HWND: AtomicIsize = AtomicIsize::new(0);
+static AWAY_NOTIFY_HWND: AtomicIsize = AtomicIsize::new(0);
+static AWAY_NOTIFY_MSG: AtomicU32 = AtomicU32::new(0);
+static LAST_AWAY_START_MS: AtomicI64 = AtomicI64::new(0);
+
+pub fn set_away_resume_notify(hwnd: isize, msg: u32) {
+    AWAY_NOTIFY_HWND.store(hwnd, Ordering::SeqCst);
+    AWAY_NOTIFY_MSG.store(msg, Ordering::SeqCst);
+}
+
+pub fn take_away_resume_start() -> Option<i64> {
+    let v = LAST_AWAY_START_MS.swap(0, Ordering::SeqCst);
+    (v > 0).then_some(v)
+}
 
 pub fn request_reload() {
     let raw = MONITOR_HWND.load(Ordering::SeqCst);
@@ -155,6 +168,7 @@ struct State {
     last_unbiased: i64,
     /// Last foreground HWND passed to `record_window` for the 60s hook watchdog.
     last_fg_hwnd: isize,
+    away_started_ms: Option<i64>,
     url_worker: UrlWorker,
     end_session_sync: Arc<(Mutex<bool>, Condvar)>,
     end_session_flushed: bool,
@@ -277,15 +291,45 @@ fn resync(st: &mut State, at: i64) {
     record_window(st, fg, at);
 }
 
+fn notify_away_resume_if_timer(st: &State, away_start: i64, now: i64) {
+    let min_away = st.idle_threshold_ms.max(60_000) as i64;
+    if now - away_start < min_away {
+        return;
+    }
+    let Ok(Some(running)) = st.read_db.running_entry() else {
+        return;
+    };
+    if running.start >= away_start {
+        return;
+    }
+    let hwnd_raw = AWAY_NOTIFY_HWND.load(Ordering::SeqCst);
+    let msg = AWAY_NOTIFY_MSG.load(Ordering::SeqCst);
+    if hwnd_raw != 0 && msg != 0 {
+        LAST_AWAY_START_MS.store(away_start, Ordering::SeqCst);
+        // SAFETY: `hwnd_raw` is registered by `FocusTrayWindow` while alive on the UI thread.
+        unsafe {
+            let _ = PostMessageW(Some(HWND(hwnd_raw as *mut _)), msg, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
 fn apply_reason(st: &mut State, reason: u8, on: bool, at: i64) {
     match st.presence.set(reason, on) {
         Change::Paused => {
+            if st.away_started_ms.is_none() {
+                st.away_started_ms = Some(at);
+            }
             st.url_worker.invalidate();
             if let Err(e) = st.recorder.close(&st.sink, at) {
                 log_err("pause", e);
             }
         }
-        Change::Resumed => resync(st, at),
+        Change::Resumed => {
+            if let Some(away_start) = st.away_started_ms.take() {
+                notify_away_resume_if_timer(st, away_start, at);
+            }
+            resync(st, at);
+        }
         Change::None => {}
     }
 }
@@ -384,6 +428,7 @@ fn flush() {
             if let Err(e) = st.recorder.close(&st.sink, st.last_wall) {
                 log_err("close_after_sleep", e);
             }
+            notify_away_resume_if_timer(st, st.last_wall, wall);
             resync(st, wall);
         } else {
             if let Err(e) = st.recorder.tick(&st.sink, wall) {
@@ -663,6 +708,7 @@ fn run_thread(
                 last_wall: now_ms(),
                 last_unbiased: unbiased_ms(),
                 last_fg_hwnd: 0,
+                away_started_ms: None,
                 url_worker,
                 end_session_sync,
                 end_session_flushed: false,

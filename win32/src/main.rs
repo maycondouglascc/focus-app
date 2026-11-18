@@ -64,6 +64,7 @@ fn main() {
             }
             AppAction::DiagDrag => ui::selftest::diag_drag(),
             AppAction::UiCycle { count, all_screens } => ui::selftest::cycle(count, all_screens),
+            AppAction::TrayCycle(count) => ui::selftest::tray_cycle(count),
             AppAction::UiShow {
                 seconds,
                 gallery,

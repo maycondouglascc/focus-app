@@ -4,26 +4,31 @@
 //! shutdown), adapts to `SystemUsesLightTheme` and system DPI changes, and
 //! re-adds itself on `TaskbarCreated` when Explorer restarts.
 
+pub mod flyout;
 pub mod icon;
+pub mod menu;
+pub mod mini_timer;
 
 use std::ffi::c_void;
 use std::mem::size_of;
 
-use windows::core::w;
-use windows::Win32::Foundation::{ERROR_SUCCESS, HWND, LPARAM};
+use windows::core::{w, GUID};
+use windows::Win32::Foundation::{ERROR_SUCCESS, HWND, LPARAM, RECT};
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO,
-    NIIF_WARNING, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NOTIFYICONDATAW,
-    NOTIFYICONDATAW_0, NOTIFYICON_VERSION_4,
+    Shell_NotifyIconGetRect, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP,
+    NIF_TIP, NIIF_INFO, NIIF_WARNING, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
+    NOTIFYICONDATAW, NOTIFYICONDATAW_0, NOTIFYICONIDENTIFIER, NOTIFYICON_VERSION_4,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    RegisterWindowMessageW, HICON, SM_CXSMICON, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_SETTINGCHANGE,
+    RegisterWindowMessageW, SystemParametersInfoW, HICON, SM_CXSMICON, SPI_GETWORKAREA,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_SETTINGCHANGE,
     WM_THEMECHANGED,
 };
 
 use crate::log::{self, Category};
+use crate::ui::popup::ScreenRect;
 use icon::{create_tray_hicon, destroy_hicon, IconState, TaskbarTheme};
 
 const TRAY_ICON_ID: u32 = 1;
@@ -131,6 +136,47 @@ impl Tray {
     #[allow(dead_code)]
     pub fn state(&self) -> IconState {
         self.state
+    }
+
+    pub fn anchor_rect(&self) -> ScreenRect {
+        let ident = NOTIFYICONIDENTIFIER {
+            cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
+            hWnd: self.hwnd,
+            uID: TRAY_ICON_ID,
+            guidItem: GUID::zeroed(),
+        };
+        // SAFETY: `ident` is initialized on the stack with `cbSize`; `Shell_NotifyIconGetRect` writes a `RECT`.
+        if let Ok(rc) = unsafe { Shell_NotifyIconGetRect(&ident) } {
+            if rc.right > rc.left && rc.bottom > rc.top {
+                return ScreenRect {
+                    left: rc.left,
+                    top: rc.top,
+                    right: rc.right,
+                    bottom: rc.bottom,
+                };
+            }
+        }
+        let mut work = RECT {
+            left: 0,
+            top: 0,
+            right: 1280,
+            bottom: 800,
+        };
+        // SAFETY: fallback to primary work-area bottom-right when notification icon rect is unavailable.
+        unsafe {
+            let _ = SystemParametersInfoW(
+                SPI_GETWORKAREA,
+                0,
+                Some(&mut work as *mut RECT as *mut c_void),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            );
+        }
+        ScreenRect {
+            left: (work.right - 24).max(work.left),
+            top: work.bottom,
+            right: (work.right - 12).max(work.left),
+            bottom: work.bottom + 4,
+        }
     }
 
     fn base_nid(&self, icon: HICON) -> NOTIFYICONDATAW {
@@ -251,7 +297,6 @@ impl Tray {
         }
     }
 
-    #[allow(dead_code)] // used in E5/E7 for first-close, sleep-recovery, and DB-error balloons
     pub fn show_balloon(&self, title: &str, body: &str, warn: bool) {
         if !self.added {
             return;

@@ -39,6 +39,7 @@ pub struct SettingsScreen {
     id_browser: Option<WidgetId>,
     id_claude: Option<WidgetId>,
     id_busy: Option<WidgetId>,
+    id_mini_timer: Option<WidgetId>,
     id_csv_standard: Option<WidgetId>,
     id_delete_prompt: Option<WidgetId>,
     id_delete_keep: Option<WidgetId>,
@@ -72,6 +73,7 @@ impl SettingsScreen {
             id_browser: None,
             id_claude: None,
             id_busy: None,
+            id_mini_timer: None,
             id_csv_standard: None,
             id_delete_prompt: None,
             id_delete_keep: None,
@@ -540,6 +542,17 @@ impl SettingsScreen {
             &mut self.sel_time_format,
             env,
         );
+        build_hairline(tree, track_card, p);
+        Self::build_toggle_row(
+            tree,
+            track_card,
+            strings::SETTINGS_MINI_TIMER,
+            strings::SETTINGS_MINI_TIMER_SUB,
+            s.mini_timer_enabled,
+            false,
+            &mut self.id_mini_timer,
+            env,
+        );
 
         // 4. Data & exports
         build_section_title(tree, col, strings::SETTINGS_SEC_DATA, p);
@@ -625,6 +638,13 @@ impl SettingsScreen {
         if Some(id) == self.id_busy {
             self.save(SettingsPatch {
                 keep_active_when_busy: Some(!s.keep_active_when_busy),
+                ..Default::default()
+            });
+            return true;
+        }
+        if Some(id) == self.id_mini_timer {
+            self.save(SettingsPatch {
+                mini_timer_enabled: Some(!s.mini_timer_enabled),
                 ..Default::default()
             });
             return true;
@@ -958,15 +978,18 @@ mod tests {
         let _day_start_id = focus.tab(false).unwrap();
         let _first_day_id = focus.tab(false).unwrap();
         let _tf_id = focus.tab(false).unwrap();
+        let mini_timer_id = focus.tab(false).unwrap();
         let csv_id = focus.tab(false).unwrap();
         let del_prompt_id = focus.tab(false).unwrap();
 
-        // Toggle Claude & CSV defaults -> saved immediately.
+        // Toggle Claude, mini timer & CSV defaults -> saved immediately.
         assert!(host.on_click(claude_id));
+        assert!(host.on_click(mini_timer_id));
         assert!(host.on_click(csv_id));
         assert!(host.rebuild_if_dirty(&env, &mut focus));
         let s = store.borrow().get_settings().unwrap();
         assert!(!s.claude_sessions);
+        assert!(s.mini_timer_enabled);
         assert!(s.csv_standard);
 
         // Excluded apps text change & submit normalizes comma-separated tags.

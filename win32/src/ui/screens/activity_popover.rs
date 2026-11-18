@@ -561,7 +561,10 @@ impl PopupDelegate for ActivityPopoverDelegate {
                 crate::ui::input::KeyCode::PageDown => self.apply_wheel(tree, -180.0),
                 _ => PopupOutcome::default(),
             },
-            PopupEvent::Closed => PopupOutcome::default(),
+            PopupEvent::Closed
+            | PopupEvent::TextChange(_, _)
+            | PopupEvent::TextSubmit(_, _)
+            | PopupEvent::Tick => PopupOutcome::default(),
         }
     }
 }

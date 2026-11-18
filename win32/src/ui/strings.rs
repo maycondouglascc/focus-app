@@ -256,3 +256,42 @@ pub const PROJ_REP_NO_DESC: &str = "No description";
 pub const TRAY_TIP_IDLE: &str = "Focus";
 pub const TRAY_TIP_PAUSED: &str = "Focus — Recording paused";
 pub const TRAY_TIP_ERROR: &str = "Focus — Database write error";
+pub const TRAY_MENU_START: &str = "Start timer…";
+pub const TRAY_MENU_STOP: &str = "Stop timer";
+pub const TRAY_MENU_QUICK_START: &str = "Quick start";
+pub const TRAY_MENU_PAUSE: &str = "Pause recording";
+pub const TRAY_MENU_RESUME: &str = "Resume recording";
+pub const TRAY_MENU_OPEN: &str = "Open Focus";
+pub const TRAY_MENU_MINI_TIMER: &str = "Show mini timer";
+pub const TRAY_MENU_QUIT: &str = "Quit";
+pub const TRAY_MENU_NO_PROJECTS: &str = "No project";
+
+pub const FLYOUT_TITLE: &str = "Quick Timer";
+pub const FLYOUT_DESC_PLACEHOLDER: &str = "What are you working on?";
+pub const FLYOUT_DESC_LABEL: &str = "Timer description";
+pub const FLYOUT_PROJECT_LABEL: &str = "Project";
+pub const FLYOUT_NO_PROJECT: &str = "No project";
+pub const FLYOUT_START: &str = "Start";
+pub const FLYOUT_STOP: &str = "Stop";
+pub const FLYOUT_SAVE_NOTE: &str = "Update";
+pub const FLYOUT_OPEN_APP: &str = "Open Focus";
+pub const FLYOUT_AWAY_TITLE: &str = "Timer kept running";
+pub const FLYOUT_KEEP_TIME: &str = "Keep running";
+pub const FLYOUT_DISCARD_AWAY: &str = "End before break";
+
+pub const MINI_TIMER_NAME: &str = "Focus Mini Timer";
+pub const MINI_TIMER_READY: &str = "No timer";
+pub const MINI_TIMER_START_A11Y: &str = "Start timer";
+pub const MINI_TIMER_STOP_A11Y: &str = "Stop timer";
+pub const MINI_TIMER_HIDE_A11Y: &str = "Hide mini timer";
+pub const MINI_TIMER_OPEN_A11Y: &str = "Open Focus";
+
+pub const BALLOON_STILL_RUNNING_TITLE: &str = "Focus is still running";
+pub const BALLOON_STILL_RUNNING_BODY: &str =
+    "Recording continues in the tray. Click the Focus icon to open or stop.";
+pub const BALLOON_AWAY_TIMER_TITLE: &str = "Focus timer kept running";
+pub const BALLOON_AWAY_TIMER_BODY: &str =
+    "You were away while a timer was running. Click here to keep or trim it.";
+
+pub const SETTINGS_MINI_TIMER: &str = "Floating mini timer";
+pub const SETTINGS_MINI_TIMER_SUB: &str = "Always-on-top compact bar showing the active timer";

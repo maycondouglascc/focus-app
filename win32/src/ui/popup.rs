@@ -24,15 +24,16 @@ use windows::Win32::UI::Input::Pointer::{
     GetPointerInfo, POINTER_FLAG_FIRSTBUTTON, POINTER_FLAG_SECONDBUTTON, POINTER_INFO,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, IsWindow, LoadCursorW,
-    PostMessageW, RegisterClassW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, IDC_ARROW,
-    PT_PEN, PT_TOUCH, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WA_INACTIVE, WINDOW_EX_STYLE,
-    WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_GETOBJECT, WM_KEYDOWN, WM_KILLFOCUS, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_PAINT,
-    WM_POINTERCAPTURECHANGED, WM_POINTERDOWN, WM_POINTERENTER, WM_POINTERHWHEEL, WM_POINTERLEAVE,
-    WM_POINTERUP, WM_POINTERUPDATE, WM_POINTERWHEEL, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE,
-    WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED, WNDCLASSW, WS_CLIPCHILDREN,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, IsWindow, KillTimer,
+    LoadCursorW, PostMessageW, RegisterClassW, SetForegroundWindow, SetTimer, SetWindowPos,
+    ShowWindow, CS_HREDRAW, CS_VREDRAW, IDC_ARROW, PT_PEN, PT_TOUCH, SWP_NOACTIVATE, SWP_NOZORDER,
+    SW_SHOW, WA_INACTIVE, WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE,
+    WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETOBJECT, WM_KEYDOWN, WM_KILLFOCUS,
+    WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_PAINT, WM_POINTERCAPTURECHANGED, WM_POINTERDOWN,
+    WM_POINTERENTER, WM_POINTERHWHEEL, WM_POINTERLEAVE, WM_POINTERUP, WM_POINTERUPDATE,
+    WM_POINTERWHEEL, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN,
+    WM_THEMECHANGED, WM_TIMER, WNDCLASSW, WS_CLIPCHILDREN, WS_EX_NOREDIRECTIONBITMAP,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use super::a11y::{self, A11yActionQueue, StaticActivation, WM_A11Y_ACTION};
@@ -44,9 +45,15 @@ use super::render::{reset_shared, DrawError, FrameOpts, Hover, Renderer};
 use super::strings;
 use super::theme::Palette;
 use super::tree::{Tree, WidgetId};
+use super::widgets::text_field::{
+    sync_rich_fields, sync_rich_focus, RichEditField, WM_RICHEDIT_BLUR, WM_RICHEDIT_FOCUS,
+    WM_RICHEDIT_SUBMIT,
+};
 
 /// `WM_MOUSELEAVE`
 const WM_MOUSELEAVE: u32 = 0x02A3;
+const EN_CHANGE: u16 = 0x0300;
+const POPUP_TICK_TIMER_ID: usize = 1;
 /// Posted to the popup owner window when a popup updates state or closes.
 pub const WM_POPUP_NOTIFY: u32 = WM_APP + 5;
 
@@ -163,12 +170,15 @@ pub fn monitor_work_area(anchor: Option<ScreenRect>) -> ScreenRect {
 
 /// Events emitted from an open popup window to its widget controller.
 #[derive(Clone, Debug, PartialEq)]
-#[allow(dead_code)] // consumed by Select and Popover
+#[allow(dead_code)] // consumed by Select, Popover, and Tray Flyout
 pub enum PopupEvent {
     Click(WidgetId),
     Key(KeyEvent),
     Wheel(f32),
     FocusChanged(Option<WidgetId>),
+    TextChange(String, String),
+    TextSubmit(String, String),
+    Tick,
     Closed,
 }
 
@@ -190,6 +200,10 @@ pub trait PopupDelegate {
         tree: &mut Tree,
         focus: &mut FocusModel,
     ) -> PopupOutcome;
+
+    fn tick_ms(&self) -> Option<u32> {
+        None
+    }
 }
 
 struct ActivePopup {
@@ -207,7 +221,44 @@ struct ActivePopup {
     anchor_screen: Option<ScreenRect>,
     align: PopupAlign,
     size_dip: (f32, f32),
+    rich_fields: Vec<RichEditField>,
+    syncing_rich: bool,
+    tick_timer_ms: Option<u32>,
     dismissing: bool,
+}
+
+fn sync_popup_rich(p: &mut ActivePopup) {
+    let scale = p
+        .renderer
+        .as_ref()
+        .map_or(p.prefs.text_scale, |r| r.text().text_scale());
+    sync_rich_fields(
+        p.hwnd,
+        &p.tree,
+        &mut p.rich_fields,
+        scale,
+        &p.palette,
+        &mut p.syncing_rich,
+    );
+}
+
+fn sync_popup_timer(p: &mut ActivePopup) {
+    let want = p.delegate.tick_ms();
+    if want == p.tick_timer_ms {
+        return;
+    }
+    // SAFETY: `p.hwnd` is owned by this UI thread.
+    unsafe {
+        match want {
+            Some(ms) => {
+                let _ = SetTimer(Some(p.hwnd), POPUP_TICK_TIMER_ID, ms.max(100), None);
+            }
+            None => {
+                let _ = KillTimer(Some(p.hwnd), POPUP_TICK_TIMER_ID);
+            }
+        }
+    }
+    p.tick_timer_ms = want;
 }
 
 thread_local! {
@@ -329,7 +380,7 @@ pub fn open(
         let a11y = Adapter::new(hwnd, false, a11y_queue.handler());
 
         POPUP.with(|p| {
-            *p.borrow_mut() = Some(ActivePopup {
+            let mut active = ActivePopup {
                 hwnd,
                 owner,
                 renderer,
@@ -344,11 +395,23 @@ pub fn open(
                 anchor_screen,
                 align,
                 size_dip,
+                rich_fields: Vec::new(),
+                syncing_rich: false,
+                tick_timer_ms: None,
                 dismissing: false,
-            });
+            };
+            sync_popup_rich(&mut active);
+            sync_popup_timer(&mut active);
+            *p.borrow_mut() = Some(active);
         });
 
+        if owner.is_none() {
+            let _ = SetForegroundWindow(hwnd);
+        }
         let _ = ShowWindow(hwnd, SW_SHOW);
+        with_popup(|p| {
+            sync_rich_focus(p.hwnd, &p.focus, &p.tree, &p.rich_fields);
+        });
         let _ = InvalidateRect(Some(hwnd), None, false);
         Some(hwnd)
     }
@@ -366,6 +429,12 @@ pub fn close() {
         .on_event(PopupEvent::Closed, &mut popup.tree, &mut popup.focus);
     let hwnd = popup.hwnd;
     let owner = popup.owner;
+    if popup.tick_timer_ms.is_some() {
+        // SAFETY: `hwnd` belongs to the UI thread.
+        unsafe {
+            let _ = KillTimer(Some(hwnd), POPUP_TICK_TIMER_ID);
+        }
+    }
     drop(popup);
     // SAFETY: `hwnd` and `owner` belong to the current UI thread; invalid handles are harmless.
     unsafe {
@@ -379,6 +448,7 @@ pub fn close() {
             }
         }
     }
+    super::reset_shared_if_idle();
 }
 
 /// Updates the active popup's tree and optional height, keeping it clamped inside `rcWork`.
@@ -442,6 +512,9 @@ pub fn refresh_layout_with_height(desired_h_dip: Option<f32>) {
             let _ = p
                 .delegate
                 .on_event(PopupEvent::FocusChanged(cur), &mut p.tree, &mut p.focus);
+            sync_popup_rich(p);
+            sync_popup_timer(p);
+            sync_rich_focus(p.hwnd, &p.focus, &p.tree, &p.rich_fields);
         });
         sync_a11y(hwnd);
         let _ = InvalidateRect(Some(hwnd), None, false);
@@ -552,6 +625,9 @@ unsafe fn on_pointer_msg(hwnd: HWND, msg: u32, wparam: WPARAM) -> bool {
                 SetCapture(hwnd);
             }
             if focus_changed {
+                with_popup(|p| {
+                    sync_rich_focus(p.hwnd, &p.focus, &p.tree, &p.rich_fields);
+                });
                 sync_a11y(hwnd);
             }
             if visual_changed {
@@ -724,6 +800,7 @@ unsafe fn on_key_msg(hwnd: HWND, wparam: WPARAM) -> bool {
                     p.delegate
                         .on_event(PopupEvent::FocusChanged(next), &mut p.tree, &mut p.focus);
                 scroll_dirty = fout.dirty;
+                sync_rich_focus(p.hwnd, &p.focus, &p.tree, &p.rich_fields);
             }
             (
                 true,
@@ -913,10 +990,19 @@ unsafe extern "system" fn popup_wnd_proc(
                 target_h,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
+            with_popup(|p| {
+                let text_scale = p.prefs.text_scale;
+                let palette = p.palette;
+                for f in &mut p.rich_fields {
+                    f.sync_theme(&palette, dpi, text_scale);
+                }
+                sync_popup_rich(p);
+            });
             return LRESULT(0);
         }
         WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE => {
             let sys_prefs = SystemPrefs::query();
+            let dpi = GetDpiForWindow(hwnd);
             let changed = with_popup(|p| {
                 let palette = Palette::for_system(sys_prefs.high_contrast);
                 let text_changed = p
@@ -926,12 +1012,140 @@ unsafe extern "system" fn popup_wnd_proc(
                 let changed = p.prefs != sys_prefs || p.palette != palette || text_changed;
                 p.prefs = sys_prefs;
                 p.palette = palette;
+                if changed {
+                    for f in &mut p.rich_fields {
+                        f.sync_theme(&palette, dpi, p.prefs.text_scale);
+                    }
+                    sync_popup_rich(p);
+                }
                 changed
             })
             .unwrap_or(false);
             if changed {
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
+        }
+        WM_COMMAND => {
+            let code = ((wparam.0 >> 16) & 0xFFFF) as u16;
+            if code == EN_CHANGE {
+                let child = HWND(lparam.0 as *mut core::ffi::c_void);
+                let (dirty, should_close, resize_h) = with_popup(|p| {
+                    if p.syncing_rich {
+                        return (false, false, None);
+                    }
+                    let payload = p
+                        .rich_fields
+                        .iter()
+                        .find(|f| f.hwnd() == child)
+                        .map(|f| (f.key().to_string(), f.text()));
+                    let Some((key, val)) = payload else {
+                        return (false, false, None);
+                    };
+                    let out = p.delegate.on_event(
+                        PopupEvent::TextChange(key, val),
+                        &mut p.tree,
+                        &mut p.focus,
+                    );
+                    (out.dirty, out.close, out.resize_h_dip)
+                })
+                .unwrap_or((false, false, None));
+                if should_close {
+                    close();
+                } else if resize_h.is_some() || dirty {
+                    refresh_layout_with_height(resize_h);
+                }
+                return LRESULT(0);
+            }
+        }
+        m if m == WM_RICHEDIT_SUBMIT => {
+            let child = HWND(wparam.0 as *mut core::ffi::c_void);
+            let (dirty, should_close, notify_owner, resize_h, owner) = with_popup(|p| {
+                let payload = p
+                    .rich_fields
+                    .iter()
+                    .find(|f| f.hwnd() == child)
+                    .map(|f| (f.key().to_string(), f.text()));
+                let Some((key, val)) = payload else {
+                    return (false, false, false, None, p.owner);
+                };
+                let out = p.delegate.on_event(
+                    PopupEvent::TextSubmit(key, val),
+                    &mut p.tree,
+                    &mut p.focus,
+                );
+                (
+                    out.dirty,
+                    out.close,
+                    out.notify_owner,
+                    out.resize_h_dip,
+                    p.owner,
+                )
+            })
+            .unwrap_or((false, false, false, None, None));
+            if should_close {
+                close();
+                return LRESULT(0);
+            }
+            if notify_owner {
+                if let Some(ow) = owner {
+                    let _ = PostMessageW(Some(ow), WM_POPUP_NOTIFY, WPARAM(0), LPARAM(0));
+                }
+            }
+            if resize_h.is_some() || dirty {
+                refresh_layout_with_height(resize_h);
+            }
+            return LRESULT(0);
+        }
+        m if m == WM_RICHEDIT_FOCUS || m == WM_RICHEDIT_BLUR => {
+            let child = HWND(wparam.0 as *mut core::ffi::c_void);
+            let dirty = with_popup(|p| {
+                let Some(slot_id) = p
+                    .rich_fields
+                    .iter()
+                    .find(|f| f.hwnd() == child)
+                    .map(|f| f.slot_id())
+                else {
+                    return false;
+                };
+                let changed = if m == WM_RICHEDIT_FOCUS {
+                    p.focus.focus_pointer(slot_id)
+                } else if p.focus.focused() == Some(slot_id) {
+                    p.focus.clear_focus()
+                } else {
+                    false
+                };
+                if changed {
+                    let cur = p.focus.focused();
+                    let _ = p.delegate.on_event(
+                        PopupEvent::FocusChanged(cur),
+                        &mut p.tree,
+                        &mut p.focus,
+                    );
+                }
+                changed
+            })
+            .unwrap_or(false);
+            if dirty {
+                sync_a11y(hwnd);
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            return LRESULT(0);
+        }
+        WM_TIMER if wparam.0 == POPUP_TICK_TIMER_ID => {
+            let (dirty, should_close, resize_h) = with_popup(|p| {
+                let out = p
+                    .delegate
+                    .on_event(PopupEvent::Tick, &mut p.tree, &mut p.focus);
+                sync_popup_timer(p);
+                (out.dirty, out.close, out.resize_h_dip)
+            })
+            .unwrap_or((false, false, None));
+            if should_close {
+                close();
+            } else if resize_h.is_some() || dirty {
+                refresh_layout_with_height(resize_h);
+            }
+            return LRESULT(0);
         }
         WM_POINTERENTER
         | WM_POINTERLEAVE
@@ -1066,6 +1280,9 @@ unsafe extern "system" fn popup_wnd_proc(
                 }
             });
             if let Some(mut popup) = popped {
+                if popup.tick_timer_ms.is_some() {
+                    let _ = KillTimer(Some(hwnd), POPUP_TICK_TIMER_ID);
+                }
                 if !popup.dismissing {
                     let _ = popup.delegate.on_event(
                         PopupEvent::Closed,
@@ -1073,6 +1290,8 @@ unsafe extern "system" fn popup_wnd_proc(
                         &mut popup.focus,
                     );
                 }
+                drop(popup);
+                super::reset_shared_if_idle();
             }
         }
         _ => {}

@@ -1085,6 +1085,18 @@ impl Store for DemoStore {
         if let Some(v) = patch.csv_standard {
             self.settings.csv_standard = v;
         }
+        if let Some(v) = patch.mini_timer_enabled {
+            self.settings.mini_timer_enabled = v;
+        }
+        if let Some(v) = patch.mini_timer_x {
+            self.settings.mini_timer_x = v;
+        }
+        if let Some(v) = patch.mini_timer_y {
+            self.settings.mini_timer_y = v;
+        }
+        if let Some(v) = patch.tray_hint_shown {
+            self.settings.tray_hint_shown = v;
+        }
         Ok(self.settings.clone())
     }
 

@@ -1045,6 +1045,11 @@ impl Screen for AppShell {
         }
     }
 
+    fn on_external_data_change(&mut self) -> bool {
+        self.calendar.timer.sync_from_store(&self.store);
+        true
+    }
+
     fn wants_autoscroll(&self) -> bool {
         self.is_onboarded() && self.section == Section::Calendar && self.calendar.wants_autoscroll()
     }

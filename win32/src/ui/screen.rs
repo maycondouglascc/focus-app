@@ -117,6 +117,9 @@ pub trait Screen {
     fn on_popup_poll(&mut self) -> bool {
         false
     }
+    fn on_external_data_change(&mut self) -> bool {
+        false
+    }
     fn sync_after_layout(
         &mut self,
         _tree: &mut Tree,
@@ -324,6 +327,15 @@ impl ScreenHost {
             self.dirty = true;
         }
         reply
+    }
+
+    pub fn on_external_data_change(&mut self) -> bool {
+        if self.screen.on_external_data_change() {
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn wants_autoscroll(&self) -> bool {

@@ -26,6 +26,13 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::Pointer::EnableMouseInPointer;
 
+/// Closes/releases the shared Direct2D/DWrite device only when no UI windows are open.
+pub fn reset_shared_if_idle() {
+    if !window::is_open() && !popup::is_open() && !crate::tray::mini_timer::is_open() {
+        render::reset_shared();
+    }
+}
+
 /// Per-monitor DPI awareness (v2) and unified `WM_POINTER*` input.
 /// Call once, before creating any window.
 pub fn init() {

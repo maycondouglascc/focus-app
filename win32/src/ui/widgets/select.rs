@@ -315,9 +315,12 @@ impl PopupDelegate for SelectPopupDelegate {
                 }
                 _ => PopupOutcome::default(),
             },
-            PopupEvent::Closed | PopupEvent::Wheel(_) | PopupEvent::FocusChanged(_) => {
-                PopupOutcome::default()
-            }
+            PopupEvent::Closed
+            | PopupEvent::Wheel(_)
+            | PopupEvent::FocusChanged(_)
+            | PopupEvent::TextChange(_, _)
+            | PopupEvent::TextSubmit(_, _)
+            | PopupEvent::Tick => PopupOutcome::default(),
         }
     }
 }
