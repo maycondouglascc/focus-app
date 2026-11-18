@@ -1,0 +1,18 @@
+{
+  "task-watchdog": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts\\check-tasks.ps1",
+        "timeout": 15
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts\\check-tasks.ps1",
+        "timeout": 15
+      }
+    ]
+  }
+}
