@@ -551,6 +551,7 @@ fn run_thread(
             ))
         });
         arm_idle_timer(false);
+        with_state(|st| resync(st, now_ms()));
         log::event(Category::Monitor, "started");
 
         let _ = ready_tx.send(Ok(hidden_hwnd.map_or(0, |h| h.0 as isize)));

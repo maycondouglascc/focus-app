@@ -130,7 +130,7 @@ fn run_loop_until_closed() {
     }
 }
 
-enum BgStore {
+pub(crate) enum BgStore {
     None,
     Demo {
         handle: std::thread::JoinHandle<DemoStore>,
@@ -143,7 +143,7 @@ enum BgStore {
 }
 
 impl BgStore {
-    fn spawn_demo(fresh: bool) -> Self {
+    pub(crate) fn spawn_demo(fresh: bool) -> Self {
         let locale = SystemLocale::query();
         let handle = std::thread::spawn(move || {
             if fresh {
@@ -155,7 +155,7 @@ impl BgStore {
         Self::Demo { handle, fresh }
     }
 
-    fn spawn_db(path: &Path) -> Self {
+    pub(crate) fn spawn_db(path: &Path) -> Self {
         let p_owned = path.to_path_buf();
         let p_disp = path.to_path_buf();
         let handle = std::thread::spawn(move || {
@@ -170,7 +170,10 @@ impl BgStore {
         }
     }
 
-    fn finish_shell(self, screen_name: Option<&str>) -> Result<Option<Box<dyn Screen>>, i32> {
+    pub(crate) fn finish_shell(
+        self,
+        screen_name: Option<&str>,
+    ) -> Result<Option<Box<dyn Screen>>, i32> {
         match self {
             Self::None => Ok(None),
             Self::Demo { handle, fresh } => match handle.join() {
@@ -192,7 +195,7 @@ impl BgStore {
         }
     }
 
-    fn abort(self) {
+    pub(crate) fn abort(self) {
         match self {
             Self::None => {}
             Self::Demo { handle, .. } => {

@@ -21,8 +21,8 @@ use windows::Win32::UI::Input::Pointer::{
     GetPointerInfo, POINTER_FLAG_FIRSTBUTTON, POINTER_FLAG_SECONDBUTTON, POINTER_INFO,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, IsWindow,
-    IsZoomed, KillTimer, LoadCursorW, PeekMessageW, PostMessageW, RegisterClassW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, IsIconic,
+    IsWindow, IsZoomed, KillTimer, LoadCursorW, PeekMessageW, PostMessageW, RegisterClassW,
     SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW,
     CS_VREDRAW, CW_USEDEFAULT, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTCLOSE,
     HTLEFT, HTMAXBUTTON, HTMINBUTTON, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, MSG,
@@ -96,7 +96,12 @@ struct Ui {
 thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
     static CUR_HWND: Cell<isize> = const { Cell::new(0) };
+    static CLOSE_NOTIFY: Cell<(isize, u32)> = const { Cell::new((0, 0)) };
     static RECT_CACHE: RefCell<Vec<(WidgetId, Rect)>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn set_close_notify(hwnd: HWND, msg: u32) {
+    CLOSE_NOTIFY.with(|c| c.set((hwnd.0 as isize, msg)));
 }
 
 fn with_ui<R>(f: impl FnOnce(&mut Ui) -> R) -> Option<R> {
@@ -561,6 +566,9 @@ pub fn open() -> bool {
         // SAFETY: `h` is a window of this thread; failure is harmless.
         if unsafe { IsWindow(Some(h)).as_bool() } {
             unsafe {
+                if IsIconic(h).as_bool() {
+                    let _ = ShowWindow(h, SW_RESTORE);
+                }
                 let _ = SetForegroundWindow(h);
             }
             return true;
@@ -1879,6 +1887,16 @@ unsafe extern "system" fn wnd_proc(
             });
             drop(ui);
             reset_shared();
+            let (notify_hwnd, notify_msg) = CLOSE_NOTIFY.with(|c| c.get());
+            if notify_hwnd != 0 && notify_msg != 0 {
+                // SAFETY: `notify_hwnd` is owned by this UI thread's `FocusTrayWindow`.
+                let _ = PostMessageW(
+                    Some(HWND(notify_hwnd as *mut _)),
+                    notify_msg,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
         }
         _ => {}
     }
