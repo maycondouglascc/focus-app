@@ -9,7 +9,7 @@ import { activity, db, settings } from './db';
  * incrementally (byte offset per file), so a scan only parses what was appended since the last one.
  */
 
-const ROOT = path.join(os.homedir(), '.claude', 'projects');
+const ROOT = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'projects');
 const GAP_MS = 10 * 60_000;
 /** A run's end gets this much after its last message, the reading/thinking time after a reply. */
 const TAIL_MS = 60_000;

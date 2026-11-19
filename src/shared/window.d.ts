@@ -6,6 +6,8 @@ declare global {
     focusApp?: FocusApi;
     /** True when the app was started with `npm run demo`. */
     focusDemo?: boolean;
+    /** Host OS platform (`'darwin'`, `'linux'`, ...), exposed by preload. */
+    focusPlatform?: NodeJS.Platform;
   }
 }
 

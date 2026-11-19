@@ -2,7 +2,7 @@ import { BrowserWindow, ipcMain } from 'electron';
 import { Channels, type ChangeScope, type TimerStartInput } from '../shared/ipc';
 import type { EntryInput, EntryPatch, ProjectInput, ProjectPatch, Range, Settings } from '../shared/types';
 import { activity, entries, projects, settings } from './db';
-import { monitorStatus, requestAccessibility, startMonitor, stopMonitor } from './monitor';
+import { forgetDeletedActivity, monitorStatus, requestAccessibility, startMonitor, stopMonitor } from './monitor';
 import { claudeLastScan, scanClaude } from './claudeSessions';
 import { appIcons } from './appIcons';
 
@@ -61,9 +61,15 @@ export function registerHandlers(onTimerChange: () => void) {
   });
 
   h(Channels.activityList, (r: Range) => activity.list(r));
+  h(Channels.activityDelete, (ids: number[]) => {
+    const clean = Array.isArray(ids) ? ids : [];
+    activity.remove(clean);
+    forgetDeletedActivity(clean);
+    broadcast('activity');
+  });
   h(Channels.activityClear, () => activity.clear());
   h(Channels.appIcons, (names: string[]) => appIcons(names));
-  h(Channels.monitorStatus, () => ({ ...monitorStatus(), claudeLastScan: claudeLastScan() }));
+  h(Channels.monitorStatus, async () => ({ ...(await monitorStatus()), claudeLastScan: claudeLastScan() }));
   h(Channels.monitorRequestAccess, () => requestAccessibility());
 
   h(Channels.settingsGet, () => settings.get());

@@ -65,6 +65,11 @@ export function useSaveSettings() {
   return useMutation({ mutationFn: (p: Partial<Settings>) => api.settings.save(p), onSuccess: () => inv('settings', 'monitor', 'activity') });
 }
 
+export function useDeleteActivity() {
+  const inv = useInvalidate();
+  return useMutation({ mutationFn: (ids: number[]) => api.activity.remove(ids), onSuccess: () => inv('activity') });
+}
+
 /** Icons for a set of app names. Cached for the session: icons don't change while the app runs. */
 export function useAppIcons(names: string[]) {
   const key = [...new Set(names)].sort();

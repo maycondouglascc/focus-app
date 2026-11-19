@@ -70,7 +70,11 @@ Without these, Focus still tracks which app is in front.
 
 ## Build from source
 
-Requires macOS, Node 20+ and Xcode Command Line Tools.
+Requires Node 20+.
+
+### macOS
+
+Requires macOS and Xcode Command Line Tools.
 
 ```bash
 npm install
@@ -78,6 +82,17 @@ npm run make       # builds Focus.app into out/Focus-darwin-arm64/
 ```
 
 Move `out/Focus-darwin-arm64/Focus.app` to Applications and open it. To run it from source while you work on it, use `npm start`.
+
+### Windows (Electron)
+
+Requires Windows 10/11 (x64) and Visual Studio Build Tools (C++ workload for `better-sqlite3`).
+
+```powershell
+npm install
+npm run make:win   # builds Focus-Setup.exe (Squirrel) and a portable ZIP into out/make/
+```
+
+On Windows, Focus tracks foreground windows (including UWP/Store apps via `ApplicationFrameHost`), reads browser address bars via Windows UI Automation, detects active media sessions via Core Audio, extracts native `.exe` icons, and minimizes to the system tray. No extra Accessibility permissions are required. Data is stored locally in `%APPDATA%\Focus\focus.db`.
 
 ### What's where
 - `src/main/db.ts`: SQLite (better-sqlite3) holding projects, entries, activity and settings. Migrations are an append-only array.

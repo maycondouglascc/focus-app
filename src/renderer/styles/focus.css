@@ -1380,6 +1380,46 @@ button.fo-share:focus-visible {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+.fo-share-del {
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  border-radius: 6px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+.fo-share-del svg {
+  width: 14px;
+  height: 14px;
+}
+.fo-share:hover .fo-share-del,
+.fo-share:focus-within .fo-share-del {
+  opacity: 1;
+}
+.fo-share-del:hover {
+  color: var(--lo-danger);
+}
+.fo-share-del:hover svg {
+  color: var(--lo-danger);
+}
+@media (hover: none) {
+  .fo-share-del {
+    opacity: 1;
+  }
+}
+.fo-share-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.fo-share-confirm .lo-btn--sm {
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: var(--t-axis);
+}
 .fo-share-track {
   height: 6px;
   border-radius: 999px;
@@ -1587,6 +1627,9 @@ button.fo-share:focus-visible {
 }
 .fo-setting:first-child {
   border-top: 0;
+}
+.fo-setting[data-disabled='true'] {
+  opacity: 0.45;
 }
 .fo-setting-text {
   flex: 1;

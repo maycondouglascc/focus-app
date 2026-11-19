@@ -24,6 +24,7 @@ export const Channels = {
   timerStart: 'timer:start',
   timerStop: 'timer:stop',
   activityList: 'activity:list',
+  activityDelete: 'activity:delete',
   activityClear: 'activity:clear',
   appIcons: 'apps:icons',
   monitorStatus: 'monitor:status',
@@ -62,6 +63,7 @@ export interface FocusApi {
   };
   activity: {
     list: (range: Range) => Promise<Activity[]>;
+    remove: (ids: number[]) => Promise<void>;
     clear: () => Promise<void>;
   };
   apps: {

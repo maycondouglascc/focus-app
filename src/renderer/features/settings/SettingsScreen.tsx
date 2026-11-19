@@ -1,20 +1,33 @@
 import { useState } from 'react';
 import { api, isNative, useMonitorStatus, useSaveSettings, useSettings } from '@/renderer/lib/api';
+import { browserTabsHint, describeAccessState, isMac, isWin, mediaActivityHint } from '@/renderer/lib/platform';
 import { LoButton } from '@/renderer/components/LoButton';
 import { LoSelect } from '@/renderer/components/LoSelect';
 import { useQueryClient } from '@tanstack/react-query';
 
 const CURRENCIES = ['PLN', 'EUR', 'USD', 'GBP', 'CHF', 'SEK', 'NOK', 'DKK', 'CZK'];
 
-export function Toggle({ label, hint, checked, onChange }: { label: string; hint: string; checked: boolean; onChange: (v: boolean) => void }) {
+export function Toggle({
+  label,
+  hint,
+  checked,
+  disabled = false,
+  onChange,
+}: {
+  label: string;
+  hint: string;
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (v: boolean) => void;
+}) {
   return (
-    <label className="fo-setting">
+    <label className="fo-setting" data-disabled={disabled || undefined}>
       <span className="fo-setting-text">
         <span className="lo-title">{label}</span>
         <span className="lo-meta">{hint}</span>
       </span>
       <span className="fo-switch">
-        <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+        <input type="checkbox" checked={checked && !disabled} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
         <span className="fo-switch-track" aria-hidden="true" />
       </span>
     </label>
@@ -27,7 +40,12 @@ export function SettingsScreen() {
   const save = useSaveSettings();
   const qc = useQueryClient();
   const [confirmClear, setConfirmClear] = useState(false);
+  const [asked, setAsked] = useState(false);
   if (!s) return null;
+
+  const access = describeAccessState(status, asked);
+  const browserTabsSupported = status?.capabilities?.browserTabs ?? (isMac || isWin);
+  const mediaActivitySupported = status?.capabilities?.mediaActivity ?? false;
 
   return (
     <div className="page fo-page">
@@ -42,7 +60,7 @@ export function SettingsScreen() {
         <div className="lo-card fo-settings">
           <Toggle
             label="Record activity"
-            hint="Samples the app in front and its window every 5 seconds. Stored only in a local database on this Mac."
+            hint="Samples the app in front and its window every 5 seconds. Stored only in a local database on this computer."
             checked={s.monitorEnabled}
             onChange={(v) => save.mutate({ monitorEnabled: v })}
           />
@@ -50,23 +68,35 @@ export function SettingsScreen() {
             <span className="fo-setting-text">
               <span className="lo-title">Window titles</span>
               <span className="lo-meta">
-                {status?.accessibility
-                  ? 'Allowed. Focus sees files, documents and window names.'
-                  : 'Needs Accessibility access (Privacy & Security). Without it, only app names are recorded.'}
+                {access.allowed
+                  ? access.hint
+                  : status?.platform === 'darwin'
+                    ? 'Needs Accessibility access (Privacy & Security). Without it, only app names are recorded.'
+                    : access.hint}
               </span>
             </span>
-            {status?.accessibility ? (
+            {access.allowed ? (
               <span className="fo-ok">Allowed</span>
             ) : (
-              <LoButton small onClick={() => api.monitor.requestAccess().then(() => qc.invalidateQueries({ queryKey: ['monitor'] }))} disabled={!isNative}>
-                Allow access
-              </LoButton>
+              access.actionLabel && (
+                <LoButton
+                  small
+                  onClick={() => {
+                    setAsked(true);
+                    void api.monitor.requestAccess().then(() => qc.invalidateQueries({ queryKey: ['monitor'] }));
+                  }}
+                  disabled={!isNative}
+                >
+                  {access.actionLabel}
+                </LoButton>
+              )
             )}
           </div>
           <Toggle
             label="Browser tabs"
-            hint="Reads the active tab's title and address in Arc, Chrome, Brave, Edge and Safari. macOS asks once per browser."
+            hint={browserTabsHint(status?.platform, browserTabsSupported)}
             checked={s.browserTabs}
+            disabled={!browserTabsSupported}
             onChange={(v) => save.mutate({ browserTabs: v })}
           />
           <Toggle
@@ -82,7 +112,7 @@ export function SettingsScreen() {
             </span>
             <div className="fo-setting-ctl">
               <LoSelect value={String(s.idleMinutes)} onChange={(e) => save.mutate({ idleMinutes: Number(e.target.value) })} aria-label="Idle threshold">
-                {[1, 2, 3, 5, 10, 15].map((m) => (
+                {[1, 2, 3, 5, 10, 15, 30, 60].map((m) => (
                   <option key={m} value={String(m)}>
                     {m} min
                   </option>
@@ -90,6 +120,13 @@ export function SettingsScreen() {
               </LoSelect>
             </div>
           </div>
+          <Toggle
+            label="Keep active during media"
+            hint={mediaActivityHint(mediaActivitySupported)}
+            checked={s.keepActiveOnMedia}
+            disabled={!mediaActivitySupported}
+            onChange={(v) => save.mutate({ keepActiveOnMedia: v })}
+          />
         </div>
 
         <h2 className="lo-h2 fo-section-title">Time tracking</h2>

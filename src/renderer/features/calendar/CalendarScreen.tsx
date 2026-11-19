@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from 'react';
 import type { TimeEntry } from '@/shared/types';
 import { LoButton } from '@/renderer/components/LoButton';
 import { api, useActivity, useEntries, useMonitorStatus, useProjects, useSettings } from '@/renderer/lib/api';
+import { describeAccessState } from '@/renderer/lib/platform';
 import { useQueryClient } from '@tanstack/react-query';
 import { Icon } from '@/renderer/components/Icon';
 import { addDays, isoWeek, startOfWeek } from '@/renderer/lib/time';
@@ -48,7 +49,8 @@ export function CalendarScreen({ onNewProject }: { onNewProject: () => void }) {
       return false;
     }
   });
-  const axNudge = !!status && status.enabled && !status.accessibility && !axDismissed;
+  const axNudge = !!status && status.enabled && !status.accessibility && status.permissionState !== 'unavailable' && !axDismissed;
+  const access = describeAccessState(status, false);
 
   const [editing, setEditing] = useState<{ draft: Draft; anchor: DOMRect | null } | null>(null);
   const [actBlock, setActBlock] = useState<{ session: ActivitySession; anchor: DOMRect } | null>(null);
@@ -134,11 +136,15 @@ export function CalendarScreen({ onNewProject }: { onNewProject: () => void }) {
         <div className="fo-nudge" role="status">
           <Icon name="macwindow" size={16} />
           <span>
-            Focus sees app names only. Allow Accessibility access so activity shows which file or page you were on.
+            {status?.platform !== 'darwin'
+              ? access.hint
+              : 'Focus sees app names only. Allow Accessibility access so activity shows which file or page you were on.'}
           </span>
-          <LoButton small onClick={() => void api.monitor.requestAccess().then(() => qc.invalidateQueries({ queryKey: ['monitor'] }))}>
-            Allow access
-          </LoButton>
+          {access.actionLabel && (
+            <LoButton small onClick={() => void api.monitor.requestAccess().then(() => qc.invalidateQueries({ queryKey: ['monitor'] }))}>
+              {access.actionLabel}
+            </LoButton>
+          )}
           <LoButton
             small
             variant="ghost"

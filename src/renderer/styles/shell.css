@@ -89,6 +89,15 @@ html[data-vibrancy] .shell-root {
   position: relative;
   top: 4px; /* optical: sits a touch lower than the traffic lights' centre line */
 }
+html[data-platform='linux'] .shell-sidebar-drag,
+html[data-platform='win32'] .shell-sidebar-drag {
+  height: 52px;
+  padding: 12px 8px 0 24px;
+}
+html[data-platform='linux'] .shell-brand,
+html[data-platform='win32'] .shell-brand {
+  top: 0;
+}
 .shell-row {
   box-sizing: border-box;
   display: flex;

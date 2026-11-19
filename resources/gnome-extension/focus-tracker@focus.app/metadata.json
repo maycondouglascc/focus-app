@@ -1,0 +1,7 @@
+{
+  "uuid": "focus-tracker@focus.app",
+  "name": "Focus Window Tracker",
+  "description": "Exposes the active window app ID, class, title, and PID to the local Focus desktop app over session D-Bus.",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "version": 1
+}

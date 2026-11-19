@@ -4,19 +4,43 @@ import path from 'node:path';
 import { rebuild } from '@electron/rebuild';
 import type { ForgeConfig } from '@electron-forge/shared-types';
 import { MakerZIP } from '@electron-forge/maker-zip';
+import { MakerDeb } from '@electron-forge/maker-deb';
+import { MakerRpm } from '@electron-forge/maker-rpm';
+import { MakerSquirrel } from '@electron-forge/maker-squirrel';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-natives';
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
 
+const hasCommand = (cmd: string) =>
+  (process.env.PATH || '').split(path.delimiter).some((dir) => dir && fs.existsSync(path.join(dir, cmd)));
+
+const linuxDesktop = {
+  name: 'focus',
+  productName: 'Focus',
+  genericName: 'Time Tracker',
+  description: 'Local time tracker with an activity stream',
+  productDescription: 'Focus puts logged time entries and automatic activity side by side in a local-first desktop app.',
+  icon: './assets/icon.png',
+  categories: ['Utility', 'Office'] as ('Utility' | 'Office')[],
+};
+
 const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
     name: 'Focus',
-    // App icon (.icns is added by the packager). Source artwork: assets/Icon-iOS-Default-1024@2x.png, padded to the macOS grid.
+    ...(process.platform === 'linux' ? { executableName: 'focus' } : {}),
+    // App icon (.icns on macOS, .ico on Windows, .png on Linux).
     icon: './assets/icon',
-    // The menu-bar icon is loaded from disk at runtime (src/main/tray.ts).
-    extraResource: ['./assets'],
+    win32metadata: {
+      CompanyName: 'Focus',
+      FileDescription: 'Focus — Local time tracker with an activity stream',
+      OriginalFilename: 'Focus.exe',
+      ProductName: 'Focus',
+      InternalName: 'Focus',
+    },
+    // Tray icons, Linux GNOME extension, and Windows helper script are loaded from disk at runtime.
+    extraResource: ['./assets', './resources/gnome-extension', './resources/win32'],
   },
   rebuildConfig: {},
   hooks: {
@@ -43,8 +67,22 @@ const config: ForgeConfig = {
       }
     },
   },
-  // macOS only (SF Symbols, Terminal sign-in, hiddenInset title bar).
-  makers: [new MakerZIP({}, ['darwin'])],
+  makers: [
+    new MakerSquirrel(
+      {
+        name: 'focus',
+        authors: 'Focus',
+        description: 'Local time tracker with an activity stream',
+        setupIcon: path.resolve(__dirname, 'assets', 'icon.ico'),
+        setupExe: 'Focus-Setup.exe',
+        noMsi: true,
+      },
+      ['win32'],
+    ),
+    new MakerZIP({}, ['darwin', 'linux', 'win32']),
+    new MakerDeb({ options: linuxDesktop }, ['linux']),
+    ...(hasCommand('rpmbuild') ? [new MakerRpm({ options: linuxDesktop }, ['linux'])] : []),
+  ],
   plugins: [
     // Unpack native modules (better-sqlite3) from the asar so their .node binaries load.
     new AutoUnpackNativesPlugin({}),

@@ -7,11 +7,14 @@ import '@fontsource-variable/newsreader/opsz.css';
 import './styles/index.css';
 import App from './App';
 
+import { currentPlatform } from './lib/platform';
+
 const root = document.getElementById('root');
 if (!root) throw new Error('index.html has no #root element.');
 
+document.documentElement.dataset.platform = currentPlatform;
 // Inside the Mac app the window itself is translucent (vibrancy); the page must not paint over it.
-if (window.focusApp && navigator.userAgent.includes('Macintosh')) document.documentElement.dataset.vibrancy = '';
+if (window.focusApp && currentPlatform === 'darwin') document.documentElement.dataset.vibrancy = '';
 
 createRoot(root).render(
   <StrictMode>

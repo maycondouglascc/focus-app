@@ -3,7 +3,9 @@ import type { Activity } from '@/shared/types';
 import { firstStart, fitPeriod, PeriodNav, usePeriod } from '@/renderer/components/PeriodNav';
 import { Heatmap, ShareRow, Spark, StackedBars, type Bucket } from '@/renderer/components/charts';
 import { Segmented } from '@/renderer/components/Segmented';
-import { useActivity, useAppIcons, useMonitorStatus } from '@/renderer/lib/api';
+import { LoButton } from '@/renderer/components/LoButton';
+import { useActivity, useAppIcons, useDeleteActivity, useMonitorStatus } from '@/renderer/lib/api';
+import { describeAccessState } from '@/renderer/lib/platform';
 import { AppIcon } from '@/renderer/components/AppIcon';
 import { appColor } from '@/renderer/lib/colors';
 import { duration, hm } from '@/renderer/lib/format';
@@ -55,6 +57,8 @@ export function ActivityScreen() {
   const period = useMemo(() => fitPeriod(ctl.period, firstStart(all)), [ctl.period, all]);
   const [app, setApp] = useState<string | null>(null);
   const [claudeBy, setClaudeBy] = useState<'project' | 'session'>('project');
+  const [confirmKey, setConfirmKey] = useState<string | null>(null);
+  const deleteActivity = useDeleteActivity();
 
   const model = useMemo(() => {
     const { from, to, buckets } = period;
@@ -99,15 +103,19 @@ export function ActivityScreen() {
   });
 
   // Where the time went: details inside the selected app (or across all apps).
-  const details = new Map<string, { label: string; sub: string; ms: number; color: string }>();
+  const details = new Map<string, { key: string; label: string; sub: string; ms: number; color: string; ids: number[] }>();
   for (const a of scoped) {
     const isClaude = a.kind === 'claude';
     const label = isClaude ? (claudeBy === 'project' ? a.context || 'No project' : a.detail || 'Untitled session') : a.detail || (selected ? 'No window title' : a.app);
     const sub = isClaude ? (claudeBy === 'project' ? '' : a.context) : selected ? a.context : a.detail ? a.app : '';
     const k = `${label}\u0000${sub}`;
-    const cur = details.get(k) ?? { label, sub, ms: 0, color: appColor(appOf(a)) };
-    cur.ms += len(a, period.from, period.to);
-    details.set(k, cur);
+    const cur = details.get(k) ?? { key: k, label, sub, ms: 0, color: appColor(appOf(a)), ids: [] };
+    const overlapMs = len(a, period.from, period.to);
+    if (overlapMs > 0) {
+      cur.ms += overlapMs;
+      cur.ids.push(a.id);
+      details.set(k, cur);
+    }
   }
   const detailRows = [...details.values()].filter((d) => d.ms >= 30_000).sort((x, y) => y.ms - x.ms).slice(0, 14);
   const maxApp = model.ranked[0]?.[1].ms ?? 0;
@@ -131,7 +139,9 @@ export function ActivityScreen() {
         {status && !status.enabled && <div className="fo-banner">The activity monitor is off. Turn it on in Settings to record which apps you use.</div>}
         {status && status.enabled && status.native && !status.accessibility && (
           <div className="fo-banner fo-banner--attn">
-            Focus can see app names but not window titles. Allow Accessibility access in Settings to see files, tabs and sessions.
+            {status.platform !== 'darwin'
+              ? describeAccessState(status, false).hint
+              : 'Focus can see app names but not window titles. Allow Accessibility access in Settings to see files, tabs and sessions.'}
           </div>
         )}
 
@@ -218,9 +228,50 @@ export function ActivityScreen() {
                 </div>
                 <div className="fo-share-list">
                   {detailRows.length === 0 && <p className="lo-sub">No window titles recorded for this selection.</p>}
-                  {detailRows.map((d) => (
-                    <ShareRow key={d.label + d.sub} label={d.label} sub={d.sub} value={d.ms} max={maxDetail} color={d.color} right={short(d.ms)} />
-                  ))}
+                  {detailRows.map((d) => {
+                    const rowConfirmId = `${period.from}:${selected ?? ''}:${claudeBy}:${d.key}`;
+                    const confirming = confirmKey === rowConfirmId;
+                    return (
+                      <ShareRow
+                        key={d.key}
+                        label={d.label}
+                        sub={d.sub}
+                        value={d.ms}
+                        max={maxDetail}
+                        color={d.color}
+                        right={confirming ? null : short(d.ms)}
+                        action={
+                          confirming ? (
+                            <span className="fo-share-confirm">
+                              <LoButton small onClick={() => setConfirmKey(null)}>
+                                Keep
+                              </LoButton>
+                              <LoButton
+                                small
+                                variant="danger"
+                                disabled={deleteActivity.isPending}
+                                onClick={() => {
+                                  void deleteActivity.mutateAsync(d.ids).then(() => setConfirmKey(null));
+                                }}
+                              >
+                                Delete
+                              </LoButton>
+                            </span>
+                          ) : (
+                            <LoButton
+                              small
+                              variant="ghost"
+                              icon="trash"
+                              className="fo-share-del"
+                              aria-label={`Delete ${d.label}`}
+                              title="Delete item"
+                              onClick={() => setConfirmKey(rowConfirmId)}
+                            />
+                          )
+                        }
+                      />
+                    );
+                  })}
                 </div>
               </section>
             </div>

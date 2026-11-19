@@ -26,6 +26,7 @@ const api: FocusApi = {
   },
   activity: {
     list: call(Channels.activityList),
+    remove: call(Channels.activityDelete),
     clear: call(Channels.activityClear),
   },
   apps: {
@@ -49,3 +50,4 @@ const api: FocusApi = {
 contextBridge.exposeInMainWorld('focusApp', api);
 // Demo mode (`npm run demo`): the renderer swaps in sample data and a fixed clock.
 contextBridge.exposeInMainWorld('focusDemo', process.argv.includes('--focus-demo'));
+contextBridge.exposeInMainWorld('focusPlatform', process.platform);

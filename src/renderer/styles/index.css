@@ -71,7 +71,7 @@ textarea {
  */
 [data-rs-theme] {
   --rs-font-family-body: -apple-system, BlinkMacSystemFont, 'SF Pro Text',
-    'SF Pro Display', system-ui, 'Helvetica Neue', sans-serif;
+    'SF Pro Display', 'Segoe UI Variable Text', 'Segoe UI', system-ui, 'Helvetica Neue', sans-serif;
   --rs-font-family-body-1: var(--rs-font-family-body);
   --rs-font-family-body-2: var(--rs-font-family-body);
   --rs-font-family-caption-1: var(--rs-font-family-body);
@@ -85,7 +85,7 @@ textarea {
   --rs-font-family-headline-1: var(--rs-font-family-body);
   --rs-font-family-headline-2: var(--rs-font-family-body);
   --rs-font-family-headline-3: var(--rs-font-family-body);
-  --rs-font-family-monospace: ui-monospace, 'SF Mono', Menlo, monospace;
+  --rs-font-family-monospace: ui-monospace, 'SF Mono', Menlo, 'Cascadia Mono', Consolas, 'Ubuntu Mono', 'JetBrains Mono', 'DejaVu Sans Mono', monospace;
 }
 
 /*

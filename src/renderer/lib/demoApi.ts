@@ -1,5 +1,6 @@
 import type { FocusApi, ChangeScope } from '@/shared/ipc';
 import type { Activity, Project, Settings, TimeEntry } from '@/shared/types';
+import { currentPlatform } from './platform';
 import { addDays, atMinutes, startOfDay, startOfWeek } from './time';
 
 /**
@@ -23,7 +24,7 @@ export function createDemoApi(): FocusApi {
   ];
   const entries: TimeEntry[] = [];
   const activity: Activity[] = [];
-  let settings: Settings = { currency: 'USD', monitorEnabled: true, idleMinutes: 3, browserTabs: true, claudeSessions: true, dayStartHour: 8, onboarded: true };
+  let settings: Settings = { currency: 'USD', monitorEnabled: true, idleMinutes: 3, keepActiveOnMedia: true, browserTabs: true, claudeSessions: true, dayStartHour: 8, onboarded: true };
 
   // What each project's work looks like: tasks, the apps (and windows) they happen in, and Claude Code sessions.
   type Win = [app: string, detail: string, context: string, url: string];
@@ -238,6 +239,14 @@ export function createDemoApi(): FocusApi {
     },
     activity: {
       list: ({ from, to }) => ok(activity.filter((a) => a.start < to && a.end > from)),
+      remove: (ids) => {
+        const drop = new Set(ids);
+        for (let i = activity.length - 1; i >= 0; i--) {
+          if (drop.has(activity[i].id)) activity.splice(i, 1);
+        }
+        emit('activity');
+        return ok(undefined);
+      },
       clear: () => {
         activity.length = 0;
         emit('activity');
@@ -256,6 +265,21 @@ export function createDemoApi(): FocusApi {
           current: fresh ? null : { app: 'Figma', detail: 'Halcyon — Onboarding', since: now - 12 * 60_000 },
           claudeLastScan: fresh ? null : now,
           native: false,
+          platform: currentPlatform,
+          backend: currentPlatform === 'darwin' ? 'macos-jxa' : currentPlatform === 'win32' ? 'win32' : 'gnome-wayland',
+          sessionType: currentPlatform === 'darwin' ? 'darwin' : currentPlatform === 'win32' ? 'win32' : 'wayland',
+          permissionState:
+            accessibility || currentPlatform === 'win32'
+              ? 'granted'
+              : currentPlatform === 'darwin'
+                ? 'needs-permission'
+                : 'needs-setup',
+          capabilities: {
+            windowTitles: true,
+            browserTabs: currentPlatform === 'darwin' || currentPlatform === 'win32',
+            idleDetection: true,
+            mediaActivity: currentPlatform === 'linux' || currentPlatform === 'win32',
+          },
         }),
       requestAccess: () => {
         accessibility = true;

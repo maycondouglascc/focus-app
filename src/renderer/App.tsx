@@ -2,6 +2,7 @@ import { useEffect, useState, type CSSProperties } from 'react';
 import { Reshaped } from 'reshaped';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { queryClient, useLiveData, useSettings } from './lib/api';
+import { isMac, useNativeTitleBar } from './lib/platform';
 import { Welcome } from './app/Welcome';
 import { DataErrorBanner, ScreenBoundary } from './components/ErrorStates';
 import { Sidebar, type Section } from './app/Sidebar';
@@ -28,7 +29,8 @@ function Shell() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!e.metaKey || e.shiftKey || e.altKey || e.ctrlKey) return;
+      const mod = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+      if (!mod || e.shiftKey || e.altKey) return;
       const s = KEYS[e.key];
       if (s) {
         e.preventDefault();
@@ -46,7 +48,7 @@ function Shell() {
     <div className="shell-root">
       <Sidebar section={section} projectId={projectId} onSelect={setSection} onProject={openProject} />
       <main className="shell-card">
-        <div className="shell-dragstrip" style={DRAG} aria-hidden="true" />
+        {!useNativeTitleBar && <div className="shell-dragstrip" style={DRAG} aria-hidden="true" />}
         <div className="shell-content">
           <DataErrorBanner />
           <ScreenBoundary key={section + (projectId ?? '')}>

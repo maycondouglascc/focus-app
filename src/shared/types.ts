@@ -54,6 +54,8 @@ export interface Settings {
   monitorEnabled: boolean;
   /** Stop counting after this many minutes without keyboard or mouse input. */
   idleMinutes: number;
+  /** Keep counting when the focused app is playing audio/video or inhibiting idle. */
+  keepActiveOnMedia: boolean;
   browserTabs: boolean;
   claudeSessions: boolean;
   /** Hour the week view scrolls to when it opens. */
@@ -62,15 +64,32 @@ export interface Settings {
   onboarded: boolean;
 }
 
+export type MonitorBackendId = 'macos-jxa' | 'win32' | 'gnome-wayland' | 'sway' | 'hyprland' | 'kwin' | 'x11' | 'none';
+
+export type PermissionState = 'granted' | 'needs-permission' | 'needs-setup' | 'needs-relogin' | 'unavailable';
+
+export interface MonitorCapabilities {
+  windowTitles: boolean;
+  browserTabs: boolean;
+  idleDetection: boolean;
+  mediaActivity: boolean;
+}
+
 export interface MonitorStatus {
   enabled: boolean;
-  /** Accessibility access lets Focus read window titles (otherwise only the app name is known). */
+  /** True when Focus can read window titles (macOS Accessibility granted, Windows, or active Linux backend). */
   accessibility: boolean;
   idle: boolean;
   current: { app: string; detail: string; since: number } | null;
   claudeLastScan: number | null;
-  /** Available only inside the Mac app. */
+  /** Available inside the desktop app (macOS, Windows, or Linux). */
   native: boolean;
+  platform?: 'darwin' | 'linux' | 'win32';
+  backend?: MonitorBackendId;
+  sessionType?: 'darwin' | 'win32' | 'wayland' | 'x11' | 'unknown';
+  permissionState?: PermissionState;
+  setupHint?: string;
+  capabilities?: MonitorCapabilities;
 }
 
 export interface Range {

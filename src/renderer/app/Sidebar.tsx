@@ -4,6 +4,7 @@ import { entryMs } from '@/renderer/lib/stats';
 import { addDays, startOfWeek } from '@/renderer/lib/time';
 import { hm } from '@/renderer/lib/format';
 import { useNow } from '@/renderer/lib/useNow';
+import { useNativeTitleBar } from '@/renderer/lib/platform';
 import { Icon, type IconName } from '@/renderer/components/Icon';
 
 export type Section = 'calendar' | 'activity' | 'reports' | 'projects' | 'project' | 'settings';
@@ -39,7 +40,7 @@ export function Sidebar({
 
   return (
     <nav aria-label="Primary" className="shell-sidebar">
-      <div className="shell-sidebar-drag" style={DRAG}>
+      <div className="shell-sidebar-drag" style={useNativeTitleBar ? undefined : DRAG}>
         <span className="shell-brand">Focus</span>
       </div>
 

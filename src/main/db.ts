@@ -289,6 +289,18 @@ export const activity = {
   setDetail(id: number, detail: string) {
     db().prepare('UPDATE activity SET detail = ? WHERE id = ?').run(detail, id);
   },
+  remove(ids: number[]) {
+    const clean = [...new Set(ids.filter((id) => Number.isInteger(id) && id > 0))];
+    if (clean.length === 0) return;
+    db().transaction(() => {
+      for (let i = 0; i < clean.length; i += 500) {
+        const chunk = clean.slice(i, i + 500);
+        const placeholders = chunk.map(() => '?').join(', ');
+        db().prepare(`DELETE FROM activity WHERE id IN (${placeholders})`).run(...chunk);
+        db().prepare(`UPDATE claude_sessions SET activity_id = NULL WHERE activity_id IN (${placeholders})`).run(...chunk);
+      }
+    })();
+  },
   clear() {
     db().exec('DELETE FROM activity; DELETE FROM claude_files; DELETE FROM claude_sessions;');
   },
@@ -310,6 +322,7 @@ const DEFAULTS = (): Settings => ({
   currency: defaultCurrency(),
   monitorEnabled: true,
   idleMinutes: 3,
+  keepActiveOnMedia: true,
   browserTabs: true,
   claudeSessions: true,
   dayStartHour: 8,

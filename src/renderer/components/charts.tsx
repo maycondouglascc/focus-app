@@ -215,6 +215,7 @@ export function ShareRow({
   color,
   right,
   extra,
+  action,
   selected,
   onClick,
 }: {
@@ -225,6 +226,7 @@ export function ShareRow({
   color: string;
   right: ReactNode;
   extra?: ReactNode;
+  action?: ReactNode;
   selected?: boolean;
   onClick?: () => void;
 }) {
@@ -233,7 +235,8 @@ export function ShareRow({
       <div className="fo-share-top">
         <span className="fo-share-label">{label}</span>
         {extra}
-        <span className="fo-share-right">{right}</span>
+        {right !== null && right !== undefined && <span className="fo-share-right">{right}</span>}
+        {action}
       </div>
       <div className="fo-share-track">
         <span style={{ width: `${max ? Math.max(0.6, (value / max) * 100) : 0}%`, background: color }} />
